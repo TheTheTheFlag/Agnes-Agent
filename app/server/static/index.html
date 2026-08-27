@@ -829,7 +829,19 @@
             return div;
         }
 
+        // 防重入：一次只允许一个发送（IME Enter、双击等重复触发直接忽略）
+        let _chatSending = false;
         async function sendChat() {
+            if (_chatSending) return;
+            _chatSending = true;
+            try {
+                await _sendChatInner();
+            } finally {
+                _chatSending = false;
+            }
+        }
+
+        async function _sendChatInner() {
             const input = document.getElementById('chatInput');
             const text = input.value.trim();
             if (!text) return;
