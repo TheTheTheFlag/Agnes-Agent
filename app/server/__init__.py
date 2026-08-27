@@ -235,7 +235,7 @@ def _get_sched_graph():
     """调度专用 graph：在调用线程（调度线程）内首次构建，connection 与主线程隔离。"""
     global _SCHED_GRAPH
     if _SCHED_GRAPH is None:
-        from app.graph import build_graph
+        from app.graph.builder import build_graph
         _SCHED_GRAPH = build_graph()
     return _SCHED_GRAPH
 
@@ -246,7 +246,7 @@ def _sched_run_task(task: dict):
     with _SCHED_LOCK:  # 防止重入
         try:
             import uuid as _uid
-            from app.graph import build_graph
+            from app.graph.builder import build_graph
             g = _get_sched_graph()
             tid = task.get("thread_id") or _uid.uuid4().hex
             config = {"configurable": {"thread_id": tid}}

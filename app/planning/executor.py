@@ -150,6 +150,11 @@ def create_executor_node(llm, tools_list):
         all_done = all(s["status"] in ("done", "failed") for s in updated_subtasks)
         if all_done:
             print("[Executor] 所有子任务已完成，标记 plan 为 done")
+            # 同步更新 DB 主任务状态（子任务全 done 后主任务不应停留在 planning/executing）
+            try:
+                mm.update_task_plan_status(task_plan_id, "completed")
+            except Exception:
+                pass
             if state.get("task_plan"):
                 # 必须显式 return 才能让 LangGraph 把状态写回 checkpoint，
                 # 否则 in-memory 改动会被下一次 state 读取忽略，触发环。

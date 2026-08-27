@@ -122,6 +122,10 @@ class ReActLoop:
                                 state[key] = value
                     if not has_tool_msg:
                         messages.append(ToolMessage(content=json.dumps({"status": "success"}), tool_call_id=tool_id))
+                    # 关键：工具返回 pending_plan（如 request_planning）后，规划请求已提交，
+                    # 应立即终止 ReAct 循环，避免模型继续调工具/重复规划（任务重复执行的根因）。
+                    if state is not None and state.get("pending_plan"):
+                        return {"final_answer": "已提交规划请求，进入规划流程。", "iteration_count": iteration}
                 else:
                     # 优先用 str()，因为 tavily 等工具可能返回 Document / dict 等非 JSON 可序列化对象
                     if isinstance(result, str):

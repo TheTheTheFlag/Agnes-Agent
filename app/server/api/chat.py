@@ -99,7 +99,20 @@ async def chat_endpoint(payload: dict):
                                         sync_q.put({"step": "approval", "data": {"question": str(ex), "command": "", "mode": "per_ask"}})
                                     # interrupt 后 graph 暂停，本流到此结束（用户操作后走 /api/chat resume）
                                     break
-                                sync_q.put({"step": "node", "name": node, "phase": "start"})
+                                # node 事件附带具体信息：planner 子任务数、executor 子任务描述等（供前端 tree 展示）
+                                node_info = {}
+                                if node == "planner" and isinstance(upd, dict):
+                                    tp = upd.get("task_plan")
+                                    if tp:
+                                        subs = getattr(tp, "subtasks", None) or []
+                                        node_info = {"subtask_count": len(subs),
+                                                    "goal": getattr(tp, "goal", "")[:80]}
+                                elif node == "executor" and isinstance(upd, dict):
+                                    tp = upd.get("task_plan")
+                                    if tp:
+                                        subs = getattr(tp, "subtasks", None) or []
+                                        node_info = {"subtasks": [{"id": getattr(s, "id", ""), "desc": getattr(s, "description", "")[:40], "status": getattr(s, "status", "")} for s in subs]}
+                                sync_q.put({"step": "node", "name": node, "phase": "start", "info": node_info})
                                 # 提取节点返回的最终 AIMessage（最可靠的"本轮最终回复"，用于兜底）
                                 if isinstance(upd, dict) and isinstance(upd.get("messages"), list):
                                     # 先收集 AIMessage 的 tool_calls 映射（tool_call_id -> 工具名）
