@@ -162,3 +162,17 @@ def load_prompt_template() -> str:
         return f.read()
 
 
+
+
+def _tool_params_summary(name: str, params: dict) -> str:
+    """提取工具参数的关键摘要（供命令历史/审计记录）。"""
+    if not isinstance(params, dict):
+        return str(params)[:100]
+    for key in ("command", "path", "query", "pattern", "keyword", "directory", "file_path"):
+        if key in params:
+            v = str(params[key])
+            return v if len(v) <= 120 else v[:120] + "..."
+    try:
+        return json.dumps(params, ensure_ascii=False)[:120]
+    except Exception:
+        return str(params)[:120]

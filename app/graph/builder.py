@@ -20,7 +20,7 @@ from openai import RateLimitError
 from app.graph.state import State, TaskPlan
 from app.graph.utils import (count_tokens, retry_llm_call, parse_tool_calls_from_content,
     ensure_tool_calls, compress_messages, ensure_token_limit, sync_state_to_db, load_prompt_template,
-    MODEL_CONTEXT_LIMIT, TOKEN_LIMIT, KEEP_RECENT, MAX_TOOL_CALL_ROUNDS)
+    MODEL_CONTEXT_LIMIT, TOKEN_LIMIT, KEEP_RECENT, MAX_TOOL_CALL_ROUNDS, _tool_params_summary)
 from app.tools import tools, request_planning
 from app.llm import create_llm
 from app.memory import MemoryManager
@@ -169,6 +169,16 @@ def chatbot(state: State, config: RunnableConfig):
                 mm.cache_knowledge(source="tavily", query=query, content=str(result)[:8000])
         except Exception as e:
             logger.error(f"写入失败: {e}")
+        # 审计：所有工具调用都记入操作历史（便于完整审查 Agent 行为）
+        try:
+            if name not in ("update_user_preference", "update_user_info", "tavily_search"):
+                # 已在上方分支记录的命令/文件操作不再重复；其余工具（ls/read/glob/grep/memory 等）补记
+                summary = _tool_params_summary(name, params)
+                success = not str(result).startswith("执行失败") and not str(result).startswith("工具执行错误")
+                mm.add_command_history(thread_id, f"{name}: {summary}", success=success,
+                                       stdout_preview=str(result)[:500])
+        except Exception:
+            pass
         add_log_entry("info", f"工具: {name}", {"params": params, "result_preview": str(result)[:200]})
         add_event("tool_call", {"name": name, "params": params}, thread_id)
 
@@ -291,25 +301,24 @@ def route_after_chatbot(state: State) -> str:
 def route_after_executor(state: State):
     plan = state.get("task_plan")
     if plan:
-        failed = any(s.status == "failed" for s in plan.subtasks)
-        if failed:
-            # 总重规划次数上限（跨 plan 累计，防死循环）
-            replans = state.get("_total_replans", 0)
-            if replans >= 2:
-                print("⚠️ 重规划次数已达上限，带失败结果进入验证（避免死循环）")
-                return "validator"
-            fail_count = state.get("_executor_fail_count", 0)
-            if fail_count >= 2:
-                state["_total_replans"] = replans + 1
-                state["_executor_fail_count"] = 0
-                print("↩️ 重规划（失败次数过多）")
-                return "planner"
-            state["_executor_fail_count"] = fail_count + 1
+        subtasks = plan.subtasks
+        pending = [s for s in subtasks if s.status == "pending"]
+        failed = [s for s in subtasks if s.status == "failed"]
+        # 1) 还有未执行的子任务 → 继续执行（单个失败不影响整体推进）
+        if pending:
             return "executor"
-        if all(s.status == "done" for s in plan.subtasks):
+        # 2) 全部成功 → 验证
+        if not failed:
             print("✅ 进入验证")
             return "validator"
-        return "executor"
+        # 3) 有失败且无 pending：部分失败。重规划未超限则重规划一次，否则带失败进验证收敛
+        replans = state.get("_total_replans", 0)
+        if replans >= 2:
+            print("⚠️ 重规划已达上限，带部分失败进入验证（避免死循环）")
+            return "validator"
+        state["_total_replans"] = replans + 1
+        print(f"↩️ 有 {len(failed)} 个子任务失败，重规划（第 {replans + 1} 次）")
+        return "planner"
     return "executor"
 
 

@@ -6,6 +6,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from langchain_core.messages import HumanMessage, ToolMessage, SystemMessage
 from langgraph.types import interrupt
 from app.graph.state import State, Subtask
+from app.graph.utils import _tool_params_summary
 from app.planning.react_loop import ReActLoop
 from app.server import add_log_entry, add_event
 from app.config import DB_PATH
@@ -100,7 +101,13 @@ def create_executor_node(llm, tools_list):
 目标：{goal}
 {artifacts_context}
 完成标准：文件创建且大小>0。
-输出：FINAL_ANSWER: [结果] 并附上文件名。
+
+执行纪律（必须遵守）：
+1. 探索（ls/read/grep/搜索）最多 3 次工具调用，之后必须直接撰写内容。
+2. 外部搜索（tavily）不可用时，基于你的既有知识直接撰写，不要反复重试搜索。
+3. 必须调用 write_file 产出文件到 deliverables 目录，文件大小 > 0 才算完成。
+4. 不要在没有产出文件的情况下结束；如果已完成撰写但文件没保存，立即补一次 write_file。
+5. 输出：FINAL_ANSWER: [结果] 并附上文件名。
 """
 
         initial_messages = [
@@ -121,7 +128,7 @@ def create_executor_node(llm, tools_list):
             return True
 
         def _on_tool_after(name, params, result):
-            # 记录操作历史（命令/文件操作）便于审查
+            # 记录操作历史（所有工具调用审计）
             try:
                 if name in ("execute_command", "system_command"):
                     mm.add_command_history(thread_id, params.get('command', ''), success=True,
@@ -130,6 +137,11 @@ def create_executor_node(llm, tools_list):
                     op = {"write_file": "写入文件", "edit_file": "编辑文件", "delete_file": "删除文件"}.get(name, name)
                     mm.add_command_history(thread_id, f"{op}: {params.get('path', '')}", success=True,
                                            stdout_preview=str(result)[:2000])
+                else:
+                    # 其余工具（ls/read/glob/grep/tavily/memory 等）补记审计
+                    summary = _tool_params_summary(name, params)
+                    mm.add_command_history(thread_id, f"{name}: {summary}", success=True,
+                                           stdout_preview=str(result)[:500])
             except Exception:
                 pass
             add_log_entry("info", f"工具: {name}", {"params": params, "result_preview": str(result)[:200]})
@@ -156,19 +168,26 @@ def create_executor_node(llm, tools_list):
             return True, None
 
         loop = ReActLoop(llm_with_tools, max_iterations=8)
-        try:
-            result = loop.run(
-                messages=initial_messages, tools=tools_list, state=state,
-                on_tool_before=_on_tool_before, on_tool_after=_on_tool_after,
-                interrupt_handler=_interrupt_handler,
-            )
-            final_result = result["final_answer"]
-            artifacts = extract_artifacts(final_result)
-            status = "done"
-        except Exception as e:
-            final_result = f"执行失败: {e}"
-            artifacts = []
-            status = "failed"
+        final_result = None
+        artifacts = []
+        status = "failed"
+        # 子任务执行：瞬时 LLM/工具失败自动重试（最多 2 次），避免一次失败就触发重规划
+        for attempt in range(3):
+            try:
+                result = loop.run(
+                    messages=initial_messages, tools=tools_list, state=state,
+                    on_tool_before=_on_tool_before, on_tool_after=_on_tool_after,
+                    interrupt_handler=_interrupt_handler,
+                )
+                final_result = result["final_answer"]
+                artifacts = extract_artifacts(final_result)
+                status = "done"
+                break
+            except Exception as e:
+                print(f"  ⚠️ 子任务执行异常（第 {attempt + 1}/3 次）: {type(e).__name__}: {str(e)[:120]}")
+                final_result = f"执行失败: {e}"
+                artifacts = []
+                status = "failed"
 
         mm.update_subtask_status(task_plan_id, sub_id, status, result=final_result, artifacts=artifacts)
 
