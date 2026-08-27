@@ -1,0 +1,4 @@
+INTERRUPT 出现
+RESUME 开始
+RESUME 完成
+USER 消息数: 2

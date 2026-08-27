@@ -517,12 +517,12 @@
                     return;
                 }
                 c.innerHTML = files.map(f => `
-                    <div class="thread-row" onclick="previewDeliverable('${escapeHtml(f.name)}')" title="点击预览">
-                        <div>
+                    <div class="thread-row" style="cursor:default;">
+                        <div style="flex:1;" onclick="previewDeliverable('${escapeHtml(f.name)}')" title="点击预览">
                             <div class="tid" style="color:var(--green);">📄 ${escapeHtml(f.name)}</div>
                             <div class="meta">${f.size} 字节</div>
                         </div>
-                        <div class="meta">查看 ▸</div>
+                        <button class="btn" style="margin-left:8px;" onclick="event.stopPropagation(); downloadDeliverable('${escapeHtml(f.name)}')">⬇ 下载</button>
                     </div>`).join('');
             } catch (e) {
                 c.innerHTML = '<div class="empty-state">加载失败: ' + escapeHtml(e.message) + '</div>';
