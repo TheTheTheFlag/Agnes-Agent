@@ -293,8 +293,15 @@ def route_after_executor(state: State):
     if plan:
         failed = any(s.status == "failed" for s in plan.subtasks)
         if failed:
+            # 总重规划次数上限（跨 plan 累计，防死循环）
+            replans = state.get("_total_replans", 0)
+            if replans >= 2:
+                print("⚠️ 重规划次数已达上限，带失败结果进入验证（避免死循环）")
+                return "validator"
             fail_count = state.get("_executor_fail_count", 0)
             if fail_count >= 2:
+                state["_total_replans"] = replans + 1
+                state["_executor_fail_count"] = 0
                 print("↩️ 重规划（失败次数过多）")
                 return "planner"
             state["_executor_fail_count"] = fail_count + 1
@@ -309,6 +316,11 @@ def route_after_executor(state: State):
 def route_after_validator(state: State):
     if state.get("_validation_passed", False):
         return "summarizer"
+    replans = state.get("_total_replans", 0)
+    if replans >= 2:
+        print("⚠️ 验证失败但重规划已达上限，进入汇总")
+        return "summarizer"
+    state["_total_replans"] = replans + 1
     print("↩️ 验证失败，重规划")
     return "planner"
 

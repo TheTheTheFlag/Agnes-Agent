@@ -4,6 +4,7 @@ import sys, os, json, re
 from typing import List
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from langchain_core.messages import HumanMessage, ToolMessage, SystemMessage
+from langgraph.types import interrupt
 from app.graph.state import State, Subtask
 from app.planning.react_loop import ReActLoop
 from app.server import add_log_entry, add_event
@@ -107,9 +108,60 @@ def create_executor_node(llm, tools_list):
             HumanMessage(content=f"执行子任务：{description}")
         ]
 
+        # 需审批的工具（与 chatbot 一致）：命令执行 + 文件写/改/删
+        _APPROVAL_TOOLS = ("execute_command", "write_file", "edit_file", "delete_file")
+
+        def _on_tool_before(name, params):
+            if name in ("execute_command",):
+                cmd = params.get('command', '')
+                for d in ['rm -rf /', 'dd ', 'mkfs', 'format', 'shutdown']:
+                    if d in cmd:
+                        print(f"⚠️ [安全] 阻止: {cmd}")
+                        return False
+            return True
+
+        def _on_tool_after(name, params, result):
+            # 记录操作历史（命令/文件操作）便于审查
+            try:
+                if name in ("execute_command", "system_command"):
+                    mm.add_command_history(thread_id, params.get('command', ''), success=True,
+                                           stdout_preview=str(result)[:2000])
+                elif name in ("write_file", "edit_file", "delete_file"):
+                    op = {"write_file": "写入文件", "edit_file": "编辑文件", "delete_file": "删除文件"}.get(name, name)
+                    mm.add_command_history(thread_id, f"{op}: {params.get('path', '')}", success=True,
+                                           stdout_preview=str(result)[:2000])
+            except Exception:
+                pass
+            add_log_entry("info", f"工具: {name}", {"params": params, "result_preview": str(result)[:200]})
+            add_event("tool_call", {"name": name, "params": params}, thread_id)
+
+        def _interrupt_handler(name, params):
+            if name in _APPROVAL_TOOLS:
+                mode = state.get("approval_mode", "per_ask")
+                if mode == "per_ask":
+                    desc = params.get('command') or params.get('path') or ''
+                    resp = interrupt({"question": f"执行操作？\n{name}: {desc}", "command": desc, "mode": mode})
+                    allow = resp.get("allow", False)
+                    new_mode = resp.get("mode")
+                    if new_mode and new_mode in ("per_ask", "session_allow", "always_allow"):
+                        state["approval_mode"] = new_mode
+                        print(f"[审批模式] {new_mode}")
+                    if not allow:
+                        try:
+                            mm.add_command_history(thread_id, f"{name}: {desc}", success=False,
+                                                   stdout_preview="[用户拒绝]")
+                        except Exception:
+                            pass
+                    return allow, None
+            return True, None
+
         loop = ReActLoop(llm_with_tools, max_iterations=8)
         try:
-            result = loop.run(messages=initial_messages, tools=tools_list, state=state)
+            result = loop.run(
+                messages=initial_messages, tools=tools_list, state=state,
+                on_tool_before=_on_tool_before, on_tool_after=_on_tool_after,
+                interrupt_handler=_interrupt_handler,
+            )
             final_result = result["final_answer"]
             artifacts = extract_artifacts(final_result)
             status = "done"

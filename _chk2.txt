@@ -1,6 +1,0 @@
-openMdbModal: True
-edit-mode: True
-prefill: True
-submit-edit: True
-pk-confirm: True
-no-prompt: True

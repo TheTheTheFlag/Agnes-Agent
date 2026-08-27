@@ -1,4 +1,0 @@
-tree卡片风格: False
-工具入树: True
-tool_chunk新格式: True
-summarizer→END: True

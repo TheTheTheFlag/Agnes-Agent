@@ -41,6 +41,7 @@ class State(TypedDict):
     task_plan: Optional[TaskPlan]
     _planning_triggered: bool
     _executor_fail_count: int
+    _total_replans: int
     _validation_passed: bool
 
     # 审批模式："per_ask" | "session_allow" | "always_allow"
