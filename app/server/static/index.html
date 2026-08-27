@@ -1,0 +1,1617 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agnes Agent</title>
+    <script src="/static/marked.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        :root {
+            --pink: #ff5c8a; --orange: #ff9f1c; --purple: #a663cc; --blue: #4cc9f0;
+            --yellow: #ffd166; --green: #06d6a0; --red: #ef476f;
+            --ink: #2d2a3e; --ink-soft: #6b6480; --card: #ffffff;
+            --line: #e8e3f0;
+        }
+        body { font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif; background: linear-gradient(135deg, #ffe3ee 0%, #e8e3ff 40%, #d9f4ff 100%); color: var(--ink); padding: 20px; min-height: 100vh; }
+        .app { display: flex; gap: 16px; align-items: stretch; max-width: 1600px; margin: 0 auto; }
+        .main { flex: 1; min-width: 0; }
+
+        /* ===== 侧边栏（会话列表）===== */
+        .sidebar { width: 264px; flex-shrink: 0; background: rgba(255,255,255,0.72); backdrop-filter: blur(8px); border: 1px solid var(--line); border-radius: 16px; padding: 14px; display: flex; flex-direction: column; max-height: calc(100vh - 40px); position: sticky; top: 20px; box-shadow: 0 8px 24px rgba(166,99,204,0.12); }
+        .sidebar-title { font-size: 14px; font-weight: 700; color: var(--ink); margin-bottom: 10px; display: flex; align-items: center; gap: 6px; }
+        .new-chat-btn { width: 100%; padding: 10px; border: none; border-radius: 12px; cursor: pointer; font-size: 13px; font-weight: 700; color: #fff; background: linear-gradient(135deg, var(--pink), var(--orange)); box-shadow: 0 4px 12px rgba(255,92,138,0.35); transition: transform 0.15s, box-shadow 0.15s; margin-bottom: 10px; }
+        .new-chat-btn:hover { transform: translateY(-1px); box-shadow: 0 6px 16px rgba(255,92,138,0.45); }
+        .session-list { overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 6px; }
+        .session-item { display: flex; align-items: center; gap: 8px; padding: 9px 10px; border-radius: 10px; cursor: pointer; border: 1px solid transparent; background: transparent; transition: all 0.15s; }
+        .session-item:hover { background: rgba(255,92,138,0.08); }
+        .session-item.active { background: linear-gradient(135deg, rgba(255,92,138,0.14), rgba(166,99,204,0.14)); border-color: rgba(255,92,138,0.35); }
+        .session-item .s-emoji { font-size: 15px; }
+        .session-item .s-info { flex: 1; min-width: 0; }
+        .session-item .s-name { font-size: 12px; font-weight: 600; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .session-item .s-meta { font-size: 10px; color: var(--ink-soft); }
+        .session-item .s-del { background: none; border: none; color: var(--ink-soft); cursor: pointer; font-size: 13px; padding: 2px 4px; border-radius: 6px; opacity: 0; transition: opacity 0.15s; }
+        .session-item:hover .s-del { opacity: 1; }
+        .session-item .s-del:hover { color: var(--red); background: rgba(239,71,111,0.12); }
+        .session-empty { color: var(--ink-soft); font-size: 12px; text-align: center; padding: 24px 8px; }
+
+        .header { display: flex; justify-content: space-between; align-items: center; padding-bottom: 16px; border-bottom: 1px solid var(--line); margin-bottom: 16px; flex-wrap: wrap; gap: 10px; }
+        .header h1 { font-size: 22px; font-weight: 800; background: linear-gradient(135deg, var(--pink), var(--purple), var(--blue)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+        .header .status { display: flex; align-items: center; gap: 12px; font-size: 13px; color: var(--ink-soft); }
+        .status-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; background: var(--green); animation: pulse 2s infinite; box-shadow: 0 0 8px rgba(6,214,160,0.6); }
+        @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+        .stats { display: flex; gap: 10px; font-size: 12px; color: var(--ink-soft); flex-wrap: wrap; margin-bottom: 14px; }
+        .stats span { background: rgba(255,255,255,0.7); padding: 4px 12px; border-radius: 12px; border: 1px solid var(--line); }
+        .tabs { display: flex; gap: 6px; border-bottom: 1px solid var(--line); margin-bottom: 16px; flex-wrap: wrap; }
+        .tab { padding: 9px 18px; cursor: pointer; background: rgba(255,255,255,0.55); color: var(--ink-soft); border: 1px solid var(--line); border-bottom: none; border-radius: 12px 12px 0 0; font-size: 13px; font-weight: 600; transition: all 0.2s; }
+        .tab:hover { color: var(--ink); background: rgba(255,255,255,0.85); }
+        .tab.active { color: #fff; background: linear-gradient(135deg, var(--pink), var(--purple)); border-color: transparent; box-shadow: 0 4px 12px rgba(255,92,138,0.3); }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        .panel { background: rgba(255,255,255,0.85); border-radius: 14px; border: 1px solid var(--line); padding: 16px; margin-bottom: 14px; box-shadow: 0 4px 16px rgba(166,99,204,0.08); }
+        .panel-title { font-size: 12px; font-weight: 700; color: var(--ink-soft); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; }
+        .panel-title .badge { background: linear-gradient(135deg, rgba(255,92,138,0.12), rgba(166,99,204,0.12)); padding: 2px 10px; border-radius: 12px; font-size: 11px; font-weight: 600; color: var(--purple); }
+        .code-block { background: #2d2a3e; border-radius: 10px; padding: 16px; font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 12px; line-height: 1.6; overflow: auto; max-height: 500px; white-space: pre-wrap; word-break: break-all; color: #f0edf8; }
+        #mdbData.code-block { background: #fff; color: var(--ink); padding: 8px; }
+        #mdbData table th, #mdbData table td { color: var(--ink); }
+        .log-entry { padding: 6px 0; border-bottom: 1px solid var(--line); font-size: 13px; font-family: monospace; display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }
+        .log-entry .time { color: var(--ink-soft); font-size: 11px; min-width: 80px; }
+        .log-entry .level { font-weight: 700; min-width: 50px; }
+        .log-entry .level.info { color: var(--blue); }
+        .log-entry .level.warn { color: var(--orange); }
+        .log-entry .level.error { color: var(--red); }
+        .log-entry .level.success { color: var(--green); }
+        .log-entry .message { color: var(--ink); word-break: break-word; }
+        .log-container { max-height: 500px; overflow: auto; }
+        .empty-state { color: var(--ink-soft); text-align: center; padding: 40px 20px; font-size: 14px; }
+        .btn { background: #fff; border: 1px solid var(--line); color: var(--ink); padding: 6px 16px; border-radius: 10px; cursor: pointer; font-size: 12px; font-weight: 600; transition: all 0.2s; }
+        .btn:hover { border-color: var(--pink); color: var(--pink); }
+        .btn-danger { color: var(--red); border-color: rgba(239,71,111,0.4); }
+        .btn-danger:hover { background: var(--red); color: #fff; }
+        .flex-between { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; }
+        .refresh-btn { background: linear-gradient(135deg, var(--green), var(--blue)); border: none; color: #fff; padding: 4px 14px; border-radius: 10px; cursor: pointer; font-size: 12px; font-weight: 700; box-shadow: 0 3px 10px rgba(6,214,160,0.3); }
+        .refresh-btn:hover { filter: brightness(1.08); }
+        @media (max-width: 900px) { .app { flex-direction: column; } .sidebar { width: 100%; max-height: 240px; position: static; } body { padding: 10px; } .header h1 { font-size: 18px; } .tab { padding: 8px 12px; font-size: 12px; } }
+
+        /* 5 层记忆专用样式 */
+        .memory-section { margin-bottom: 14px; }
+        .memory-label { font-size: 12px; font-weight: 700; color: var(--purple); margin-bottom: 6px; padding: 4px 8px; background: rgba(166,99,204,0.1); border-left: 3px solid var(--purple); border-radius: 4px; }
+        .role-user { color: var(--blue); font-weight: 700; }
+        .role-assistant { color: var(--green); font-weight: 700; }
+        .role-tool { color: var(--purple); font-weight: 700; }
+        .role-system { color: var(--ink-soft); }
+        .msg-card { background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; font-size: 12px; box-shadow: 0 2px 6px rgba(166,99,204,0.06); }
+        .msg-card .head { display: flex; gap: 10px; align-items: baseline; margin-bottom: 6px; font-size: 11px; color: var(--ink-soft); }
+        .msg-card .body { white-space: pre-wrap; word-break: break-word; color: var(--ink); font-family: monospace; }
+        .msg-card .body.tool-call { color: var(--purple); }
+        .thread-row { padding: 8px 12px; border-bottom: 1px solid var(--line); cursor: pointer; display: flex; justify-content: space-between; align-items: baseline; gap: 10px; font-size: 12px; border-radius: 8px; }
+        .thread-row:hover { background: rgba(255,92,138,0.06); }
+        .thread-row .tid { font-family: monospace; color: var(--blue); word-break: break-all; }
+        .thread-row .meta { color: var(--ink-soft); font-size: 11px; }
+
+        /* 主对话窗口 */
+        .chat-wrap { display: flex; flex-direction: column; height: calc(100vh - 220px); min-height: 500px; background: rgba(255,255,255,0.85); border: 1px solid var(--line); border-radius: 16px; box-shadow: 0 4px 16px rgba(166,99,204,0.08); }
+        .chat-toolbar { padding: 10px 16px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--ink-soft); }
+        .chat-messages { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 14px; }
+        .chat-input-wrap { border-top: 1px solid var(--line); padding: 10px; position: relative; }
+        .chat-status-line { display: flex; align-items: center; gap: 8px; padding: 4px 2px 8px; font-size: 12px; color: var(--ink-soft); min-height: 20px; }
+        .chat-input-wrap textarea { width: 100%; background: #fff; color: var(--ink); border: 1px solid var(--line); border-radius: 10px; padding: 10px; font-size: 14px; font-family: inherit; resize: vertical; }
+        .chat-input-wrap textarea:focus { outline: none; border-color: var(--pink); box-shadow: 0 0 0 3px rgba(255,92,138,0.15); }
+        .chat-actions { display: flex; gap: 8px; margin-top: 8px; justify-content: flex-end; }
+        .chat-suggest { position: absolute; bottom: 100%; left: 0; right: 0; background: #fff; border: 1px solid var(--line); border-radius: 12px 12px 0 0; max-height: 240px; overflow-y: auto; z-index: 10; box-shadow: 0 -4px 16px rgba(166,99,204,0.12); }
+        .chat-suggest-item { padding: 8px 14px; cursor: pointer; font-size: 13px; border-bottom: 1px solid var(--line); color: var(--ink); }
+        .chat-suggest-item:hover, .chat-suggest-item.active { background: rgba(255,92,138,0.08); }
+        .chat-suggest-item .desc { color: var(--ink-soft); font-size: 11px; margin-left: 10px; }
+        .chat-bubble { max-width: 85%; padding: 10px 14px; border-radius: 16px; line-height: 1.5; font-size: 14px; word-break: break-word; white-space: pre-wrap; box-shadow: 0 2px 8px rgba(166,99,204,0.1); }
+        .chat-bubble.user { background: linear-gradient(135deg, var(--pink), var(--purple)); color: #fff; align-self: flex-end; border: none; }
+        .chat-bubble.assistant { background: linear-gradient(135deg, var(--green), var(--blue)); color: #fff; align-self: flex-start; border: none; }
+        .chat-bubble.system { background: rgba(255,209,102,0.25); color: #8a6d1f; align-self: center; border: 1px solid rgba(255,209,102,0.5); font-size: 12px; }
+        .chat-bubble.error { background: rgba(239,71,111,0.12); align-self: center; border: 1px solid rgba(239,71,111,0.5); color: var(--red); }
+        .chat-bubble.tool { background: rgba(166,99,204,0.1); align-self: stretch; border: 1px solid rgba(166,99,204,0.35); font-family: monospace; font-size: 12px; max-width: 95%; color: var(--ink); }
+        .chat-bubble .meta { font-size: 11px; color: rgba(255,255,255,0.75); margin-top: 6px; padding-top: 6px; border-top: 1px solid rgba(255,255,255,0.2); }
+        .chat-bubble.thinking { opacity: 0.75; font-style: italic; }
+        /* 状态栏 spinner */
+        .chat-status-dot { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--pink); border-top-color: transparent; display: inline-block; animation: status-spin 0.8s linear infinite; vertical-align: middle; }
+        @keyframes status-spin { to { transform: rotate(360deg); } }
+        .msg-slow { border-color: var(--orange) !important; background: rgba(255,159,28,0.12) !important; }
+        .msg-err { border-color: var(--red) !important; background: rgba(239,71,111,0.12) !important; }
+
+        /* Markdown 渲染样式（浅色主题） */
+        .md-body h1, .md-body h2, .md-body h3, .md-body h4 { color: var(--purple); margin: 12px 0 8px; font-weight: 700; }
+        .md-body h1 { font-size: 1.4em; border-bottom: 1px solid var(--line); padding-bottom: 4px; }
+        .md-body h2 { font-size: 1.2em; }
+        .md-body h3 { font-size: 1.05em; }
+        .md-body p { margin: 6px 0; }
+        .md-body ul, .md-body ol { margin: 6px 0 6px 22px; }
+        .md-body li { margin: 2px 0; }
+        .md-body a { color: var(--blue); text-decoration: none; font-weight: 600; }
+        .md-body a:hover { text-decoration: underline; }
+        .md-body blockquote { border-left: 3px solid var(--yellow); padding: 4px 12px; color: var(--ink-soft); background: rgba(255,209,102,0.15); margin: 6px 0; border-radius: 0 6px 6px 0; }
+        .md-body code { background: rgba(255,92,138,0.1); color: var(--pink); padding: 2px 6px; border-radius: 4px; font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 0.9em; }
+        .md-body pre { background: #2d2a3e; border: 1px solid #3d3852; border-radius: 10px; padding: 12px 14px; overflow-x: auto; position: relative; margin: 8px 0; }
+        .md-body pre code { background: transparent; color: #f0edf8; padding: 0; font-size: 13px; }
+        .md-body table { border-collapse: collapse; margin: 8px 0; font-size: 12px; }
+        .md-body th, .md-body td { border: 1px solid var(--line); padding: 4px 10px; }
+        .md-body th { background: rgba(166,99,204,0.08); }
+        .md-body hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }
+        .md-body strong { color: var(--ink); }
+
+        /* 在彩色气泡内：覆盖 md-body 文字为白色，确保可见 */
+        .chat-bubble.user .md-body,
+        .chat-bubble.user .md-body h1, .chat-bubble.user .md-body h2, .chat-bubble.user .md-body h3, .chat-bubble.user .md-body h4,
+        .chat-bubble.user .md-body p, .chat-bubble.user .md-body li, .chat-bubble.user .md-body strong { color: #fff; }
+        .chat-bubble.user .md-body a { color: #ffe4f0; text-decoration: underline; }
+        .chat-bubble.user .md-body code { background: rgba(255,255,255,0.22); color: #fff; }
+        .chat-bubble.user .md-body blockquote { background: rgba(255,255,255,0.12); color: #ffe4f0; border-left-color: rgba(255,255,255,0.5); }
+        .chat-bubble.assistant .md-body,
+        .chat-bubble.assistant .md-body h1, .chat-bubble.assistant .md-body h2, .chat-bubble.assistant .md-body h3, .chat-bubble.assistant .md-body h4,
+        .chat-bubble.assistant .md-body p, .chat-bubble.assistant .md-body li, .chat-bubble.assistant .md-body strong { color: #fff; }
+        .chat-bubble.assistant .md-body a { color: #e0f7ff; text-decoration: underline; }
+        .chat-bubble.assistant .md-body code { background: rgba(255,255,255,0.22); color: #fff; }
+        .chat-bubble.assistant .md-body blockquote { background: rgba(255,255,255,0.12); color: #e0f7ff; border-left-color: rgba(255,255,255,0.5); }
+
+        /* 代码块悬浮复制按钮 */
+        .copy-btn { position: absolute; top: 6px; right: 6px; background: rgba(255,255,255,0.12); color: #d9d2ec; border: 1px solid rgba(255,255,255,0.2); padding: 3px 10px; border-radius: 6px; font-size: 11px; cursor: pointer; opacity: 0; transition: opacity 0.2s; }
+        .md-body pre:hover .copy-btn { opacity: 1; }
+        .copy-btn:hover { background: rgba(255,255,255,0.25); color: #fff; }
+        .copy-btn.copied { background: var(--green); color: #fff; border-color: var(--green); }
+
+        /* ===== 沉浸式布局 ===== */
+        body { padding: 16px; }
+        .app { max-width: 100%; height: calc(100vh - 32px); }
+        .main { display: flex; flex-direction: column; overflow: hidden; }
+        .stats { flex-shrink: 0; }
+
+        /* chat 全屏：占满 main 剩余空间 */
+        .chat-wrap { flex: 1; display: flex; flex-direction: column; height: calc(100vh - 210px); min-height: 420px; }
+
+        /* 抽屉浮层 */
+        .drawer-mask { display: none; position: fixed; inset: 0; background: rgba(45,42,62,0.4); backdrop-filter: blur(2px); z-index: 900; }
+        .drawer { position: fixed; top: 0; right: -80vw; width: 80vw; max-width: 80vw; height: 100vh; background: #fff; z-index: 950; box-shadow: -12px 0 40px rgba(45,42,62,0.25); transition: right 0.28s ease; display: flex; flex-direction: column; }
+        .drawer.open { right: 0; }
+        .drawer-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid var(--line); }
+        .drawer-title { font-size: 15px; font-weight: 800; color: var(--ink); background: linear-gradient(135deg, var(--pink), var(--purple)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+        .drawer-close { background: rgba(255,255,255,0.7); border: 1px solid var(--line); border-radius: 8px; width: 30px; height: 30px; cursor: pointer; color: var(--ink-soft); font-size: 14px; }
+        .drawer-close:hover { background: var(--line); color: var(--ink); }
+        .drawer-body { flex: 1; display: flex; min-height: 0; }
+        .drawer-nav { width: 130px; flex-shrink: 0; border-right: 1px solid var(--line); padding: 10px 8px; display: flex; flex-direction: column; gap: 4px; overflow-y: auto; }
+        .drawer-nav-item { text-align: left; padding: 9px 12px; border: none; background: transparent; border-radius: 10px; cursor: pointer; font-size: 13px; font-weight: 600; color: var(--ink-soft); transition: all 0.15s; }
+        .drawer-nav-item:hover { background: rgba(255,92,138,0.08); color: var(--ink); }
+        .drawer-nav-item.active { background: linear-gradient(135deg, var(--pink), var(--purple)); color: #fff; box-shadow: 0 3px 10px rgba(255,92,138,0.3); }
+        .drawer-content { flex: 1; min-width: 0; overflow-y: auto; padding: 16px; }
+        .drawer-btn { background: linear-gradient(135deg, var(--purple), var(--blue)); border: none; color: #fff; padding: 7px 16px; border-radius: 10px; cursor: pointer; font-size: 12px; font-weight: 700; box-shadow: 0 3px 10px rgba(166,99,204,0.35); }
+
+        /* 工具调用卡片（对话中可视化） */
+        .tool-card { align-self: stretch; margin: 4px 0; background: rgba(255,255,255,0.75); border: 1px solid var(--line); border-left: 3px solid var(--purple); border-radius: 10px; padding: 8px 12px; font-size: 12px; }
+        .tool-card .tc-head { display: flex; align-items: center; gap: 8px; font-weight: 700; color: var(--purple); }
+        .tool-card .tc-status { font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 8px; }
+        .tool-card .tc-status.running { background: rgba(255,159,28,0.15); color: var(--orange); }
+        .tool-card .tc-status.done { background: rgba(6,214,160,0.15); color: var(--green); }
+        .tool-card .tc-status.error { background: rgba(239,71,111,0.15); color: var(--red); }
+        .tool-card .tc-body { margin-top: 5px; color: var(--ink-soft); font-family: monospace; white-space: pre-wrap; word-break: break-all; max-height: 140px; overflow: auto; }
+        .tool-card .tc-body .tc-label { color: var(--purple); font-weight: 700; }
+    </style>
+</head>
+<body>
+    <div class="app">
+        <div class="sidebar">
+            <div class="sidebar-title">💬 会话</div>
+            <button class="new-chat-btn" onclick="newChat()">＋ 新建会话</button>
+            <div class="session-list" id="sessionList"><div class="session-empty">加载中...</div></div>
+        </div>
+        <div class="main">
+    <div class="header">
+        <div><h1>🤖 Agnes Agent</h1></div>
+        <div class="status">
+            <span class="status-dot"></span>
+            <span id="statusText">已连接</span>
+            <span id="lastUpdate" style="font-size:12px;color:var(--ink-soft);"></span>
+            <span style="font-size:12px;color:var(--ink-soft);" id="currentModelLabel">模型: -</span>
+            <button class="drawer-btn" onclick="openDrawer()">⚙ 面板</button>
+        </div>
+    </div>
+    <div class="stats">
+        <span>📊 State: <span id="statState">-</span></span>
+        <span>📝 日志: <span id="statLogs">-</span></span>
+        <span>📋 事件: <span id="statEvents">-</span></span>
+        <span>📄 提示词: <span id="statPrompt">-</span></span>
+    </div>
+
+    <!-- 抽屉：控制面板浮层（沉浸式聊天时收在右侧） -->
+    <div class="drawer-mask" id="drawerMask" onclick="closeDrawer()"></div>
+    <div class="drawer" id="drawer">
+        <div class="drawer-head">
+            <span class="drawer-title">⚙ 面板</span>
+            <button class="drawer-close" onclick="closeDrawer()">✕</button>
+        </div>
+        <div class="drawer-body">
+            <div class="drawer-nav" id="drawerNav"></div>
+            <div class="drawer-content" id="drawerContent"></div>
+        </div>
+    </div>
+
+    <div class="tab-content" id="tab-state">
+        <div class="panel">
+            <div class="panel-title"><span>当前 State</span><span class="badge" id="stateBadge">-</span></div>
+            <div class="code-block" id="stateContent">等待数据...</div>
+        </div>
+    </div>
+
+    <div class="tab-content active" id="tab-chat">
+        <div class="chat-wrap">
+            <div class="chat-toolbar">
+                <span id="chatThreadLabel" style="color:#8b949e;font-size:12px;">thread: -</span>
+                <span style="flex:1"></span>
+            </div>
+            <div class="chat-messages" id="chatMessages">
+                <div class="empty-state">输入消息开始对话，或输入 /help 查看命令</div>
+            </div>
+            <div class="chat-input-wrap">
+                <div class="chat-status-line">
+                    <span class="chat-status-dot" id="chatStatusDot" style="display:none;"></span>
+                    <span id="chatStatus" style="color:#8b949e;font-size:12px;">就绪</span>
+                </div>
+                <div class="chat-suggest" id="chatSuggest" style="display:none;"></div>
+                <textarea id="chatInput" rows="3" placeholder="输入消息，Enter 发送，Shift+Enter 换行；/ 触发命令"></textarea>
+                <div class="chat-actions">
+                    <button class="btn" onclick="stopChat()">⏹ 停止</button>
+                    <button class="refresh-btn" onclick="sendChat()">📤 发送 (Enter)</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="tab-content" id="tab-prompt">
+        <div class="panel">
+            <div class="panel-title"><span>系统提示词</span><span class="badge" id="promptBadge">-</span></div>
+            <div class="code-block" id="promptContent" style="max-height:700px;">等待数据...</div>
+        </div>
+    </div>
+    <div class="tab-content" id="tab-logs">
+        <div class="panel">
+            <div class="flex-between">
+                <div class="panel-title" style="margin-bottom:0;"><span>ReAct 日志</span><span class="badge" id="logBadge">-</span></div>
+                <button class="btn btn-danger" onclick="clearLogs()">清空</button>
+            </div>
+            <div class="log-container" id="logContainer"><div class="empty-state">暂无日志</div></div>
+        </div>
+    </div>
+    <div class="tab-content" id="tab-events">
+        <div class="panel">
+            <div class="panel-title"><span>事件流</span><span class="badge" id="eventBadge">-</span></div>
+            <div class="log-container" id="eventContainer"><div class="empty-state">暂无事件</div></div>
+        </div>
+    </div>
+
+    <div class="tab-content" id="tab-memory">
+        <div class="panel">
+            <div class="flex-between">
+                <div class="panel-title" style="margin-bottom:0;"><span>🧠 5 层记忆快照</span><span class="badge" id="memoryBadge">-</span></div>
+                <div style="display:flex;gap:8px;align-items:center;">
+                    <select id="memoryThreadSelect" onchange="loadMemory()" style="background:#0d1117;color:#e6edf3;border:1px solid #30363d;padding:4px 8px;border-radius:4px;font-size:12px;max-width:300px;"></select>
+                    <button class="btn" onclick="refreshMemoryThreads()">刷新列表</button>
+                </div>
+            </div>
+            <div id="memoryContainer">
+                <div class="memory-section"><div class="memory-label">L2 用户画像</div><div class="code-block" id="memL2Profile">-</div></div>
+                <div class="memory-section"><div class="memory-label">L2 用户偏好</div><div class="code-block" id="memL2Prefs">-</div></div>
+                <div class="memory-section"><div class="memory-label">L3 近期任务（最近 10）</div><div class="code-block" id="memL3">-</div></div>
+                <div class="memory-section"><div class="memory-label">L4 命令历史（最近 20）</div><div class="code-block" id="memL4">-</div></div>
+                <div class="memory-section"><div class="memory-label">L5 知识缓存</div><div class="code-block" id="memL5">-</div></div>
+                <div class="memory-section"><div class="memory-label">Prompt 注入预览（拼到 system prompt 的内容）</div><div class="code-block" id="memInject">-</div></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="tab-content" id="tab-tools">
+        <div class="panel">
+            <div class="flex-between">
+                <div class="panel-title" style="margin-bottom:0;"><span>🔧 已注册工具</span><span class="badge" id="toolsBadge">-</span></div>
+                <button class="btn" onclick="loadTools()">刷新</button>
+            </div>
+            <div id="toolsContainer"><div class="empty-state">加载中...</div></div>
+        </div>
+    </div>
+
+    <div class="tab-content" id="tab-scheduler">
+        <div class="panel">
+            <div class="panel-title"><span>➕ 新建定时任务</span><span class="badge">interval 或 每日</span></div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+                <input id="schedName" placeholder="任务名称" style="background:#fff;color:var(--ink);border:1px solid var(--line);padding:6px 10px;border-radius:8px;font-size:13px;width:150px;">
+                <select id="schedType" style="background:#fff;color:var(--ink);border:1px solid var(--line);padding:6px 10px;border-radius:8px;font-size:13px;">
+                    <option value="interval">间隔</option>
+                    <option value="daily">每日</option>
+                </select>
+                <input id="schedInterval" placeholder="秒数(间隔)" value="3600" style="background:#fff;color:var(--ink);border:1px solid var(--line);padding:6px 10px;border-radius:8px;font-size:13px;width:120px;">
+                <input id="schedDailyTime" placeholder="HH:MM(每日)" value="09:00" style="background:#fff;color:var(--ink);border:1px solid var(--line);padding:6px 10px;border-radius:8px;font-size:13px;width:100px;">
+                <input id="schedPrompt" placeholder="要执行的提示词" style="background:#fff;color:var(--ink);border:1px solid var(--line);padding:6px 10px;border-radius:8px;font-size:13px;flex:1;min-width:200px;">
+                <button class="refresh-btn" onclick="addSchedTask()">创建</button>
+            </div>
+        </div>
+        <div class="panel">
+            <div class="flex-between">
+                <div class="panel-title" style="margin-bottom:0;"><span>🗓 任务列表</span><span class="badge" id="schedBadge">-</span></div>
+                <button class="btn" onclick="loadScheduler()">刷新</button>
+            </div>
+            <div id="schedContainer"><div class="empty-state">加载中...</div></div>
+        </div>
+    </div>
+
+    <div class="tab-content" id="tab-memorydb">
+        <div class="panel">
+            <div class="flex-between">
+                <div class="panel-title" style="margin-bottom:0;"><span>🗄 Memory DB 浏览器</span><span class="badge" id="mdbBadge">-</span></div>
+                <div>
+                    <select id="mdbTable" onchange="onMdbTableChange()" style="background:#fff;color:var(--ink);border:1px solid var(--line);padding:6px 10px;border-radius:8px;font-size:13px;min-width:160px;"></select>
+                    <button class="btn" onclick="loadMdbSchema()">刷新表</button>
+                </div>
+            </div>
+            <div id="mdbSchema" style="margin-top:10px;font-size:12px;color:var(--ink-soft);">选表后点"刷新表"</div>
+        </div>
+        <div class="panel">
+            <div class="flex-between">
+                <div class="panel-title" style="margin-bottom:0;"><span id="mdbDataTitle">数据</span><span class="badge" id="mdbCount">-</span></div>
+                <div>
+                    <input id="mdbFilter" placeholder="WHERE 条件 (key='value')" style="background:#fff;color:var(--ink);border:1px solid var(--line);padding:6px 10px;border-radius:8px;font-size:12px;width:240px;">
+                    <button class="btn" onclick="loadMdbRows()">查询</button>
+                    <button class="refresh-btn" onclick="mdbInsertRow()">+ 新增</button>
+                </div>
+            </div>
+            <div id="mdbData" class="code-block" style="max-height:700px;">选表后查询</div>
+        </div>
+    </div>
+
+    <div class="tab-content" id="tab-settings">
+        <div class="panel">
+            <div class="panel-title"><span>🎯 默认模型设置</span><span class="badge" id="settingsBadge">-</span></div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+                <select id="settingsProvider" style="background:#fff;color:var(--ink);border:1px solid var(--line);padding:6px 10px;border-radius:8px;font-size:13px;min-width:200px;"></select>
+                <select id="settingsModel" style="background:#fff;color:var(--ink);border:1px solid var(--line);padding:6px 10px;border-radius:8px;font-size:13px;min-width:180px;"></select>
+                <button class="refresh-btn" onclick="setDefaultModel()">💾 设为默认</button>
+                <span style="font-size:12px;color:var(--ink-soft);">保存后下次启动自动使用</span>
+            </div>
+        </div>
+
+        <div class="panel">
+            <div class="flex-between">
+                <div class="panel-title" style="margin-bottom:0;"><span>🔌 已接入模型</span><span class="badge" id="customModelsBadge">-</span></div>
+                <button class="btn" onclick="loadSettings()">刷新</button>
+            </div>
+            <div id="customModelsList"><div class="empty-state">加载中...</div></div>
+        </div>
+
+        <div class="panel">
+            <div class="panel-title"><span>➕ 新增模型接入（OpenAI 格式）</span><span class="badge">base_url + api_key + models</span></div>
+            <div style="display:flex;flex-direction:column;gap:10px;">
+                <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                    <input id="cmLabel" placeholder="名称（如：我的GPT）" style="background:#fff;color:var(--ink);border:1px solid var(--line);padding:6px 10px;border-radius:8px;font-size:13px;flex:1;min-width:140px;">
+                    <input id="cmBaseUrl" placeholder="base_url（如 https://api.openai.com/v1）" style="background:#fff;color:var(--ink);border:1px solid var(--line);padding:6px 10px;border-radius:8px;font-size:13px;flex:2;min-width:220px;">
+                </div>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                    <input id="cmApiKey" type="password" placeholder="api_key（sk-...，多个用英文逗号隔开自动轮换）" style="background:#fff;color:var(--ink);border:1px solid var(--line);padding:6px 10px;border-radius:8px;font-size:13px;flex:1;min-width:200px;">
+                    <input id="cmModels" placeholder="模型名，逗号分隔；或填 base_url/api_key 后点「获取」自动拉取" style="background:#fff;color:var(--ink);border:1px solid var(--line);padding:6px 10px;border-radius:8px;font-size:13px;flex:2;min-width:220px;">
+                    <button class="btn" onclick="fetchModelList()" title="从网关 /v1/models 拉取模型列表">🔄 获取</button>
+                </div>
+                <div style="display:flex;justify-content:flex-end;">
+                    <button class="refresh-btn" onclick="addCustomModel()">✅ 接入</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 新增行模态框 -->
+    <div id="mdbModalOverlay" style="display:none;position:fixed;inset:0;background:rgba(45,42,62,0.55);z-index:1000;justify-content:center;align-items:center;">
+        <div style="background:#fff;border-radius:16px;padding:20px;width:560px;max-width:94vw;max-height:85vh;overflow:auto;box-shadow:0 12px 40px rgba(0,0,0,0.3);">
+            <div style="display:flex;align-items:center;margin-bottom:14px;">
+                <span style="font-size:15px;font-weight:800;color:var(--ink);">➕ 新增 <span id="mdbModalTable" style="font-family:monospace;color:var(--purple);"></span></span>
+                <span style="flex:1;"></span>
+                <button onclick="closeMdbModal()" style="background:none;border:none;font-size:18px;cursor:pointer;color:var(--ink-soft);">✕</button>
+            </div>
+            <div id="mdbModalForm" style="display:flex;flex-direction:column;gap:10px;"></div>
+            <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
+                <button class="btn" onclick="closeMdbModal()">取消</button>
+                <button class="refresh-btn" onclick="submitMdbInsert()">✅ 保存</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentTab = 'state', eventSource = null;
+        let modelCatalog = {};
+
+        // ===== 模型信息展示（header 只显示当前模型标签；切换入口在设置页） =====
+        async function loadModelOptions() {
+            try {
+                const r = await fetch('/api/models');
+                const data = await r.json();
+                modelCatalog = data.catalog || {};
+                const cur = data.current || {};
+                const label = (modelCatalog[cur.provider] && modelCatalog[cur.provider].label) || cur.provider || '';
+                document.getElementById('currentModelLabel').textContent = '模型: ' + (label ? label + ' / ' : '') + (cur.model || '');
+            } catch (e) {
+                document.getElementById('currentModelLabel').textContent = '模型: 加载失败';
+            }
+        }
+
+        loadModelOptions();
+
+        // ===== 抽屉（控制面板浮层）：导航 + tab-content 移动 =====
+        const DRAWER_TABS = [
+            { id: 'state',     label: '📊 State' },
+            { id: 'prompt',    label: '📄 提示词' },
+            { id: 'logs',      label: '📝 日志' },
+            { id: 'events',    label: '📋 事件' },
+            { id: 'memory',    label: '🧠 5层记忆' },
+            { id: 'memorydb',  label: '🗄 Memory DB' },
+            { id: 'tools',     label: '🔧 工具' },
+            { id: 'scheduler', label: '🗓 定时任务' },
+            { id: 'settings',  label: '⚙ 设置' },
+        ];
+        const DRAWER_LOADERS = {
+            memory: loadMemory,
+            tools: loadTools,
+            scheduler: loadScheduler,
+            memorydb: mdbLoadTables,
+            settings: loadSettings,
+            state: () => refreshAll(),
+            prompt: () => refreshAll(),
+            logs: () => refreshAll(),
+            events: () => refreshAll(),
+        };
+        let drawerActiveTab = 'state';
+        const drawerEl = document.getElementById('drawer');
+        const drawerMaskEl = document.getElementById('drawerMask');
+        const drawerNavEl = document.getElementById('drawerNav');
+        const drawerContentEl = document.getElementById('drawerContent');
+
+        function openDrawer() {
+            drawerMaskEl.style.display = 'block';
+            drawerEl.classList.add('open');
+            // 把非 chat 的 tab-content 移进抽屉内容区（原 DOM 在 main，移动后 chat 独占 main）
+            DRAWER_TABS.forEach(t => {
+                const el = document.getElementById('tab-' + t.id);
+                if (el && el.parentElement !== drawerContentEl) {
+                    drawerContentEl.appendChild(el);
+                }
+            });
+            renderDrawerNav();
+            activateDrawerTab(drawerActiveTab);
+        }
+
+        function closeDrawer() {
+            drawerMaskEl.style.display = 'none';
+            drawerEl.classList.remove('open');
+        }
+
+        function renderDrawerNav() {
+            drawerNavEl.innerHTML = DRAWER_TABS.map(t =>
+                `<button class="drawer-nav-item ${t.id === drawerActiveTab ? 'active' : ''}" data-tab="${t.id}">${t.label}</button>`
+            ).join('');
+            drawerNavEl.querySelectorAll('.drawer-nav-item').forEach(btn => {
+                btn.addEventListener('click', () => activateDrawerTab(btn.dataset.tab));
+            });
+        }
+
+        function activateDrawerTab(name) {
+            drawerActiveTab = name;
+            drawerNavEl.querySelectorAll('.drawer-nav-item').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
+            drawerContentEl.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+            const target = document.getElementById('tab-' + name);
+            if (target) target.classList.add('active');
+            const loader = DRAWER_LOADERS[name];
+            if (loader) { try { loader(); } catch (e) { console.warn('drawer loader 失败:', name, e); } }
+        }
+
+        function truncate(str, max=500) { if (typeof str !== 'string') str = JSON.stringify(str); return str.length > max ? str.slice(0,max)+'...' : str; }
+
+        function renderState(data) {
+            const el = document.getElementById('stateContent');
+            if (!data || Object.keys(data).length === 0) { el.textContent = '暂无数据'; return; }
+            el.textContent = JSON.stringify(data, null, 2);
+            document.getElementById('stateBadge').textContent = Object.keys(data).length + ' 字段';
+            document.getElementById('statState').textContent = Object.keys(data).length;
+        }
+
+        function renderPrompt(data) {
+            const el = document.getElementById('promptContent');
+            if (data && data.prompt) {
+                el.textContent = data.prompt;
+                document.getElementById('promptBadge').textContent = data.prompt.length + ' 字符';
+                document.getElementById('statPrompt').textContent = data.prompt.length;
+            } else el.textContent = '暂无数据';
+        }
+
+        function renderLogs(data) {
+            const container = document.getElementById('logContainer');
+            if (!data || !data.logs || data.logs.length === 0) {
+                container.innerHTML = '<div class="empty-state">暂无日志</div>';
+                return;
+            }
+            let html = '';
+            data.logs.forEach(log => {
+                html += `<div class="log-entry">
+                    <span class="time">${log.timestamp.slice(11,19)}</span>
+                    <span class="level ${log.level}">${log.level.toUpperCase()}</span>
+                    <span class="message">${log.message}</span>
+                </div>`;
+            });
+            container.innerHTML = html;
+            document.getElementById('logBadge').textContent = data.logs.length;
+            document.getElementById('statLogs').textContent = data.logs.length;
+            container.scrollTop = container.scrollHeight;
+        }
+
+        function renderEvents(data) {
+            const container = document.getElementById('eventContainer');
+            if (!data || !data.events || data.events.length === 0) {
+                container.innerHTML = '<div class="empty-state">暂无事件</div>';
+                return;
+            }
+            let html = '';
+            data.events.slice().reverse().forEach(evt => {
+                html += `<div class="log-entry">
+                    <span class="time">${evt.timestamp.slice(11,19)}</span>
+                    <span class="level info">${evt.type}</span>
+                    <span class="message">${truncate(JSON.stringify(evt.data), 150)}</span>
+                </div>`;
+            });
+            container.innerHTML = html;
+            document.getElementById('eventBadge').textContent = data.events.length;
+            document.getElementById('statEvents').textContent = data.events.length;
+        }
+
+
+        async function refreshAll() {
+            document.getElementById('lastUpdate').textContent = '更新: ' + new Date().toLocaleTimeString();
+            try {
+                const tid = currentThreadId ? encodeURIComponent(currentThreadId) : '';
+                const stateUrl = tid ? '/api/state?thread_id=' + tid : '/api/state';
+                const [stateRes, promptRes, logsRes, eventsRes] = await Promise.all([
+                    fetch(stateUrl), fetch('/api/prompt'), fetch('/api/logs?limit=100'), fetch('/api/events?limit=50')
+                ]);
+                renderState(await stateRes.json());
+                renderPrompt(await promptRes.json());
+                renderLogs(await logsRes.json());
+                renderEvents(await eventsRes.json());
+            } catch(e) { document.getElementById('statusText').textContent = '⚠️ 连接失败'; }
+        }
+
+        async function clearLogs() { await fetch('/api/clear-logs', { method: 'POST' }); refreshAll(); }
+
+        // ===== 新增：5 个审查 tab =====
+
+
+
+        // ===== 工具列表 =====
+        async function loadTools() {
+            try {
+                const r = await fetch('/api/tools');
+                const data = await r.json();
+                const c = document.getElementById('toolsContainer');
+                const tools = data.tools || [];
+                if (!tools.length) { c.innerHTML = '<div class="empty-state">无工具</div>'; return; }
+                c.innerHTML = tools.map(t => {
+                    const args = t.args_schema || {};
+                    const props = args.properties || {};
+                    const required = args.required || [];
+                    const paramHtml = Object.keys(props).map(k => {
+                        const p = props[k];
+                        const type = p.type || typeof p;
+                        const desc = p.description ? ' — ' + p.description : '';
+                        const req = required.includes(k) ? ' <span style="color:var(--red)">*必填</span>' : '';
+                        return `<div style="margin:2px 0;padding-left:10px;border-left:2px solid var(--line);font-size:12px;">
+                            <code>${k}</code> <span style="color:var(--purple)">(${type})</span>${req}<span style="color:var(--ink-soft)">${desc}</span>
+                        </div>`;
+                    }).join('') || '<div style="color:var(--ink-soft);font-size:12px;">无参数</div>';
+                    return `<div style="background:#fff;border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:10px;">
+                        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+                            <span style="background:linear-gradient(135deg,var(--pink),var(--purple));color:#fff;padding:3px 10px;border-radius:8px;font-size:12px;font-weight:700;font-family:monospace;">${t.name}</span>
+                            <span style="color:var(--ink-soft);font-size:11px;">${Object.keys(props).length} 参数</span>
+                        </div>
+                        <div style="color:var(--ink);font-size:13px;margin-bottom:8px;white-space:pre-wrap;">${escapeHtml(t.description || '')}</div>
+                        ${paramHtml}
+                    </div>`;
+                }).join('');
+                document.getElementById('toolsBadge').textContent = tools.length + ' 个';
+            } catch (e) {
+                document.getElementById('toolsContainer').innerHTML = '<div class="empty-state">加载失败: ' + e.message + '</div>';
+            }
+        }
+
+        // ===== 定时任务 =====
+        async function loadScheduler() {
+            try {
+                const r = await fetch('/api/scheduler');
+                const data = await r.json();
+                const c = document.getElementById('schedContainer');
+                const tasks = data.tasks || [];
+                if (!tasks.length) { c.innerHTML = '<div class="empty-state">暂无定时任务</div>'; return; }
+                c.innerHTML = tasks.map(t => {
+                    const sched = t.schedule_type === 'interval' ? `每 ${t.interval_seconds}s` : `每日 ${t.daily_time}`;
+                    const status = t.enabled ? '<span style="color:var(--green);font-weight:700;">● 运行中</span>' : '<span style="color:var(--ink-soft);">○ 已停用</span>';
+                    return `<div style="background:#fff;border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:10px;">
+                        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+                            <span style="font-weight:700;color:var(--ink);">${escapeHtml(t.name)}</span>
+                            <span style="font-size:11px;color:var(--purple);background:rgba(166,99,204,0.1);padding:2px 8px;border-radius:8px;">${sched}</span>
+                            ${status}
+                            <span style="flex:1"></span>
+                            <button class="btn" onclick="toggleSched('${t.id}')">${t.enabled ? '停用' : '启用'}</button>
+                            <button class="btn btn-danger" onclick="deleteSched('${t.id}')">删除</button>
+                        </div>
+                        <div style="margin-top:8px;font-size:12px;color:var(--ink);word-break:break-word;">提示词: ${escapeHtml(t.prompt)}</div>
+                        <div style="margin-top:6px;font-size:11px;color:var(--ink-soft);">
+                            上次执行: ${t.last_run_at ? escapeHtml(String(t.last_run_at).slice(0,19)) : '从未'}
+                            ${t.last_result ? '<br>结果: ' + escapeHtml(String(t.last_result).slice(0,200)) : ''}
+                        </div>
+                    </div>`;
+                }).join('');
+                document.getElementById('schedBadge').textContent = tasks.length + ' 个';
+            } catch (e) {
+                document.getElementById('schedContainer').innerHTML = '<div class="empty-state">加载失败: ' + e.message + '</div>';
+            }
+        }
+
+        async function addSchedTask() {
+            const name = document.getElementById('schedName').value.trim();
+            const prompt = document.getElementById('schedPrompt').value.trim();
+            const type = document.getElementById('schedType').value;
+            if (!name || !prompt) { alert('名称和提示词必填'); return; }
+            const payload = { name, prompt, schedule_type: type };
+            if (type === 'interval') payload.interval_seconds = parseInt(document.getElementById('schedInterval').value) || 3600;
+            else payload.daily_time = document.getElementById('schedDailyTime').value || '09:00';
+            const r = await fetch('/api/scheduler', {
+                method: 'POST', headers: {'Content-Type':'application/json'},
+                body: JSON.stringify(payload)
+            });
+            const data = await r.json();
+            if (data.error) { alert(data.error); return; }
+            document.getElementById('schedName').value = '';
+            document.getElementById('schedPrompt').value = '';
+            loadScheduler();
+        }
+
+        async function toggleSched(id) {
+            await fetch('/api/scheduler/' + id + '/toggle', { method: 'POST' });
+            loadScheduler();
+        }
+
+        async function deleteSched(id) {
+            if (!confirm('删除该定时任务？')) return;
+            await fetch('/api/scheduler/' + id, { method: 'DELETE' });
+            loadScheduler();
+        }
+
+        // ===== 主对话窗口 =====
+
+        const SLASH_CMDS = [
+            { cmd: '/new', desc: '开新对话' },
+            { cmd: '/resume', desc: '继续指定 thread（/resume [tid]，不填则列候选）' },
+            { cmd: '/threads', desc: '列出最近 10 个 thread' },
+            { cmd: '/model', desc: '查看当前模型' },
+            { cmd: '/system', desc: '切审批模式 (per_ask | session_allow | always_allow)' },
+            { cmd: '/clear', desc: '清空 logs/events' },
+            { cmd: '/save', desc: '导出当前 thread 的消息为 JSON' },
+            { cmd: '/help', desc: '显示帮助' },
+        ];
+        let chatAbort = null;
+        let currentThreadId = null;
+
+        function updateChatThreadLabel() {
+            // 仅在页面初始（currentThreadId 未设置）时从列表取最新会话；
+            // newChat/switchSession 显式设置后，这里只更新标签、绝不覆盖。
+            fetch('/api/threads').then(r => r.json()).then(d => {
+                if (!d.threads || !d.threads.length) return;
+                if (currentThreadId === null) {
+                    currentThreadId = d.threads[0].thread_id;
+                }
+                document.getElementById('chatThreadLabel').textContent = 'thread: ' + currentThreadId.slice(0, 8) + '…';
+            });
+        }
+
+        // 斜杠命令自动补全
+        const chatInput = document.getElementById('chatInput');
+        chatInput.addEventListener('input', function() {
+            const val = this.value;
+            if (val.startsWith('/') && !val.includes(' ')) {
+                const suggest = document.getElementById('chatSuggest');
+                const matches = SLASH_CMDS.filter(c => c.cmd.startsWith(val));
+                if (matches.length > 1) {
+                    suggest.innerHTML = matches.map(m => `<div class="chat-suggest-item" data-cmd="${m.cmd}"><b>${m.cmd}</b><span class="desc">${m.desc}</span></div>`).join('');
+                    suggest.style.display = 'block';
+                    suggest.querySelectorAll('.chat-suggest-item').forEach(el => {
+                        el.addEventListener('click', () => {
+                            chatInput.value = el.dataset.cmd + ' ';
+                            suggest.style.display = 'none';
+                            chatInput.focus();
+                        });
+                    });
+                } else {
+                    suggest.style.display = 'none';
+                }
+            } else {
+                document.getElementById('chatSuggest').style.display = 'none';
+            }
+        });
+        chatInput.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendChat();
+            } else if (e.key === 'Escape') {
+                document.getElementById('chatSuggest').style.display = 'none';
+            }
+        });
+
+        // HTML 转义工具（被聊天/工具/调度等模块共用）
+        function escapeHtml(s) {
+            return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
+
+        function appendBubble(role, content, meta, useMarkdown) {
+            const c = document.getElementById('chatMessages');
+            const empty = c.querySelector('.empty-state');
+            if (empty) empty.remove();
+            const div = document.createElement('div');
+            div.className = 'chat-bubble ' + role + (role === 'assistant' ? ' md-body' : '');
+            if (useMarkdown) {
+                div.innerHTML = renderMarkdown(content);
+            } else {
+                div.textContent = content;
+            }
+            if (meta) {
+                const m = document.createElement('div');
+                m.className = 'meta';
+                m.textContent = meta;
+                div.appendChild(m);
+            }
+            c.appendChild(div);
+            c.scrollTop = c.scrollHeight;
+            return div;
+        }
+
+        async function sendChat() {
+            const input = document.getElementById('chatInput');
+            const text = input.value.trim();
+            if (!text) return;
+            input.value = '';
+            document.getElementById('chatSuggest').style.display = 'none';
+
+            // 斜杠命令走专用端点
+            if (text.startsWith('/')) {
+                appendBubble('user', text);
+                const r = await fetch('/api/command', {
+                    method: 'POST', headers: {'Content-Type':'application/json'},
+                    body: JSON.stringify({command: text})
+                });
+                const data = await r.json();
+                if (data.thread_id) currentThreadId = data.thread_id;
+                if (data.candidates) {
+                    appendBubble('system', data.result + '\n' + data.candidates.map(t => '  - ' + t.thread_id.slice(0,8) + '… (' + (t.count||0) + ' msgs)').join('\n'));
+                } else if (data.threads) {
+                    appendBubble('system', data.result + '\n' + data.threads.map(t => '  - ' + t.thread_id.slice(0,8) + '… (' + (t.count||0) + ' msgs)').join('\n'));
+                } else {
+                    appendBubble('system', data.result || data.error || JSON.stringify(data));
+                }
+                updateChatThreadLabel();
+                return;
+            }
+
+            appendBubble('user', text, null, false);
+            const thinking = appendBubble('assistant', '', null, true);
+            setChatStatus('🤔 思考中...', true);
+            await streamChat({message: text, thread_id: currentThreadId}, thinking);
+        }
+
+        // ===== 通用流式处理：发 /api/chat 请求、接收 SSE、渲染回复；遇 approval 显示审批气泡 =====
+        function setChatStatus(text, busy) {
+            document.getElementById('chatStatus').textContent = text;
+            const dot = document.getElementById('chatStatusDot');
+            if (dot) dot.style.display = busy ? 'inline-block' : 'none';
+        }
+
+        // 过滤流式拼接里混入的"内部 LLM"内容（如对话摘要生成），只保留真正对话回复
+        const SUMMARY_MARKERS = ['更新后的摘要', '**用户目标**', '已完成步骤', '待办事项', '摘要生成助手', '[对话摘要]'];
+        function cleanReply(text) {
+            if (!text) return '';
+            for (const mk of SUMMARY_MARKERS) {
+                const idx = text.indexOf(mk);
+                if (idx > 0) return text.slice(0, idx).trim();
+            }
+            return text.trim();
+        }
+
+        async function streamChat(body, thinking) {
+            let fullReply = '';
+            let finalText = '';
+            let stepLogs = [];
+            let toolLogs = [];
+            let sawApproval = false;
+
+            chatAbort = new AbortController();
+            try {
+                const r = await fetch('/api/chat', {
+                    method: 'POST', headers: {'Content-Type':'application/json'},
+                    body: JSON.stringify(body),
+                    signal: chatAbort.signal
+                });
+                const reader = r.body.getReader();
+                const dec = new TextDecoder();
+                let buf = '';
+                while (true) {
+                    const {done, value} = await reader.read();
+                    if (done) break;
+                    buf += dec.decode(value, {stream: true});
+                    const lines = buf.split('\n\n');
+                    buf = lines.pop();
+                    for (const line of lines) {
+                        if (!line.startsWith('data: ')) continue;
+                        let evt;
+                        try { evt = JSON.parse(line.slice(6)); } catch (e) { continue; }
+                        if (evt.step === 'node') {
+                            if (evt.phase === 'start' && !stepLogs.includes(evt.name)) stepLogs.push(evt.name);
+                            setChatStatus('⏳ 执行节点: ' + stepLogs.join(' → '), true);
+                            if (evt.phase === 'start' && evt.name === 'chatbot') fullReply = '';
+                        } else if (evt.step === 'token') {
+                            fullReply += evt.text;
+                            thinking.classList.remove('thinking');
+                            // 摘要等内部 LLM 的 chunk 也会混入 messages 流，截断掉（对话回复才是展示内容）
+                            thinking.innerHTML = renderMarkdown(cleanReply(fullReply));
+                            setChatStatus('✍️ 生成回复中...', true);
+                        } else if (evt.step === 'tool') {
+                            toolLogs.push(`${evt.name}:${evt.phase}`);
+                            setChatStatus('🔧 工具: ' + toolLogs.slice(-3).join(' | '), true);
+                            renderToolCard(evt);
+                        } else if (evt.step === 'tool_chunk') {
+                            setChatStatus('🔧 调用工具中...', true);
+                        } else if (evt.step === 'error') {
+                            thinking.classList.remove('thinking');
+                            thinking.classList.add('error');
+                            thinking.textContent = '❌ ' + (evt.message || JSON.stringify(evt));
+                            setChatStatus('❌ 出错', false);
+                        } else if (evt.step === 'final') {
+                            if (evt.text) finalText = evt.text;
+                            setChatStatus('✅ 完成', false);
+                        } else if (evt.step === 'approval') {
+                            // 需要审批：停止流式，显示审批气泡
+                            sawApproval = true;
+                            thinking.classList.remove('thinking');
+                            thinking.classList.add('tool');
+                            renderApprovalBubble(evt.data || {});
+                            setChatStatus('🛡️ 等待审批', false);
+                        } else if (evt.step === 'done') {
+                            // 对话流结束：复位状态（摘要等内部 LLM 的 chunk 可能在 done 前已推完）
+                            setChatStatus('✅ 完成', false);
+                        }
+                    }
+                    if (sawApproval) break;  // 等待用户审批，不再读
+                }
+                if (sawApproval) {
+                    // 等用户点按钮走 resumeChat；当前气泡保留为"待审批"状态
+                    setChatStatus('⏸ 等待审批', false);
+                    return;
+                }
+                // 渲染优先级：final > token 流式拼接 > state 兜底
+                thinking.classList.remove('thinking');
+                const reply = finalText || cleanReply(fullReply) || '';
+                if (reply) {
+                    thinking.innerHTML = renderMarkdown(reply);
+                } else {
+                    try {
+                        const stR = await fetch('/api/state');
+                        const st = await stR.json();
+                        const msgs = st.messages || [];
+                        const lastAI = [...msgs].reverse().find(m => (m.type === 'ai' || m.role === 'assistant') && (m.content || m.text));
+                        const txt = lastAI ? (lastAI.content || lastAI.text || '') : '';
+                        if (txt) thinking.innerHTML = renderMarkdown(txt);
+                        else thinking.textContent = '（无回复）';
+                    } catch (e2) { thinking.textContent = '（无回复）'; }
+                }
+                if (stepLogs.length) {
+                    const meta = document.createElement('div');
+                    meta.className = 'meta';
+                    meta.textContent = '节点: ' + stepLogs.join(' → ');
+                    thinking.appendChild(meta);
+                }
+                setChatStatus('就绪', false);
+            } catch (e) {
+                if (e.name === 'AbortError') return;
+                thinking.classList.remove('thinking');
+                thinking.classList.add('error');
+                thinking.textContent = '❌ ' + e.message;
+                document.getElementById('chatStatus').textContent = '错误';
+            }
+        }
+
+        // 工具调用卡片：对话过程中可视化"调了什么工具 + 输入/输出"
+        const toolCardMap = {};
+        function renderToolCard(evt) {
+            const c = document.getElementById('chatMessages');
+            const empty = c.querySelector('.empty-state');
+            if (empty) empty.remove();
+            const name = evt.name || 'tool';
+            const key = name;
+            let card = toolCardMap[key];
+            const preview = (evt.output_preview || '').slice(0, 300);
+            const isErr = /错误|error|fail|异常/i.test(preview);
+            if (evt.phase === 'end') {
+                if (!card) {
+                    // 没有 start 卡片（start 由 tool_chunk 隐式表示），直接创建完成卡片
+                    const div = document.createElement('div');
+                    div.className = 'tool-card';
+                    div.innerHTML = `
+                        <div class="tc-head">
+                            <span>🔧 ${escapeHtml(name)}</span>
+                            <span class="tc-status ${isErr ? 'error' : 'done'}">${isErr ? '❌ 失败' : '✅ 完成'}</span>
+                        </div>
+                        <div class="tc-body"><span class="tc-label">结果:</span> ${escapeHtml(preview || '(空)')}</div>`;
+                    toolCardMap[key] = div;
+                    c.appendChild(div);
+                } else {
+                    const st = card.querySelector('.tc-status');
+                    st.textContent = isErr ? '❌ 失败' : '✅ 完成';
+                    st.className = 'tc-status ' + (isErr ? 'error' : 'done');
+                    const body = card.querySelector('.tc-body');
+                    body.innerHTML = `<span class="tc-label">结果:</span> ${escapeHtml(preview || '(空)')}`;
+                }
+                c.scrollTop = c.scrollHeight;
+                return;
+            }
+            // phase=start：新建卡片
+            if (card) card.remove();
+            const div = document.createElement('div');
+            div.className = 'tool-card';
+            const inputPreview = evt.input ? JSON.stringify(evt.input) : '';
+            div.innerHTML = `
+                <div class="tc-head">
+                    <span>🔧 ${escapeHtml(name)}</span>
+                    <span class="tc-status running">调用中</span>
+                </div>
+                ${inputPreview ? `<div class="tc-body"><span class="tc-label">参数:</span> ${escapeHtml(inputPreview.slice(0, 300))}</div>` : ''}`;
+            toolCardMap[key] = div;
+            c.appendChild(div);
+            c.scrollTop = c.scrollHeight;
+        }
+
+        // 渲染审批气泡（命令 + 三个按钮），点按钮后 resume 继续
+        function renderApprovalBubble(data) {
+            const c = document.getElementById('chatMessages');
+            const div = document.createElement('div');
+            div.className = 'chat-bubble tool';
+            div.id = 'approval-bubble';
+            const cmd = data.command || '';
+            const q = data.question || '需要审批';
+            div.innerHTML = `<div style="color:var(--ink);font-weight:700;margin-bottom:6px;">🛡️ 需要人工确认</div>
+                <div style="color:var(--ink);font-size:12px;margin-bottom:8px;white-space:pre-wrap;">${escapeHtml(q)}</div>
+                <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                    <button class="refresh-btn" onclick="approvalResume(true, 'per_ask')">✅ 允许执行</button>
+                    <button class="btn btn-danger" onclick="approvalResume(false, 'per_ask')">❌ 拒绝</button>
+                    <button class="btn" onclick="approvalResume(true, 'session_allow')">♻️ 本次会话自动允许</button>
+                </div>`;
+            c.appendChild(div);
+            c.scrollTop = c.scrollHeight;
+        }
+
+        // 用户审批后：resume 继续 graph
+        async function approvalResume(allow, mode) {
+            const bubble = document.getElementById('approval-bubble');
+            if (bubble) bubble.remove();
+            const thinking = appendBubble('assistant', '', null, true);
+            setChatStatus('🤔 继续执行中...', true);
+            await streamChat({
+                resume: true,
+                thread_id: currentThreadId,
+                allow: allow,
+                mode: mode
+            }, thinking);
+        }
+
+        function stopChat() {
+            if (chatAbort) chatAbort.abort();
+            document.getElementById('chatStatus').textContent = '已停止';
+        }
+
+        // ===== Markdown 渲染 + 代码块复制 =====
+        // 注意：不依赖外部 CDN（离线可用）。若页面有 marked（浏览器缓存/将来内联），
+        // 优先用 marked；否则用内置极简渲染器。
+        function mdEscapeHtml(s) {
+            return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
+        function mdInline(s) {
+            // 行内：代码 → 粗体 → 斜体 → 链接（在已转义文本上做标记替换）
+            s = s.replace(/`([^`]+)`/g, (m, c) => '<code>' + c + '</code>');
+            s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+            s = s.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+            s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+            return s;
+        }
+        function renderMarkdown(text) {
+            if (typeof marked !== 'undefined') {
+                try { return marked.parse(String(text || '')); } catch (e) {}
+            }
+            const lines = String(text || '').split('\n');
+            let html = '', inCode = false, codeBuf = [];
+            for (const line of lines) {
+                const fence = line.match(/^```(\w*)/);
+                if (fence) {
+                    if (inCode) {
+                        html += '<pre><button class="copy-btn" onclick="copyCode(this)">复制</button><code>' + mdEscapeHtml(codeBuf.join('\n')) + '</code></pre>';
+                        codeBuf = []; inCode = false;
+                    } else { inCode = true; }
+                    continue;
+                }
+                if (inCode) { codeBuf.push(line); continue; }
+                const h = line.match(/^(#{1,4})\s+(.*)/);
+                if (h) { const n = h[1].length; html += '<h' + n + '>' + mdInline(h[2]) + '</h' + n + '>'; continue; }
+                if (/^\s*[-*]\s+/.test(line)) { html += '<li>' + mdInline(line.replace(/^\s*[-*]\s+/, '')) + '</li>'; continue; }
+                if (/^\s*\d+\.\s+/.test(line)) { html += '<li>' + mdInline(line.replace(/^\s*\d+\.\s+/, '')) + '</li>'; continue; }
+                if (/^\s*>\s?/.test(line)) { html += '<blockquote>' + mdInline(line.replace(/^\s*>\s?/, '')) + '</blockquote>'; continue; }
+                if (/^\s*---+\s*$/.test(line)) { html += '<hr>'; continue; }
+                if (!line.trim()) { continue; }
+                html += '<p>' + mdInline(line) + '</p>';
+            }
+            if (inCode && codeBuf.length) {
+                html += '<pre><button class="copy-btn" onclick="copyCode(this)">复制</button><code>' + mdEscapeHtml(codeBuf.join('\n')) + '</code></pre>';
+            }
+            return html;
+        }
+        async function copyCode(btn) {
+            const pre = btn.parentElement;
+            const code = pre.querySelector('code') || pre;
+            try {
+                await navigator.clipboard.writeText(code.textContent);
+                btn.textContent = '✅ 已复制';
+                btn.classList.add('copied');
+                setTimeout(() => { btn.textContent = '复制'; btn.classList.remove('copied'); }, 1500);
+            } catch (e) {
+                btn.textContent = '❌ 失败';
+                setTimeout(() => { btn.textContent = '复制'; }, 1500);
+            }
+        }
+
+        updateChatThreadLabel();
+
+        function connectSSE() {
+            if (eventSource) eventSource.close();
+            try {
+                eventSource = new EventSource('/api/sse');
+                eventSource.onmessage = function(event) {
+                    try { const data = JSON.parse(event.data); if (data.type === 'log') refreshAll(); }
+                    catch(e) {}
+                };
+                eventSource.onerror = function() { setTimeout(connectSSE, 3000); };
+                document.getElementById('statusText').textContent = '🟢 实时';
+            } catch(e) { document.getElementById('statusText').textContent = '🔴 离线'; }
+        }
+
+        refreshAll();
+        connectSSE();
+        setInterval(() => refreshAll(), 5000);
+
+        // ===== 会话列表 =====
+        // ===== 5 层记忆 tab：会话选择 + 加载 =====
+        async function refreshMemoryThreads() {
+            const sel = document.getElementById('memoryThreadSelect');
+            try {
+                const r = await fetch('/api/threads');
+                const data = await r.json();
+                const threads = data.threads || [];
+                const cur = data.current_thread_id;
+                if (!threads.length) {
+                    sel.innerHTML = '<option value="">暂无会话</option>';
+                    return;
+                }
+                sel.innerHTML = threads.map(t => {
+                    const label = (t.current ? '⭐ 当前会话 · ' : '💬 ') + (t.thread_id || '').slice(0, 12) + '… (' + (t.count || 0) + ' 条)';
+                    return `<option value="${t.thread_id}" ${t.thread_id === cur ? 'selected' : ''}>${label}</option>`;
+                }).join('');
+                // 默认加载当前会话
+                if (cur) loadMemory();
+            } catch (e) {
+                sel.innerHTML = '<option value="">加载失败</option>';
+            }
+        }
+
+        async function loadMemory() {
+            const sel = document.getElementById('memoryThreadSelect');
+            const tid = sel.value || '';
+            if (!tid) return;
+            const r = await fetch(`/api/memory?thread_id=${encodeURIComponent(tid)}`);
+            const data = await r.json();
+            document.getElementById('memL2Profile').textContent = JSON.stringify(data.L2_profile, null, 2);
+            document.getElementById('memL2Prefs').textContent = JSON.stringify(data.L2_preferences, null, 2);
+            document.getElementById('memL3').textContent = JSON.stringify(data.L3_recent_tasks, null, 2);
+            document.getElementById('memL4').textContent = JSON.stringify(data.L4_command_history, null, 2);
+            document.getElementById('memL5').textContent = JSON.stringify(data.L5_knowledge_cache, null, 2);
+            document.getElementById('memInject').textContent = JSON.stringify(data.prompt_injection_preview, null, 2);
+            document.getElementById('memoryBadge').textContent =
+                `L2:${Object.keys(data.L2_profile).length + Object.keys(data.L2_preferences).length} | ` +
+                `L3:${data.L3_recent_tasks.length} | L4:${data.L4_command_history.length} | L5:${data.L5_knowledge_cache.length}`;
+        }
+
+        async function loadSessionList() {            try {
+                const r = await fetch('/api/threads');
+                const data = await r.json();
+                const list = document.getElementById('sessionList');
+                const threads = data.threads || [];
+                if (!threads.length) {
+                    list.innerHTML = '<div class="session-empty">暂无会话，点上方新建</div>';
+                    return;
+                }
+                const emojis = ['💬', '🤖', '🧠', '🎯', '🚀', '📝', '🔍', '✨', '🎨', '🛠️'];
+                list.innerHTML = threads.map((t, i) => {
+                    const tid = t.thread_id;
+                    const name = (t.last || '').slice(5, 16).replace('T', ' ');
+                    const isActive = tid === currentThreadId;
+                    return `<div class="session-item ${isActive ? 'active' : ''}" onclick="switchSession('${tid}')" title="${tid}">
+                        <span class="s-emoji">${emojis[i % emojis.length]}</span>
+                        <div class="s-info">
+                            <div class="s-name">${name || '对话'}</div>
+                            <div class="s-meta">${t.count || 0} 条${t.task_count ? ' · ' + t.task_count + ' 任务' : ''}</div>
+                        </div>
+                        <button class="s-del" onclick="event.stopPropagation(); deleteSession('${tid}')" title="删除会话">🗑</button>
+                    </div>`;
+                }).join('');
+            } catch (e) {
+                document.getElementById('sessionList').innerHTML = '<div class="session-empty">加载失败</div>';
+            }
+        }
+
+        async function newChat() {
+            const r = await fetch('/api/command', {
+                method: 'POST', headers: {'Content-Type':'application/json'},
+                body: JSON.stringify({command: '/new'})
+            });
+            const data = await r.json();
+            if (data.thread_id) {
+                currentThreadId = data.thread_id;
+                document.getElementById('chatMessages').innerHTML = '<div class="empty-state">新会话已创建，开始对话吧</div>';
+                updateChatThreadLabel();
+                loadSessionList();
+            }
+        }
+
+        async function switchSession(tid) {
+            currentThreadId = tid;
+            const c = document.getElementById('chatMessages');
+            c.innerHTML = '<div class="empty-state">⏳ 加载历史消息...</div>';
+            // 1) 切后端 config
+            try {
+                await fetch('/api/command', {
+                    method: 'POST', headers: {'Content-Type':'application/json'},
+                    body: JSON.stringify({command: '/resume ' + tid})
+                });
+            } catch (e) { console.warn('resume 失败:', e); }
+            updateChatThreadLabel();
+            loadSessionList();
+            // 2) 拉历史消息
+            try {
+                const mr = await fetch(`/api/messages?thread_id=${encodeURIComponent(tid)}&limit=200`);
+                if (!mr.ok) throw new Error('HTTP ' + mr.status);
+                const md = await mr.json();
+                const msgs = md.messages || [];
+                console.log('[switchSession] tid=' + tid + ' 共 ' + msgs.length + ' 条消息');
+                if (!msgs.length) {
+                    c.innerHTML = '<div class="empty-state">该会话暂无消息（thread_id=' + tid.slice(0, 12) + '...）</div>';
+                    return;
+                }
+                const html = msgs.map(m => {
+                    // LangChain 内部 assistant 消息 role 是 'ai'，老历史可能是 'assistant'
+                    const role = m.role === 'user' ? 'user' : (m.role === 'ai' || m.role === 'assistant' ? 'assistant' : null);
+                    if (role === 'user') return `<div class="chat-bubble user">${escapeHtml(m.content || '')}</div>`;
+                    if (role === 'assistant') return `<div class="chat-bubble assistant md-body">${renderMarkdown(m.content || '')}</div>`;
+                    return '';
+                }).filter(Boolean).join('');
+                if (!html.trim()) {
+                    c.innerHTML = '<div class="empty-state">消息 role 不识别（原始 role: ' + [...new Set(msgs.map(m => m.role))].join(',') + '）</div>';
+                    return;
+                }
+                c.innerHTML = html;
+                c.scrollTop = c.scrollHeight;
+            } catch (e) {
+                c.innerHTML = '<div class="empty-state">❌ 加载历史失败: ' + e.message + '</div>';
+                console.error('[switchSession] 错误:', e);
+            }
+        }
+
+        async function deleteSession(tid) {
+            if (!confirm('确定删除该会话？此操作不可恢复：' + tid.slice(0, 8) + '…')) return;
+            const r = await fetch('/api/command', {
+                method: 'POST', headers: {'Content-Type':'application/json'},
+                body: JSON.stringify({command: '/delete ' + tid})
+            });
+            const data = await r.json();
+            // 如果删的是当前会话，切到新会话
+            if (tid === currentThreadId) {
+                await newChat();
+            } else {
+                loadSessionList();
+            }
+        }
+
+        loadSessionList();
+        refreshMemoryThreads();
+
+        // 工具 / 定时任务 tab 定时自动刷新（当前 tab 可见时）
+        setInterval(() => {
+            const t = document.querySelector('.tab.active');
+            if (!t) return;
+            const which = t.dataset.tab;
+            if (which === 'tools') loadTools();
+            else if (which === 'scheduler') loadScheduler();
+        }, 5000);
+
+        // ===== Memory DB 浏览器 =====
+        let mdbCurrentTable = '';
+
+        // ===== 设置 tab：默认模型 + 模型接入管理 =====
+        async function loadSettings() {
+            const r = await fetch('/api/models');
+            const data = await r.json();
+            const catalog = data.catalog || {};
+            const cur = data.current || {};
+            // 默认模型设置下拉
+            const provSel = document.getElementById('settingsProvider');
+            provSel.innerHTML = Object.entries(catalog).map(([pid, info]) =>
+                `<option value="${pid}">${info.custom ? '🔌 ' : ''}${info.label}</option>`).join('');
+            provSel.value = cur.provider || '';
+            updateSettingsModels(provSel.value, cur.model);
+            provSel.onchange = () => updateSettingsModels(provSel.value, '');
+            document.getElementById('settingsBadge').textContent = (cur.provider || '') + ' / ' + (cur.model || '');
+            // 自定义模型列表
+            const customList = Object.entries(catalog).filter(([pid, info]) => info.custom);
+            const listEl = document.getElementById('customModelsList');
+            document.getElementById('customModelsBadge').textContent = customList.length + ' 个';
+            if (!customList.length) {
+                listEl.innerHTML = '<div class="empty-state">暂无自定义模型，用下方表单接入</div>';
+                return;
+            }
+            listEl.innerHTML = customList.map(([pid, info]) => `
+                <div class="tool-card" style="margin-bottom:8px;">
+                    <div class="tc-head">
+                        <span>🔌 ${escapeHtml(info.label)}</span>
+                        <span class="tc-status done">已接入</span>
+                    </div>
+                    <div class="tc-body">
+                        <div><span class="tc-label">base_url:</span> ${escapeHtml(info.base_url || '-')}</div>
+                        <div><span class="tc-label">models:</span> ${escapeHtml((info.models || []).join(', '))}</div>
+                        ${info.api_key ? '<div><span class="tc-label">api_key:</span> ' + escapeHtml(info.api_key.slice(0, 8) + '…' + info.api_key.slice(-4)) + '</div>' : ''}
+                    </div>
+                    <div style="display:flex;gap:8px;margin-top:6px;">
+                        <button class="btn" onclick="switchToCustom('${pid}')">使用</button>
+                        <button class="btn btn-danger" onclick="deleteCustomModel('${pid}')">删除</button>
+                    </div>
+                </div>`).join('');
+        }
+
+        function updateSettingsModels(provider, selected) {
+            fetch('/api/models').then(r => r.json()).then(data => {
+                const info = (data.catalog || {})[provider];
+                const mSel = document.getElementById('settingsModel');
+                if (!info) { mSel.innerHTML = '<option value="">（无）</option>'; return; }
+                mSel.innerHTML = (info.models || []).map(m => `<option value="${m}">${m}</option>`).join('');
+                if (selected && (info.models || []).includes(selected)) mSel.value = selected;
+            });
+        }
+
+        async function setDefaultModel() {
+            const provider = document.getElementById('settingsProvider').value;
+            const model = document.getElementById('settingsModel').value;
+            if (!provider || !model) { alert('请选择厂商和模型'); return; }
+            const r = await fetch('/api/models/set-default', {
+                method: 'POST', headers: {'Content-Type':'application/json'},
+                body: JSON.stringify({provider, model})
+            });
+            const data = await r.json();
+            if (data.error) { alert('❌ ' + data.error); return; }
+            alert('✅ 已设为默认模型: ' + provider + ' / ' + model);
+            loadModelOptions();
+            loadSettings();
+        }
+
+        async function fetchModelList() {
+            const base_url = document.getElementById('cmBaseUrl').value.trim();
+            const api_key = document.getElementById('cmApiKey').value.trim();
+            if (!base_url) { alert('请先填写 base_url'); return; }
+            const btn = document.querySelector('[onclick="fetchModelList()"]');
+            const old = btn.textContent;
+            btn.textContent = '⏳ 获取中...';
+            btn.disabled = true;
+            try {
+                const r = await fetch('/api/models/fetch', {
+                    method: 'POST', headers: {'Content-Type':'application/json'},
+                    body: JSON.stringify({base_url, api_key})
+                });
+                const data = await r.json();
+                if (data.error) { alert('❌ ' + data.error); return; }
+                document.getElementById('cmModels').value = (data.models || []).join(', ');
+                alert('✅ 获取到 ' + data.models.length + ' 个模型，已填入（可手动增删）');
+            } catch (e) {
+                alert('❌ 获取失败: ' + e.message);
+            } finally {
+                btn.textContent = old;
+                btn.disabled = false;
+            }
+        }
+
+        async function addCustomModel() {
+            const label = document.getElementById('cmLabel').value.trim();
+            const base_url = document.getElementById('cmBaseUrl').value.trim();
+            const api_key = document.getElementById('cmApiKey').value.trim();
+            const models = document.getElementById('cmModels').value.trim();
+            if (!label || !base_url || !models) { alert('请填写名称、base_url、模型名'); return; }
+            const r = await fetch('/api/models/add', {
+                method: 'POST', headers: {'Content-Type':'application/json'},
+                body: JSON.stringify({label, base_url, api_key, models})
+            });
+            const data = await r.json();
+            if (data.error) { alert('❌ ' + data.error); return; }
+            document.getElementById('cmLabel').value = '';
+            document.getElementById('cmBaseUrl').value = '';
+            document.getElementById('cmApiKey').value = '';
+            document.getElementById('cmModels').value = '';
+            alert('✅ 已接入: ' + data.model.label);
+            loadSettings();
+            loadModelOptions();
+        }
+
+        async function deleteCustomModel(pid) {
+            if (!confirm('确定删除该模型接入？')) return;
+            const r = await fetch('/api/models/delete', {
+                method: 'POST', headers: {'Content-Type':'application/json'},
+                body: JSON.stringify({id: pid})
+            });
+            const data = await r.json();
+            if (data.error) { alert('❌ ' + data.error); return; }
+            loadSettings();
+            loadModelOptions();
+        }
+
+        async function switchToCustom(pid) {
+            // 使用自定义模型（切到其第一个模型）
+            const r = await fetch('/api/models');
+            const data = await r.json();
+            const info = (data.catalog || {})[pid];
+            if (!info || !info.models.length) return;
+            await switchModelTo(pid, info.models[0]);
+        }
+
+        async function switchModelTo(provider, model) {
+            const r = await fetch('/api/switch-model', {
+                method: 'POST', headers: {'Content-Type':'application/json'},
+                body: JSON.stringify({provider, model})
+            });
+            const data = await r.json();
+            if (data.error) { alert('❌ ' + data.error); return; }
+            loadModelOptions();
+            loadSettings();
+        }
+
+        async function mdbLoadTables() {
+            const r = await fetch('/api/memorydb/tables');
+            const data = await r.json();
+            const sel = document.getElementById('mdbTable');
+            sel.innerHTML = data.tables.map(t => `<option value="${t.name}">${t.label} (${t.name})</option>`).join('');
+            if (data.tables.length && !mdbCurrentTable) {
+                mdbCurrentTable = data.tables[0].name;
+                sel.value = mdbCurrentTable;
+                mdbLoadSchema();
+            }
+            document.getElementById('mdbBadge').textContent = data.tables.length + ' 张表';
+        }
+
+        function mdbRenderValue(v) {
+            if (v === null || v === undefined) return '<span style="color:var(--ink-soft)">NULL</span>';
+            const s = String(v);
+            if (s.length > 200) return escapeHtml(s.slice(0, 200)) + '...';
+            return escapeHtml(s);
+        }
+
+        async function mdbLoadSchema() {
+            const r = await fetch('/api/memorydb/tables');
+            const data = await r.json();
+            const t = data.tables.find(x => x.name === mdbCurrentTable);
+            if (!t) return;
+            const c = document.getElementById('mdbSchema');
+            c.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;">
+                <span style="background:linear-gradient(135deg,var(--purple),var(--pink));color:#fff;padding:3px 10px;border-radius:8px;font-size:12px;font-weight:700;font-family:monospace;">${t.name}</span>
+                <span style="background:rgba(166,99,204,0.1);color:var(--purple);padding:3px 10px;border-radius:8px;font-size:12px;">主键: ${t.pk}</span>
+                ${t.columns.map(c => `<span style="background:rgba(255,92,138,0.08);color:var(--ink);padding:3px 10px;border-radius:8px;font-size:11px;font-family:monospace;">${c}</span>`).join('')}
+            </div>`;
+            document.getElementById('mdbDataTitle').textContent = '📋 ' + t.label + ' 数据';
+        }
+
+        function onMdbTableChange() {
+            // 切表时清空缓存 + 自动重查，避免看到上一张表的旧数据
+            window._mdbCache = [];
+            document.getElementById('mdbData').innerHTML = '<div class="empty-state">加载中...</div>';
+            mdbCurrentTable = document.getElementById('mdbTable').value;
+            mdbLoadSchema();
+            loadMdbRows();
+        }
+
+        async function loadMdbSchema() {
+            mdbCurrentTable = document.getElementById('mdbTable').value;
+            mdbLoadSchema();
+            loadMdbRows();
+        }
+
+        async function loadMdbRows() {
+            const where = document.getElementById('mdbFilter').value.trim();
+            const url = new URL('/api/memorydb/query', location.origin);
+            url.searchParams.set('table', mdbCurrentTable);
+            url.searchParams.set('limit', '50');
+            if (where) url.searchParams.set('where', where);
+            try {
+                const r = await fetch(url);
+                const data = await r.json();
+                if (data.error) { document.getElementById('mdbData').textContent = '❌ ' + data.error; return; }
+                const rows = data.rows || [];
+                window._mdbCache = rows;  // 给编辑/删除用
+                document.getElementById('mdbCount').textContent = rows.length + ' 行';
+                if (!rows.length) { document.getElementById('mdbData').textContent = '（无数据）'; return; }
+                const cols = Object.keys(rows[0]);
+                let html = '<table style="width:100%;border-collapse:collapse;font-size:12px;table-layout:auto;"><thead><tr>';
+                cols.forEach(c => { html += `<th style="background:rgba(166,99,204,0.1);color:var(--purple);text-align:left;padding:6px 10px;border-bottom:2px solid var(--line);position:sticky;top:0;white-space:nowrap;">${c}</th>`; });
+                html += '<th style="background:rgba(166,99,204,0.1);padding:6px 10px;border-bottom:2px solid var(--line);white-space:nowrap;">操作</th></tr></thead><tbody>';
+                const pk = cols[0];  // 假设主键是第 1 列
+                rows.forEach((row, i) => {
+                    html += '<tr style="border-bottom:1px solid var(--line);">';
+                    cols.forEach(c => { html += `<td style="padding:6px 10px;vertical-align:top;max-width:480px;word-break:break-word;white-space:pre-wrap;">${mdbRenderValue(row[c])}</td>`; });
+                    const pkVal = row[pk];
+                    // 用 data 属性存 row 索引 + pk 值，避免大字符串注入 onClick
+                    html += `<td style="padding:6px 10px;white-space:nowrap;">
+                        <button class="btn mdb-edit-btn" data-row-i="${i}" style="padding:2px 8px;font-size:11px;">编辑</button>
+                        <button class="btn btn-danger mdb-del-btn" data-row-i="${i}" data-pk="${escapeHtml(String(pkVal))}" style="padding:2px 8px;font-size:11px;">删</button>
+                    </td></tr>`;
+                });
+                html += '</tbody></table>';
+                document.getElementById('mdbData').innerHTML = html;
+                // 事件委托：避免在 HTML attribute 里塞大 JSON
+                document.getElementById('mdbData').querySelectorAll('.mdb-edit-btn').forEach(btn => {
+                    btn.addEventListener('click', () => mdbEditRow(parseInt(btn.dataset.rowI)));
+                });
+                document.getElementById('mdbData').querySelectorAll('.mdb-del-btn').forEach(btn => {
+                    btn.addEventListener('click', () => mdbDeleteRow(btn.dataset.pk));
+                });
+            } catch (e) {
+                document.getElementById('mdbData').textContent = '查询失败: ' + e.message;
+            }
+        }
+
+        async function mdbGetTables() {
+            // 每次现取，不依赖全局缓存
+            const r = await fetch('/api/memorydb/tables');
+            return (await r.json()).tables || [];
+        }
+
+        // ===== 新增行（模态框表单，按表结构录入）=====
+        let mdbModalSchema = null;  // 当前模态框的表结构
+
+        async function mdbInsertRow() {
+            const tables = await mdbGetTables();
+            const t = tables.find(x => x.name === mdbCurrentTable);
+            if (!t) return;
+            // 拉真实 schema
+            let schema;
+            try {
+                const r = await fetch('/api/memorydb/schema?table=' + encodeURIComponent(mdbCurrentTable));
+                schema = (await r.json()).columns || [];
+            } catch (e) { alert('获取表结构失败: ' + e.message); return; }
+            if (!schema.length) { alert('该表无字段'); return; }
+            mdbModalSchema = schema;
+            // 渲染表单：排除自增主键，其他字段都显示（必填/默认值标记）
+            document.getElementById('mdbModalTable').textContent = mdbCurrentTable;
+            const form = document.getElementById('mdbModalForm');
+            form.innerHTML = schema.filter(c => !c.auto).map(c => {
+                const label = c.name + ' <span style="color:var(--ink-soft);font-weight:400;">(' + (c.type || '?') + ')</span>';
+                const required = c.notnull && !c.dflt_value ? ' <span style="color:var(--red);font-weight:700;">*必填</span>' : '';
+                const defaultHint = c.dflt_value ? ' <span style="color:var(--ink-soft);">默认 ' + escapeHtml(String(c.dflt_value)) + '</span>' : '';
+                const isPk = c.pk ? ' <span style="color:var(--orange);font-weight:700;">🔑主键</span>' : '';
+                return `<div style="display:flex;flex-direction:column;gap:4px;">
+                    <label style="font-size:12px;font-weight:700;color:var(--ink);font-family:monospace;">${label}${isPk}${required}${defaultHint}</label>
+                    <input class="mdb-modal-input" data-field="${c.name}" placeholder="${c.name}"
+                        style="background:#fff;color:var(--ink);border:1px solid var(--line);padding:7px 10px;border-radius:8px;font-size:13px;"
+                        ${c.dflt_value !== null && c.dflt_value !== undefined ? 'value="' + escapeHtml(String(c.dflt_value)).replace(/^'|'$/g, '') + '"' : ''}>
+                </div>`;
+            }).join('');
+            // 显示模态框
+            const overlay = document.getElementById('mdbModalOverlay');
+            overlay.style.display = 'flex';
+        }
+
+        function closeMdbModal() {
+            document.getElementById('mdbModalOverlay').style.display = 'none';
+            mdbModalSchema = null;
+        }
+
+        async function submitMdbInsert() {
+            if (!mdbModalSchema) return;
+            const inputs = {};
+            const form = document.getElementById('mdbModalForm');
+            form.querySelectorAll('.mdb-modal-input').forEach(inp => {
+                const f = inp.dataset.field;
+                const v = inp.value.trim();
+                // 有默认值且未填 → 不提交（用默认）；空字符串也提交（后端可能报错，让用户看到）
+                if (v !== '') inputs[f] = v;
+            });
+            // 校验必填字段
+            const missing = mdbModalSchema.filter(c => !c.auto && c.notnull && !c.dflt_value && !(c.name in inputs));
+            if (missing.length) {
+                alert('❌ 必填字段未填: ' + missing.map(c => c.name).join(', '));
+                return;
+            }
+            if (!Object.keys(inputs).length) { alert('至少填一个字段'); return; }
+            const r = await fetch('/api/memorydb/insert', {
+                method: 'POST', headers: {'Content-Type':'application/json'},
+                body: JSON.stringify({table: mdbCurrentTable, columns: Object.keys(inputs), values: Object.values(inputs)})
+            });
+            const data = await r.json();
+            if (data.error) { alert('❌ 失败: ' + data.error); return; }
+            closeMdbModal();
+            alert('✅ 新增成功 id=' + (data.id !== undefined ? data.id : inputs[Object.keys(inputs)[0]]));
+            loadMdbRows();
+        }
+
+        // Enter 提交 / Esc 关闭
+        document.addEventListener('keydown', function(e) {
+            if (document.getElementById('mdbModalOverlay').style.display !== 'flex') return;
+            if (e.key === 'Escape') closeMdbModal();
+        });
+
+        async function mdbEditRow(rowI) {
+            // 优先从 mdbCache 取，兼容老调用
+            const tables = await mdbGetTables();
+            const t = tables.find(x => x.name === mdbCurrentTable);
+            if (!t) return;
+            // mdbCache 在 loadMdbRows 里维护
+            const row = (window._mdbCache && window._mdbCache[rowI]) || null;
+            if (!row) { alert('行数据已失效，请重新查询'); return; }
+            const cols = t.columns;
+            const sets = {};
+            for (const c of cols) {
+                if (c === 'id' || c === t.pk || c === 'created_at' || c === 'updated_at') continue;
+                const cur = row[c];
+                const v = prompt(`修改 ${c}（留空不改）：`, cur !== null && cur !== undefined ? String(cur) : '');
+                if (v === null) return;
+                if (v !== '' && v !== String(cur)) sets[c] = v;
+            }
+            if (!Object.keys(sets).length) { alert('无修改'); return; }
+            const r = await fetch('/api/memorydb/update', {
+                method: 'POST', headers: {'Content-Type':'application/json'},
+                body: JSON.stringify({table: mdbCurrentTable, pk_value: row[t.pk], set: sets})
+            });
+            const data = await r.json();
+            if (data.error) { alert('失败: ' + data.error); return; }
+            alert(`✅ 已更新 ${data.affected} 行`);
+            loadMdbRows();
+        }
+
+        async function mdbDeleteRow(pkVal) {
+            // 校验：null/undefined/空字符串都拒绝（避免空主键误删）
+            if (pkVal === null || pkVal === undefined || pkVal === '' || pkVal === 'null' || pkVal === 'undefined') {
+                alert('❌ 主键值无效（' + pkVal + '），不能删除。请重新查询数据。');
+                return;
+            }
+            // 找当前行用于预览
+            const idx = window._mdbCache ? window._mdbCache.findIndex(r => String(r[Object.keys(r)[0]]) === String(pkVal)) : -1;
+            const row = idx >= 0 ? window._mdbCache[idx] : null;
+            const preview = row ? '\\n  ' + Object.entries(row).slice(0, 3).map(([k,v]) => k + '=' + String(v).slice(0,40)).join('\\n  ') : '';
+            if (!confirm('确定删除这一行？\\n  表: ' + mdbCurrentTable + '\\n  主键: ' + pkVal + preview + '\\n\\n此操作不可恢复！')) return;
+            const r = await fetch('/api/memorydb/delete', {
+                method: 'POST', headers: {'Content-Type':'application/json'},
+                body: JSON.stringify({table: mdbCurrentTable, pk_value: pkVal})
+            });
+            const data = await r.json();
+            if (data.error) { alert('❌ 失败: ' + data.error); return; }
+            if (data.affected === 0) {
+                alert('⚠️ 已删除 0 行（主键 ' + pkVal + ' 在表中不存在或已被删除）');
+            } else {
+                alert('✅ 已删除 ' + data.affected + ' 行');
+            }
+            loadMdbRows();
+        }
+
+        mdbLoadTables();
+    </script>
+    </div><!-- /.main -->
+    </div><!-- /.app -->
+</body>
+</html>

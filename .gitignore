@@ -1,0 +1,26 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+.env
+
+# 运行时数据（Agent 记忆/会话，不进版本库）
+data/*.db
+data/*.db-shm
+data/*.db-wal
+data/.model_config
+
+# 本地状态与日志
+.thread_id
+*.log
+identifier.sqlite
+system_commands.log
+
+# 调试面板本地静态缓存
+app/server/static/marked.min.js
