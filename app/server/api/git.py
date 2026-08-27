@@ -43,6 +43,19 @@ async def api_deliverables_preview(name: str = ""):
         return {"name": safe, "content": f"[读取失败] {e}"}
 
 
+@router.get("/api/deliverables/download")
+async def api_deliverables_download(name: str = ""):
+    """下载交付物文件。"""
+    import os as _os
+    from fastapi.responses import FileResponse
+    from app.config import BASE_DIR
+    safe = _os.path.basename(name)  # 防路径穿越
+    p = _os.path.join(BASE_DIR, "deliverables", safe)
+    if not _os.path.isfile(p):
+        return JSONResponse({"error": "文件不存在"}, status_code=404)
+    return FileResponse(p, filename=safe)
+
+
 @router.get("/api/git/log")
 async def api_git_log(limit: int = 20):
     return {"commits": git_log(limit), "auto_git": is_auto_git_enabled()}
