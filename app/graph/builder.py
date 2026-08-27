@@ -223,6 +223,14 @@ def chatbot(state: State, config: RunnableConfig):
     ret = {"messages": [AIMessage(content=content)], "thread_id": thread_id}
     if state.get("pending_plan"):
         ret["pending_plan"] = state["pending_plan"]
+    # 自动 git 版本快照：Agent 本轮改动（代码/交付物）提交入库
+    try:
+        from app.server.git_ops import auto_snapshot
+        _snap = auto_snapshot(f"对话：{user_content[:40]}")
+        if _snap.get("commit"):
+            add_log_entry("info", f"git 快照: {_snap['commit']}")
+    except Exception:
+        pass
     return ret
 
 

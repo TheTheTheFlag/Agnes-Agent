@@ -123,10 +123,12 @@ from app.server.api import system as _api_system
 from app.server.api import memory as _api_memory
 from app.server.api import tools as _api_tools
 from app.server.api import chat as _api_chat
+from app.server.api import git as _api_git
 app.include_router(_api_system.router)
 app.include_router(_api_memory.router)
 app.include_router(_api_tools.router)
 app.include_router(_api_chat.router)
+app.include_router(_api_git.router)
 
 _SCHED_DB = DB_PATH  # 定时任务表复用 memory.db
 
