@@ -167,7 +167,7 @@ def create_executor_node(llm, tools_list):
                     return allow, None
             return True, None
 
-        loop = ReActLoop(llm_with_tools, max_iterations=8)
+        loop = ReActLoop(llm_with_tools, max_iterations=5)
         final_result = None
         artifacts = []
         status = "failed"
@@ -184,6 +184,10 @@ def create_executor_node(llm, tools_list):
                 status = "done"
                 break
             except Exception as e:
+                # 审批信号（GraphInterrupt）必须冒泡到 graph 层触发人工审批，不能当失败
+                from langgraph.errors import GraphInterrupt
+                if isinstance(e, GraphInterrupt):
+                    raise
                 print(f"  ⚠️ 子任务执行异常（第 {attempt + 1}/3 次）: {type(e).__name__}: {str(e)[:120]}")
                 final_result = f"执行失败: {e}"
                 artifacts = []
