@@ -139,14 +139,32 @@ class MemoryManager:
     # -------------------- 消息记录 --------------------
     def add_message(self, thread_id: str, role: str, content: str = None,
                     tool_calls: List[Dict] = None, tool_call_id: str = None):
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                """INSERT INTO messages (thread_id, role, content, tool_calls, tool_call_id, timestamp)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (thread_id, role, content,
-                 json.dumps(tool_calls, ensure_ascii=False) if tool_calls else None,
-                 tool_call_id, datetime.now())
-            )
+        # 幂等去重：LangGraph 的 interrupt/resume 会重放节点（审批场景），
+        # 导致 chatbot 节点的 add_message 重复执行。同会话最近一条同 role+content
+        # 的消息在短时间窗口内视为同一次，跳过重复插入。
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                last = conn.execute(
+                    "SELECT content, timestamp FROM messages WHERE thread_id=? AND role=? ORDER BY id DESC LIMIT 1",
+                    (thread_id, role)
+                ).fetchone()
+                if last and last[0] == content:
+                    try:
+                        from datetime import datetime as _dt
+                        last_ts = _dt.fromisoformat(last[1])
+                        if (datetime.now() - last_ts).total_seconds() < 60:
+                            return  # 节点重放，跳过
+                    except Exception:
+                        pass
+                conn.execute(
+                    """INSERT INTO messages (thread_id, role, content, tool_calls, tool_call_id, timestamp)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (thread_id, role, content,
+                     json.dumps(tool_calls, ensure_ascii=False) if tool_calls else None,
+                     tool_call_id, datetime.now())
+                )
+        except Exception:
+            pass
 
     def get_thread_messages(self, thread_id: str, limit: int = 100) -> List[Dict]:
         with sqlite3.connect(self.db_path) as conn:
