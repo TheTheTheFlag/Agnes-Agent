@@ -221,7 +221,7 @@
     <!-- 抽屉：控制面板浮层（沉浸式聊天时收在右侧） -->
     <!-- 交付物弹窗 -->
     <div class="drawer-mask" id="delivMask" style="display:none;" onclick="closeDeliverables()"></div>
-    <div class="drawer" id="delivPanel" style="right:-80vw; width:60vw; max-width:60vw;">
+    <div class="drawer" id="delivPanel" style="width:60vw; max-width:60vw;">
         <div class="drawer-head">
             <span class="drawer-title">📦 交付物</span>
             <button class="drawer-close" onclick="closeDeliverables()">✕</button>
@@ -794,7 +794,7 @@
             }
         });
         chatInput.addEventListener('keydown', function(e) {
-            if (e.key === 'Enter' && !e.shiftKey) {
+            if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
                 e.preventDefault();
                 sendChat();
             } else if (e.key === 'Escape') {
