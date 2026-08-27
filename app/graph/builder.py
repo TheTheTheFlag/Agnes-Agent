@@ -223,6 +223,10 @@ def chatbot(state: State, config: RunnableConfig):
     ret = {"messages": [AIMessage(content=content)], "thread_id": thread_id}
     if state.get("pending_plan"):
         ret["pending_plan"] = state["pending_plan"]
+    # 审批模式也要写回 graph state：session_allow / always_allow 需跨轮持久化，
+    # 否则下一轮 chatbot 读到 per_ask 又要求审批（用户选"本次会话允许"就失效了）。
+    if state.get("approval_mode"):
+        ret["approval_mode"] = state["approval_mode"]
     # 自动 git 版本快照：Agent 本轮改动（代码/交付物）提交入库
     try:
         from app.server.git_ops import auto_snapshot
