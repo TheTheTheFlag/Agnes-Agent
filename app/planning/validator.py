@@ -57,7 +57,7 @@ def create_validator_node():
 
         print(f"[Validator] {'通过' if state['_validation_passed'] else '失败'}")
         add_log_entry("info", f"验证: {'通过' if state['_validation_passed'] else '失败'}", {"passed": state["_validation_passed"]})
-        add_event("validator", {"passed": state["_validation_passed"]})
+        add_event("validator", {"passed": state["_validation_passed"]}, thread_id)
         return state
     return validator_node
 

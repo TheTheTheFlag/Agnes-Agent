@@ -99,7 +99,7 @@ class ReActLoop:
                         messages.append(ToolMessage(content="用户取消", tool_call_id=tool_id))
                         continue
 
-                result = self._execute_tool(tool_name, params, tools, state)
+                result = self._execute_tool(tool_name, params, tools, state, tool_id=tool_id)
                 if on_tool_after:
                     on_tool_after(tool_name, params, result)
 
@@ -192,10 +192,20 @@ class ReActLoop:
             return content.split("FINAL_ANSWER:", 1)[1].strip()
         return content if content else "任务完成"
 
-    def _execute_tool(self, tool_name, params, tools, state):
+    def _execute_tool(self, tool_name, params, tools, state, tool_id=None):
         for tool in tools:
             if tool.name == tool_name:
                 try:
+                    # 统一用完整 ToolCall 格式调用：langchain 对所有工具都支持该格式，
+                    # 且带 InjectedToolCallId 的工具（request_planning / update_user_*）必须用它，
+                    # 否则会抛 "must be invoked with a full model ToolCall" 错误。
+                    if tool_id:
+                        return tool.invoke({
+                            'args': params,
+                            'name': tool_name,
+                            'type': 'tool_call',
+                            'id': tool_id,  # LangChain ToolCall 用 id 字段（非 tool_call_id）
+                        })
                     return tool.invoke(params)
                 except Exception as e:
                     return f"工具执行错误: {str(e)}"

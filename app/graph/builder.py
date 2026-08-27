@@ -111,7 +111,7 @@ def chatbot(state: State, config: RunnableConfig):
     if memory_section:
         system_text = system_text + "\n" + memory_section
 
-    update_prompt(system_text)
+    update_prompt(system_text, thread_id)
     update_state(state)
 
     # 工具调用前的安全检查
@@ -154,7 +154,7 @@ def chatbot(state: State, config: RunnableConfig):
         except Exception as e:
             logger.error(f"写入失败: {e}")
         add_log_entry("info", f"工具: {name}", {"params": params, "result_preview": str(result)[:200]})
-        add_event("tool_call", {"name": name, "params": params})
+        add_event("tool_call", {"name": name, "params": params}, thread_id)
 
     # 审批 hook：仅 system_command 走人工审批；其他工具直接放行
     def interrupt_handler(name, params):

@@ -126,7 +126,7 @@ def create_executor_node(llm, tools_list):
         else:
             print(f"  ❌ 失败")
             add_log_entry("error", f"子任务 {sub_id} 失败", {"error": final_result[:100]})
-        add_event("executor", {"subtask": sub_id, "status": status})
+        add_event("executor", {"subtask": sub_id, "status": status}, thread_id)
 
         # 关键：从 DB 重新加载最新 subtask 状态，重建 state["task_plan"] 中的 subtasks 列表，
         # 否则 route_after_executor 看到的还是创建时的 pending 状态，会导致死循环。

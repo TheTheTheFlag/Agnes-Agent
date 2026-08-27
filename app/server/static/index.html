@@ -207,6 +207,7 @@
             <span id="statusText">已连接</span>
             <span id="lastUpdate" style="font-size:12px;color:var(--ink-soft);"></span>
             <span style="font-size:12px;color:var(--ink-soft);" id="currentModelLabel">模型: -</span>
+            <button class="drawer-btn" style="background:linear-gradient(135deg, var(--green), var(--blue));" onclick="openDeliverables()">📦 交付物</button>
             <button class="drawer-btn" onclick="openDrawer()">⚙ 面板</button>
         </div>
     </div>
@@ -218,6 +219,24 @@
     </div>
 
     <!-- 抽屉：控制面板浮层（沉浸式聊天时收在右侧） -->
+    <!-- 交付物弹窗 -->
+    <div class="drawer-mask" id="delivMask" style="display:none;" onclick="closeDeliverables()"></div>
+    <div class="drawer" id="delivPanel" style="right:-80vw; width:60vw; max-width:60vw;">
+        <div class="drawer-head">
+            <span class="drawer-title">📦 交付物</span>
+            <button class="drawer-close" onclick="closeDeliverables()">✕</button>
+        </div>
+        <div class="drawer-body" style="flex-direction:column;">
+            <div id="delivList" style="padding:12px;overflow-y:auto;flex:1;">
+                <div class="empty-state">加载中...</div>
+            </div>
+            <div id="delivPreview" style="padding:12px;border-top:1px solid var(--line);max-height:40%;overflow:auto;display:none;">
+                <div class="panel-title" id="delivPreviewTitle" style="margin-bottom:8px;">预览</div>
+                <div class="code-block" id="delivPreviewContent" style="max-height:300px;">-</div>
+            </div>
+        </div>
+    </div>
+
     <div class="drawer-mask" id="drawerMask" onclick="closeDrawer()"></div>
     <div class="drawer" id="drawer">
         <div class="drawer-head">
@@ -232,7 +251,7 @@
 
     <div class="tab-content" id="tab-state">
         <div class="panel">
-            <div class="panel-title"><span>当前 State</span><span class="badge" id="stateBadge">-</span></div>
+            <div class="panel-title"><span>📊 会话状态</span><span class="badge" id="stateBadge">-</span></div>
             <div class="code-block" id="stateContent">等待数据...</div>
         </div>
     </div>
@@ -266,18 +285,9 @@
             <div class="code-block" id="promptContent" style="max-height:700px;">等待数据...</div>
         </div>
     </div>
-    <div class="tab-content" id="tab-logs">
-        <div class="panel">
-            <div class="flex-between">
-                <div class="panel-title" style="margin-bottom:0;"><span>ReAct 日志</span><span class="badge" id="logBadge">-</span></div>
-                <button class="btn btn-danger" onclick="clearLogs()">清空</button>
-            </div>
-            <div class="log-container" id="logContainer"><div class="empty-state">暂无日志</div></div>
-        </div>
-    </div>
     <div class="tab-content" id="tab-events">
         <div class="panel">
-            <div class="panel-title"><span>事件流</span><span class="badge" id="eventBadge">-</span></div>
+            <div class="panel-title"><span>📋 执行事件</span><span class="badge" id="eventBadge">-</span></div>
             <div class="log-container" id="eventContainer"><div class="empty-state">暂无事件</div></div>
         </div>
     </div>
@@ -285,7 +295,7 @@
     <div class="tab-content" id="tab-memory">
         <div class="panel">
             <div class="flex-between">
-                <div class="panel-title" style="margin-bottom:0;"><span>🧠 5 层记忆快照</span><span class="badge" id="memoryBadge">-</span></div>
+                <div class="panel-title" style="margin-bottom:0;"><span>🧠 记忆中心</span><span class="badge" id="memoryBadge">-</span></div>
                 <div style="display:flex;gap:8px;align-items:center;">
                     <select id="memoryThreadSelect" onchange="loadMemory()" style="background:#0d1117;color:#e6edf3;border:1px solid #30363d;padding:4px 8px;border-radius:4px;font-size:12px;max-width:300px;"></select>
                     <button class="btn" onclick="refreshMemoryThreads()">刷新列表</button>
@@ -305,7 +315,7 @@
     <div class="tab-content" id="tab-tools">
         <div class="panel">
             <div class="flex-between">
-                <div class="panel-title" style="margin-bottom:0;"><span>🔧 已注册工具</span><span class="badge" id="toolsBadge">-</span></div>
+                <div class="panel-title" style="margin-bottom:0;"><span>🔧 工具注册</span><span class="badge" id="toolsBadge">-</span></div>
                 <button class="btn" onclick="loadTools()">刷新</button>
             </div>
             <div id="toolsContainer"><div class="empty-state">加载中...</div></div>
@@ -339,7 +349,7 @@
     <div class="tab-content" id="tab-memorydb">
         <div class="panel">
             <div class="flex-between">
-                <div class="panel-title" style="margin-bottom:0;"><span>🗄 Memory DB 浏览器</span><span class="badge" id="mdbBadge">-</span></div>
+                <div class="panel-title" style="margin-bottom:0;"><span>🗄 数据库浏览器</span><span class="badge" id="mdbBadge">-</span></div>
                 <div>
                     <select id="mdbTable" onchange="onMdbTableChange()" style="background:#fff;color:var(--ink);border:1px solid var(--line);padding:6px 10px;border-radius:8px;font-size:13px;min-width:160px;"></select>
                     <button class="btn" onclick="loadMdbSchema()">刷新表</button>
@@ -436,14 +446,14 @@
 
         // ===== 抽屉（控制面板浮层）：导航 + tab-content 移动 =====
         const DRAWER_TABS = [
-            { id: 'state',     label: '📊 State' },
-            { id: 'prompt',    label: '📄 提示词' },
-            { id: 'logs',      label: '📝 日志' },
-            { id: 'events',    label: '📋 事件' },
-            { id: 'memory',    label: '🧠 5层记忆' },
-            { id: 'memorydb',  label: '🗄 Memory DB' },
-            { id: 'tools',     label: '🔧 工具' },
+            { id: 'state',     label: '📊 会话状态' },
+            { id: 'prompt',    label: '📄 系统提示词' },
+            { id: 'events',    label: '📋 执行事件' },
+            { id: 'memory',    label: '🧠 记忆中心' },
+            { id: 'memorydb',  label: '🗄 数据库' },
+            { id: 'tools',     label: '🔧 工具注册' },
             { id: 'scheduler', label: '🗓 定时任务' },
+            { id: 'git',       label: '🗂 版本管理' },
             { id: 'settings',  label: '⚙ 设置' },
         ];
         const DRAWER_LOADERS = {
@@ -454,7 +464,6 @@
             settings: loadSettings,
             state: () => refreshAll(),
             prompt: () => refreshAll(),
-            logs: () => refreshAll(),
             events: () => refreshAll(),
         };
         let drawerActiveTab = 'state';
@@ -480,6 +489,58 @@
         function closeDrawer() {
             drawerMaskEl.style.display = 'none';
             drawerEl.classList.remove('open');
+        }
+
+        // ===== 交付物弹窗 =====
+        async function openDeliverables() {
+            const mask = document.getElementById('delivMask');
+            const panel = document.getElementById('delivPanel');
+            mask.style.display = 'block';
+            panel.classList.add('open');
+            document.getElementById('delivPreview').style.display = 'none';
+            await loadDeliverables();
+        }
+
+        function closeDeliverables() {
+            document.getElementById('delivMask').style.display = 'none';
+            document.getElementById('delivPanel').classList.remove('open');
+        }
+
+        async function loadDeliverables() {
+            const c = document.getElementById('delivList');
+            try {
+                const r = await fetch('/api/deliverables');
+                const d = await r.json();
+                const files = d.files || [];
+                if (!files.length) {
+                    c.innerHTML = '<div class="empty-state">交付物目录为空</div>';
+                    return;
+                }
+                c.innerHTML = files.map(f => `
+                    <div class="thread-row" onclick="previewDeliverable('${escapeHtml(f.name)}')" title="点击预览">
+                        <div>
+                            <div class="tid" style="color:var(--green);">📄 ${escapeHtml(f.name)}</div>
+                            <div class="meta">${f.size} 字节</div>
+                        </div>
+                        <div class="meta">查看 ▸</div>
+                    </div>`).join('');
+            } catch (e) {
+                c.innerHTML = '<div class="empty-state">加载失败: ' + escapeHtml(e.message) + '</div>';
+            }
+        }
+
+        async function previewDeliverable(name) {
+            const pv = document.getElementById('delivPreview');
+            document.getElementById('delivPreviewTitle').textContent = '📄 ' + name;
+            document.getElementById('delivPreviewContent').textContent = '加载中...';
+            pv.style.display = 'block';
+            try {
+                const r = await fetch('/api/deliverables/preview?name=' + encodeURIComponent(name));
+                const d = await r.json();
+                document.getElementById('delivPreviewContent').textContent = d.content || '(空)';
+            } catch (e) {
+                document.getElementById('delivPreviewContent').textContent = '加载失败: ' + e.message;
+            }
         }
 
         function renderDrawerNav() {
@@ -517,7 +578,7 @@
                 el.textContent = data.prompt;
                 document.getElementById('promptBadge').textContent = data.prompt.length + ' 字符';
                 document.getElementById('statPrompt').textContent = data.prompt.length;
-            } else el.textContent = '暂无数据';
+            } else el.textContent = '（该会话尚未对话，发送消息后自动生成系统提示词）';
         }
 
         function renderLogs(data) {
@@ -565,12 +626,13 @@
             try {
                 const tid = currentThreadId ? encodeURIComponent(currentThreadId) : '';
                 const stateUrl = tid ? '/api/state?thread_id=' + tid : '/api/state';
-                const [stateRes, promptRes, logsRes, eventsRes] = await Promise.all([
-                    fetch(stateUrl), fetch('/api/prompt'), fetch('/api/logs?limit=100'), fetch('/api/events?limit=50')
+                const promptUrl = tid ? '/api/prompt?thread_id=' + tid : '/api/prompt';
+                const eventsUrl = tid ? '/api/events?limit=50&thread_id=' + tid : '/api/events?limit=50';
+                const [stateRes, promptRes, eventsRes] = await Promise.all([
+                    fetch(stateUrl), fetch(promptUrl), fetch(eventsUrl)
                 ]);
                 renderState(await stateRes.json());
                 renderPrompt(await promptRes.json());
-                renderLogs(await logsRes.json());
                 renderEvents(await eventsRes.json());
             } catch(e) { document.getElementById('statusText').textContent = '⚠️ 连接失败'; }
         }
@@ -849,6 +911,12 @@
                             if (evt.phase === 'start' && !stepLogs.includes(evt.name)) stepLogs.push(evt.name);
                             setChatStatus('⏳ 执行节点: ' + stepLogs.join(' → '), true);
                             if (evt.phase === 'start' && evt.name === 'chatbot') fullReply = '';
+                            // 规划/执行/验证等节点在对话窗口显示进度气泡
+                            if (evt.phase === 'start' && evt.name !== 'chatbot') {
+                                renderNodeBubble(evt.name, '⏳');
+                            } else if (evt.phase === 'end' && evt.name !== 'chatbot') {
+                                renderNodeBubble(evt.name, '✅');
+                            }
                         } else if (evt.step === 'token') {
                             fullReply += evt.text;
                             thinking.classList.remove('thinking');
@@ -918,6 +986,29 @@
                 thinking.textContent = '❌ ' + e.message;
                 document.getElementById('chatStatus').textContent = '错误';
             }
+        }
+
+        // 节点进度气泡：planner/executor/validator/summarizer 在对话窗口显示
+        const nodeBubbles = {};
+        const NODE_LABELS = { planner: '任务规划', executor: '任务执行', validator: '结果验证', summarizer: '结果汇总' };
+        function renderNodeBubble(node, icon) {
+            const c = document.getElementById('chatMessages');
+            const empty = c.querySelector('.empty-state');
+            if (empty) empty.remove();
+            const label = NODE_LABELS[node] || node;
+            let div = nodeBubbles[node];
+            if (!div) {
+                div = document.createElement('div');
+                div.className = 'chat-bubble system';
+                div.style.alignSelf = 'flex-start';
+                div.style.fontSize = '12px';
+                div.style.padding = '6px 12px';
+                div.id = 'node-bubble-' + node;
+                nodeBubbles[node] = div;
+                c.appendChild(div);
+            }
+            div.textContent = `${icon} ${label}`;
+            c.scrollTop = c.scrollHeight;
         }
 
         // 工具调用卡片：对话过程中可视化"调了什么工具 + 输入/输出"

@@ -24,7 +24,10 @@ async def get_state(thread_id: str = ""):
 
 
 @router.get("/api/prompt")
-async def get_prompt():
+async def get_prompt(thread_id: str = ""):
+    # 优先返回指定会话的提示词；未指定则全局
+    if thread_id and thread_id in _store._prompt_snapshots:
+        return JSONResponse({"prompt": _store._prompt_snapshots[thread_id], "thread_id": thread_id})
     return JSONResponse({"prompt": _store._prompt_snapshot})
 
 
@@ -38,10 +41,11 @@ async def get_logs(limit: int = Query(100, ge=1, le=500)):
 
 
 @router.get("/api/events")
-async def get_events(limit: int = Query(50, ge=1, le=200)):
-    events = _store.get_persisted_events(limit)
+async def get_events(limit: int = Query(50, ge=1, le=200), thread_id: str = ""):
+    # 按会话过滤：指定 thread_id 只返回该会话事件，避免跨会话混显
+    events = _store.get_persisted_events(limit, thread_id=thread_id or None)
     if not events and _store._events:
-        events = _store._events[-limit:]
+        events = [e for e in _store._events[-limit:] if not thread_id or e.get("thread_id") == thread_id]
     return JSONResponse({"events": events, "total": len(events)})
 
 

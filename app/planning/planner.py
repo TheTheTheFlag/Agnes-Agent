@@ -76,6 +76,6 @@ def create_planner_node(llm):
 
         print(f"[Planner] 生成 {len(subtasks)} 个子任务")
         add_log_entry("info", f"规划: {len(subtasks)} 个子任务", {"goal": goal[:100]})
-        add_event("planner", {"subtasks": len(subtasks)})
+        add_event("planner", {"subtasks": len(subtasks)}, thread_id)
         return state
     return planner_node

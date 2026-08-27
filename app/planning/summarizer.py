@@ -42,7 +42,7 @@ def create_summarizer_node(llm):
 
         print("[Summarizer] 完成")
         add_log_entry("success", "汇总完成")
-        add_event("summarizer", {"done": True})
+        add_event("summarizer", {"done": True}, thread_id)
 
         # 显式 return 整个 state 的更新，避免 LangGraph 漏掉 in-memory 改动
         return {
