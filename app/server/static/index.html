@@ -370,26 +370,6 @@
         </div>
     </div>
 
-    <div class="tab-content" id="tab-git">
-        <div class="panel">
-            <div class="flex-between">
-                <div class="panel-title" style="margin-bottom:0;"><span>🗂 版本历史（Agent 自动快照）</span><span class="badge" id="gitBadge">-</span></div>
-                <div style="display:flex;gap:8px;align-items:center;">
-                    <label style="font-size:12px;color:var(--ink-soft);display:flex;align-items:center;gap:4px;">
-                        <input type="checkbox" id="gitAuto" onchange="toggleGitAuto()"> 自动快照
-                    </label>
-                    <button class="btn" onclick="snapshotGit()">📸 手动快照</button>
-                    <button class="btn" onclick="loadGit()">刷新</button>
-                </div>
-            </div>
-            <div class="log-container" id="gitLogContainer" style="max-height:400px;"><div class="empty-state">加载中...</div></div>
-        </div>
-        <div class="panel">
-            <div class="panel-title"><span>📝 未提交变更</span><span class="badge" id="gitStatusBadge">-</span></div>
-            <div class="code-block" id="gitStatusContent" style="max-height:200px;">-</div>
-        </div>
-    </div>
-
     <div class="tab-content" id="tab-settings">
         <div class="panel">
             <div class="panel-title"><span>🎯 默认模型设置</span><span class="badge" id="settingsBadge">-</span></div>
@@ -473,7 +453,6 @@
             { id: 'memorydb',  label: '🗄 数据库' },
             { id: 'tools',     label: '🔧 工具注册' },
             { id: 'scheduler', label: '🗓 定时任务' },
-            { id: 'git',       label: '🗂 版本管理' },
             { id: 'settings',  label: '⚙ 设置' },
         ];
         const DRAWER_LOADERS = {
@@ -957,17 +936,16 @@
                             toolLogs.push(`${evt.name}:${evt.phase}`);
                             setChatStatus('🔧 工具: ' + toolLogs.slice(-3).join(' | '), true);
                             renderToolCard(evt);
+                            // 工具完成 → 更新树中该工具行状态
+                            if (evt.name) renderNodeBubble('tool', '✅', { tool: evt.name, phase: 'done' });
                         } else if (evt.step === 'tool_chunk') {
-                            // 显示正在调用的工具名与参数（解析 tool_call_chunks）
-                            const calls = evt.calls || [];
-                            const names = calls.map(c => {
-                                try {
-                                    const m = String(c).match(/name[=:]\s*['\"]?([^'\"]+)/);
-                                    return m ? m[1] : String(c).slice(0, 40);
-                                } catch (e) { return String(c).slice(0, 40); }
-                            }).filter(Boolean);
-                            setChatStatus('🔧 调用工具中: ' + (names.join(', ') || '...'), true);
-                            if (names.length) renderNodeBubble('tool:' + names[0], '🔧', {tool: names[0]});
+                            // 显示正在调用的工具名与参数（后端已提取 name/args）
+                            const tname = evt.name || '';
+                            const targs = evt.args || '';
+                            setChatStatus(tname ? `🔧 调用工具中: ${tname}` : '🔧 调用工具中...', true);
+                            if (tname) {
+                                renderNodeBubble('tool', '🔧', { tool: tname, args: targs, phase: 'running' });
+                            }
                         } else if (evt.step === 'error') {
                             thinking.classList.remove('thinking');
                             thinking.classList.add('error');
@@ -1027,46 +1005,63 @@
             }
         }
 
-        // 节点进度气泡：规划/执行/验证以 tree 形式展示（含子任务/工具详情）
+        // 节点进度气泡：规划/执行/验证/工具以 tree 形式展示（卡片风格，与整体主题统一）
         const planTree = {};
-        const NODE_LABELS = { planner: '任务规划', executor: '任务执行', validator: '结果验证', summarizer: '结果汇总' };
+        const NODE_LABELS = { planner: '🗂 任务规划', executor: '⚙️ 任务执行', validator: '✅ 结果验证', summarizer: '📝 结果汇总' };
         function renderNodeBubble(node, icon, info) {
             const c = document.getElementById('chatMessages');
             const empty = c.querySelector('.empty-state');
             if (empty) empty.remove();
             // 记录节点信息
-            if (!planTree[node]) planTree[node] = { icon, info: info || {}, lines: [] };
+            if (!planTree[node]) planTree[node] = { icon, info: info || {}, tools: [] };
             planTree[node].icon = icon;
             if (info && info.goal) planTree[node].goal = info.goal;
             if (info && info.subtask_count) planTree[node].subtaskCount = info.subtask_count;
             if (info && info.subtasks) planTree[node].subtasks = info.subtasks;
-            if (info && info.tool) planTree[node].tool = info.tool;
-            if (info && info.desc) planTree[node].desc = info.desc;
+            if (info && info.tool) {
+                // 工具调用：追加到当前执行阶段（executor）的工具列表
+                const t = info.tool;
+                const exist = planTree[node].tools.find(x => x.name === t);
+                if (exist) {
+                    exist.status = info.phase || exist.status;
+                } else {
+                    planTree[node].tools.push({ name: t, args: info.args || '', status: info.phase || 'running' });
+                }
+            }
 
-            // 渲染整棵树
+            // 渲染整棵树（卡片容器）
             const NODE_ORDER = ['planner', 'executor', 'validator', 'summarizer'];
-            let html = '<div style="font-family:monospace;font-size:12px;line-height:1.7;">';
+            let html = '<div style="font-size:12px;line-height:1.7;">';
             for (const n of NODE_ORDER) {
                 if (!planTree[n]) continue;
                 const label = NODE_LABELS[n] || n;
                 const ic = planTree[n].icon;
-                html += `<div style="font-weight:700;color:var(--ink);">
-                    ${ic} ${label}
-                    ${planTree[n].subtaskCount ? `<span style="color:var(--ink-soft);font-weight:400;">(${planTree[n].subtaskCount} 个子任务)</span>` : ''}
-                    ${planTree[n].goal ? `<div style="color:var(--ink-soft);font-weight:400;padding-left:16px;">🎯 ${escapeHtml(planTree[n].goal)}</div>` : ''}
+                const isDone = ic === '✅';
+                html += `<div style="margin-bottom:6px;padding:6px 10px;border-left:3px solid ${isDone ? 'var(--green)' : 'var(--blue)'};background:rgba(255,255,255,0.6);border-radius:8px;">
+                    <div style="font-weight:700;color:var(--ink);">
+                        ${ic} ${label}
+                        ${planTree[n].subtaskCount ? `<span style="color:var(--ink-soft);font-weight:400;font-size:11px;">(${planTree[n].subtaskCount} 个子任务)</span>` : ''}
+                    </div>
+                    ${planTree[n].goal ? `<div style="color:var(--ink-soft);font-weight:400;padding-left:14px;font-size:12px;">🎯 ${escapeHtml(planTree[n].goal)}</div>` : ''}
                 </div>`;
                 // 子任务列表（executor）
                 if (planTree[n].subtasks && planTree[n].subtasks.length) {
-                    planTree[n].subtasks.forEach((s, i) => {
+                    planTree[n].subtasks.forEach((s) => {
                         const st = s.status === 'done' ? '✅' : (s.status === 'running' ? '⏳' : (s.status === 'failed' ? '❌' : '⬜'));
-                        html += `<div style="padding-left:24px;color:var(--ink-soft);">
-                            ${st} ${escapeHtml(String(s.id))}. ${escapeHtml(s.desc)} ${s.status === 'done' ? '<span style="color:var(--green);">完成</span>' : ''}
+                        const doneCls = s.status === 'done' ? ' style="color:var(--ink-soft);text-decoration:line-through;opacity:0.7;"' : ' style="color:var(--ink);"';
+                        html += `<div${doneCls} style="padding-left:26px;font-size:12px;margin:2px 0;">
+                            ${st} ${escapeHtml(String(s.id))}. ${escapeHtml(s.desc)}
                         </div>`;
                     });
                 }
-                // 工具调用行
-                if (planTree[n].tool) {
-                    html += `<div style="padding-left:24px;color:var(--purple);">🔧 ${escapeHtml(planTree[n].tool)}</div>`;
+                // 工具调用行（当前阶段执行过的工具）
+                if (planTree[n].tools && planTree[n].tools.length) {
+                    planTree[n].tools.forEach(t => {
+                        const st = t.status === 'done' ? '✅' : (t.status === 'running' ? '⏳' : '🔧');
+                        html += `<div style="padding-left:26px;color:var(--purple);font-size:12px;font-family:monospace;">
+                            ${st} ${escapeHtml(t.name)}${t.args ? ` <span style="color:var(--ink-soft);">${escapeHtml(String(t.args).slice(0, 60))}</span>` : ''}
+                        </div>`;
+                    });
                 }
             }
             html += '</div>';
@@ -1074,10 +1069,13 @@
             let container = document.getElementById('plan-tree-bubble');
             if (!container) {
                 container = document.createElement('div');
-                container.className = 'chat-bubble system';
+                container.className = 'chat-bubble tool';
                 container.id = 'plan-tree-bubble';
                 container.style.alignSelf = 'flex-start';
                 container.style.maxWidth = '95%';
+                container.style.background = 'rgba(255,255,255,0.75)';
+                container.style.borderLeft = '3px solid var(--purple)';
+                container.style.color = 'var(--ink)';
                 c.appendChild(container);
             }
             container.innerHTML = html;
@@ -1409,49 +1407,6 @@
 
         // ===== 设置 tab：默认模型 + 模型接入管理 =====
         // ===== 版本管理 tab（git 快照历史）=====
-        async function loadGit() {
-            const r = await fetch('/api/git/log?limit=20');
-            const data = await r.json();
-            const commits = data.commits || [];
-            const c = document.getElementById('gitLogContainer');
-            if (!c) return;
-            document.getElementById('gitBadge').textContent = commits.length + ' 个提交';
-            document.getElementById('gitAuto').checked = !!data.auto_git;
-            if (!commits.length) {
-                c.innerHTML = '<div class="empty-state">暂无提交（Agent 对话改动后自动生成快照）</div>';
-            } else {
-                c.innerHTML = commits.map(cc => `
-                    <div class="log-entry" style="align-items:center;">
-                        <span class="time" style="min-width:110px;">${cc.date}</span>
-                        <span class="level info" style="min-width:56px;">${cc.hash}</span>
-                        <span class="message">${escapeHtml(cc.message)}</span>
-                    </div>`).join('');
-            }
-            const r2 = await fetch('/api/git/status');
-            const d2 = await r2.json();
-            document.getElementById('gitStatusBadge').textContent = (d2.count || 0) + ' 个文件';
-            document.getElementById('gitStatusContent').textContent =
-                (d2.files && d2.files.length ? d2.files.map(f => `${f.code} ${f.path}`).join('\n') : '（无未提交变更）');
-        }
-
-        async function snapshotGit() {
-            const r = await fetch('/api/git/snapshot', {
-                method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({reason: '手动快照'})
-            });
-            const d = await r.json();
-            alert(d.skipped ? ('已跳过: ' + d.skipped) : ('✅ 已提交: ' + (d.commit || '')));
-            loadGit();
-        }
-
-        async function toggleGitAuto() {
-            const enabled = document.getElementById('gitAuto').checked;
-            await fetch('/api/git/auto', {
-                method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({enabled})
-            });
-        }
-
         async function loadSettings() {
             const r = await fetch('/api/models');
             const data = await r.json();

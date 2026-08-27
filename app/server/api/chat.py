@@ -80,7 +80,10 @@ async def chat_endpoint(payload: dict):
                             # 工具调用参数增量也透传（便于前端展示意图）
                             tool_calls = getattr(chunk, "tool_call_chunks", None)
                             if tool_calls:
-                                sync_q.put({"step": "tool_chunk", "calls": [str(tc)[:120] for tc in tool_calls], "node": node})
+                                for tc in tool_calls:
+                                    tc_name = getattr(tc, "name", None)
+                                    tc_args = getattr(tc, "args", "") or ""
+                                    sync_q.put({"step": "tool_chunk", "name": tc_name, "args": str(tc_args)[:200], "node": node})
                         else:
                             # updates 模式：payload 是 {node: update_dict}
                             for node, upd in (payload or {}).items():

@@ -114,9 +114,12 @@ def chatbot(state: State, config: RunnableConfig):
     update_prompt(system_text, thread_id)
     update_state(state)
 
+    # 需要人工审批的工具：命令执行 + 文件写/改/删
+    _APPROVAL_TOOLS = ("system_command", "execute_command", "write_file", "edit_file", "delete_file")
+
     # 工具调用前的安全检查
     def on_tool_before(name, params):
-        if name == "system_command":
+        if name in _APPROVAL_TOOLS:
             cmd = params.get('command', '')
             for d in ['rm -rf /', 'dd ', 'mkfs', 'format', 'shutdown']:
                 if d in cmd:
@@ -139,12 +142,25 @@ def chatbot(state: State, config: RunnableConfig):
                     for k, v in data.items():
                         if v is not None:
                             mm.set_profile(k, v)
-            elif name == "system_command":
-                # 写 L4 命令历史
+            elif name in ("system_command", "execute_command"):
+                # 写 L4 命令历史（shell 命令）
                 cmd = params.get("command", "")
                 success = not str(result).startswith("执行失败") and not str(result).startswith("工具执行错误")
                 mm.add_command_history(
                     thread_id, cmd, success=success,
+                    stdout_preview=str(result)[:2000] if result else "",
+                )
+            elif name in ("write_file", "edit_file", "delete_file"):
+                # 文件写/改/删也记入操作历史（command 字段存操作摘要，便于审查）
+                op = {
+                    "write_file": "写入文件",
+                    "edit_file": "编辑文件",
+                    "delete_file": "删除文件",
+                }.get(name, name)
+                target = params.get("path", "")
+                success = not str(result).startswith("执行失败") and not str(result).startswith("工具执行错误")
+                mm.add_command_history(
+                    thread_id, f"{op}: {target}", success=success,
                     stdout_preview=str(result)[:2000] if result else "",
                 )
             elif name == "tavily_search":
@@ -156,9 +172,9 @@ def chatbot(state: State, config: RunnableConfig):
         add_log_entry("info", f"工具: {name}", {"params": params, "result_preview": str(result)[:200]})
         add_event("tool_call", {"name": name, "params": params}, thread_id)
 
-    # 审批 hook：仅 system_command 走人工审批；其他工具直接放行
+    # 审批 hook：命令执行 + 文件写/改/删走人工审批；其余工具直接放行
     def interrupt_handler(name, params):
-        if name == "system_command":
+        if name in _APPROVAL_TOOLS:
             cmd = params.get('command', '')
             mode = state.get("approval_mode", "per_ask")
             if mode == "per_ask":
@@ -168,6 +184,16 @@ def chatbot(state: State, config: RunnableConfig):
                 if new_mode and new_mode in ["per_ask", "session_allow", "always_allow"]:
                     state["approval_mode"] = new_mode
                     print(f"[审批模式] {new_mode}")
+                if not allow:
+                    # 被拒的操作也记入历史，便于审查"模型想做什么但被拒绝了"
+                    try:
+                        desc = params.get('command') or params.get('path') or ''
+                        mm.add_command_history(
+                            thread_id, f"{name}: {desc}", success=False,
+                            stdout_preview="[用户拒绝]",
+                        )
+                    except Exception:
+                        pass
                 return allow, None
         return True, None
 
@@ -335,7 +361,9 @@ def build_graph():
         "summarizer": "summarizer", "planner": "planner"
     })
     # summarizer 完成后回到 chatbot 让用户继续
-    builder.add_edge("summarizer", "chatbot")
+    # summarizer 完成后直接结束（summary 已是最终答复）。
+    # 之前回到 chatbot 会再次触发模型规划/执行，造成"任务完成后一直不结束"的循环。
+    builder.add_edge("summarizer", END)
 
     conn = sqlite3.connect(CHECKPOINT_DB_PATH, check_same_thread=False)
     checkpointer = SqliteSaver(conn)
