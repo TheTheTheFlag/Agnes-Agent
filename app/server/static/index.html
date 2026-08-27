@@ -412,7 +412,7 @@
     <div id="mdbModalOverlay" style="display:none;position:fixed;inset:0;background:rgba(45,42,62,0.55);z-index:1000;justify-content:center;align-items:center;">
         <div style="background:#fff;border-radius:16px;padding:20px;width:560px;max-width:94vw;max-height:85vh;overflow:auto;box-shadow:0 12px 40px rgba(0,0,0,0.3);">
             <div style="display:flex;align-items:center;margin-bottom:14px;">
-                <span style="font-size:15px;font-weight:800;color:var(--ink);">➕ 新增 <span id="mdbModalTable" style="font-family:monospace;color:var(--purple);"></span></span>
+                <span style="font-size:15px;font-weight:800;color:var(--ink);"><span id="mdbModalAction">➕ 新增</span> <span id="mdbModalTable" style="font-family:monospace;color:var(--purple);"></span></span>
                 <span style="flex:1;"></span>
                 <button onclick="closeMdbModal()" style="background:none;border:none;font-size:18px;cursor:pointer;color:var(--ink-soft);">✕</button>
             </div>
@@ -1083,10 +1083,12 @@
             const q = data.question || '需要审批';
             div.innerHTML = `<div style="color:var(--ink);font-weight:700;margin-bottom:6px;">🛡️ 需要人工确认</div>
                 <div style="color:var(--ink);font-size:12px;margin-bottom:8px;white-space:pre-wrap;">${escapeHtml(q)}</div>
+                <div style="color:var(--ink-soft);font-size:11px;margin-bottom:8px;">当前模式：每次询问</div>
                 <div style="display:flex;gap:6px;flex-wrap:wrap;">
                     <button class="refresh-btn" onclick="approvalResume(true, 'per_ask')">✅ 允许执行</button>
                     <button class="btn btn-danger" onclick="approvalResume(false, 'per_ask')">❌ 拒绝</button>
                     <button class="btn" onclick="approvalResume(true, 'session_allow')">♻️ 本次会话自动允许</button>
+                    <button class="btn" style="border-color:var(--orange);color:var(--orange);" onclick="approvalResume(true, 'always_allow')">🔓 完全无限制</button>
                 </div>`;
             c.appendChild(div);
             c.scrollTop = c.scrollHeight;
@@ -1588,11 +1590,17 @@
         // ===== 新增行（模态框表单，按表结构录入）=====
         let mdbModalSchema = null;  // 当前模态框的表结构
 
-        async function mdbInsertRow() {
+        // 全局：当前模态框编辑目标（null = 新增；{row, pk} = 编辑）
+        let mdbEditMode = null;
+
+        // 渲染模态框表单（新增空表单 / 编辑预填当前行值）
+        async function openMdbModal(mode, row) {
+            mdbEditMode = (mode === 'edit')
+                ? { mode: 'edit', row: row || {}, pk: t.pk || ((t.columns && t.columns[0]) || 'id') }
+                : { mode: 'insert' };
             const tables = await mdbGetTables();
             const t = tables.find(x => x.name === mdbCurrentTable);
             if (!t) return;
-            // 拉真实 schema
             let schema;
             try {
                 const r = await fetch('/api/memorydb/schema?table=' + encodeURIComponent(mdbCurrentTable));
@@ -1600,29 +1608,39 @@
             } catch (e) { alert('获取表结构失败: ' + e.message); return; }
             if (!schema.length) { alert('该表无字段'); return; }
             mdbModalSchema = schema;
-            // 渲染表单：排除自增主键，其他字段都显示（必填/默认值标记）
             document.getElementById('mdbModalTable').textContent = mdbCurrentTable;
+            document.getElementById('mdbModalAction').textContent = (mode === 'edit' ? '✏️ 编辑' : '➕ 新增');
             const form = document.getElementById('mdbModalForm');
-            form.innerHTML = schema.filter(c => !c.auto).map(c => {
+            form.innerHTML = schema.map(c => {
                 const label = c.name + ' <span style="color:var(--ink-soft);font-weight:400;">(' + (c.type || '?') + ')</span>';
                 const required = c.notnull && !c.dflt_value ? ' <span style="color:var(--red);font-weight:700;">*必填</span>' : '';
                 const defaultHint = c.dflt_value ? ' <span style="color:var(--ink-soft);">默认 ' + escapeHtml(String(c.dflt_value)) + '</span>' : '';
                 const isPk = c.pk ? ' <span style="color:var(--orange);font-weight:700;">🔑主键</span>' : '';
+                // 编辑模式预填当前行值；新增模式填默认值
+                let val = '';
+                if (mode === 'edit' && row && row[c.name] !== null && row[c.name] !== undefined) {
+                    val = String(row[c.name]);
+                } else if (c.dflt_value !== null && c.dflt_value !== undefined) {
+                    val = String(c.dflt_value).replace(/^'|'$/g, '');
+                }
                 return `<div style="display:flex;flex-direction:column;gap:4px;">
                     <label style="font-size:12px;font-weight:700;color:var(--ink);font-family:monospace;">${label}${isPk}${required}${defaultHint}</label>
                     <input class="mdb-modal-input" data-field="${c.name}" placeholder="${c.name}"
                         style="background:#fff;color:var(--ink);border:1px solid var(--line);padding:7px 10px;border-radius:8px;font-size:13px;"
-                        ${c.dflt_value !== null && c.dflt_value !== undefined ? 'value="' + escapeHtml(String(c.dflt_value)).replace(/^'|'$/g, '') + '"' : ''}>
+                        value="${escapeHtml(val)}">
                 </div>`;
             }).join('');
-            // 显示模态框
-            const overlay = document.getElementById('mdbModalOverlay');
-            overlay.style.display = 'flex';
+            document.getElementById('mdbModalOverlay').style.display = 'flex';
+        }
+
+        async function mdbInsertRow() {
+            await openMdbModal('insert', null);
         }
 
         function closeMdbModal() {
             document.getElementById('mdbModalOverlay').style.display = 'none';
             mdbModalSchema = null;
+            mdbEditMode = null;
         }
 
         async function submitMdbInsert() {
@@ -1642,6 +1660,24 @@
                 return;
             }
             if (!Object.keys(inputs).length) { alert('至少填一个字段'); return; }
+            // 编辑模式 → 走 update；新增模式 → insert
+            if (mdbEditMode && mdbEditMode.mode === 'edit') {
+                // 主键修改风险确认
+                const pkName = mdbEditMode.pk;
+                if (pkName in inputs && String(inputs[pkName]) !== String(mdbEditMode.row[pkName])) {
+                    if (!confirm(`确定修改主键字段 ${pkName}？可能导致关联数据不一致！`)) return;
+                }
+                const r = await fetch('/api/memorydb/update', {
+                    method: 'POST', headers: {'Content-Type':'application/json'},
+                    body: JSON.stringify({table: mdbCurrentTable, pk_value: mdbEditMode.row[mdbEditMode.pk], set: inputs})
+                });
+                const data = await r.json();
+                if (data.error) { alert('❌ 失败: ' + data.error); return; }
+                closeMdbModal();
+                alert(`✅ 已更新 ${data.affected} 行`);
+                loadMdbRows();
+                return;
+            }
             const r = await fetch('/api/memorydb/insert', {
                 method: 'POST', headers: {'Content-Type':'application/json'},
                 body: JSON.stringify({table: mdbCurrentTable, columns: Object.keys(inputs), values: Object.values(inputs)})
@@ -1664,27 +1700,10 @@
             const tables = await mdbGetTables();
             const t = tables.find(x => x.name === mdbCurrentTable);
             if (!t) return;
-            // mdbCache 在 loadMdbRows 里维护
             const row = (window._mdbCache && window._mdbCache[rowI]) || null;
             if (!row) { alert('行数据已失效，请重新查询'); return; }
-            const cols = t.columns;
-            const sets = {};
-            for (const c of cols) {
-                if (c === 'id' || c === t.pk || c === 'created_at' || c === 'updated_at') continue;
-                const cur = row[c];
-                const v = prompt(`修改 ${c}（留空不改）：`, cur !== null && cur !== undefined ? String(cur) : '');
-                if (v === null) return;
-                if (v !== '' && v !== String(cur)) sets[c] = v;
-            }
-            if (!Object.keys(sets).length) { alert('无修改'); return; }
-            const r = await fetch('/api/memorydb/update', {
-                method: 'POST', headers: {'Content-Type':'application/json'},
-                body: JSON.stringify({table: mdbCurrentTable, pk_value: row[t.pk], set: sets})
-            });
-            const data = await r.json();
-            if (data.error) { alert('失败: ' + data.error); return; }
-            alert(`✅ 已更新 ${data.affected} 行`);
-            loadMdbRows();
+            // 用模态框编辑（预填当前行值），与"新增"同款表单
+            await openMdbModal('edit', row);
         }
 
         async function mdbDeleteRow(pkVal) {
