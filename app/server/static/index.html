@@ -95,14 +95,7 @@
         .chat-messages { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 14px; }
         .chat-input-wrap { border-top: 1px solid var(--line); padding: 10px; position: relative; }
         .chat-status-line { display: flex; align-items: center; gap: 8px; padding: 4px 2px 8px; font-size: 12px; color: var(--ink-soft); min-height: 20px; }
-        /* 任务进度区：与状态栏样式一致，固定显示在执行消息上方 */
-        .chat-plan-progress { padding: 4px 12px 0; font-size: 12px; color: var(--ink-soft); max-height: 40%; overflow-y: auto; }
-        .chat-plan-progress .plan-progress-inner { background: rgba(255,255,255,0.6); border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; }
-        /* 执行树：已完成节点/子任务/工具默认折叠成单行，进行中展开；点击头部可切换 */
-        .plan-node .plan-node-body { display: none; }
-        .plan-node.open .plan-node-body { display: block; }
-        .plan-node-head .plan-node-toggle { float: right; color: var(--ink-soft); font-size: 11px; }
-        /* 工具卡片：完成后自动折叠成单行，点击头部展开详情 */
+
         .tool-card.collapsed .tc-body { display: none; }
         /* 节点气泡（中间过程的思考/结果/总结）：与最终对话区分，每种角色独立配色与图标 */
         .chat-bubble.node-thought { align-self: stretch; max-width: 95%; padding: 8px 12px; border-radius: 10px; font-size: 12px; line-height: 1.6; border: 1px solid var(--line); background: rgba(255,255,255,0.7); color: var(--ink); box-shadow: 0 1px 4px rgba(0,0,0,0.04); }
@@ -294,12 +287,6 @@
             <div class="chat-toolbar">
                 <span id="chatThreadLabel" style="color:#8b949e;font-size:12px;">thread: -</span>
                 <span style="flex:1"></span>
-            </div>
-            <!-- 任务进度区：执行树固定显示在状态栏上方，样式与状态栏一致；常驻显示（无任务时占位） -->
-            <div class="chat-plan-progress" id="planProgress">
-                <div class="plan-progress-inner" id="planProgressInner">
-                    <div style="color:var(--ink-soft);font-size:12px;padding:2px;">暂无任务执行 —— 规划后此处显示执行进度</div>
-                </div>
             </div>
             <div class="chat-messages" id="chatMessages">
                 <div class="empty-state">输入消息开始对话，或输入 /help 查看命令</div>
@@ -677,7 +664,9 @@
                 if (tid) {
                     // 先清空旧的节点气泡（避免重放时重复累积）
                     document.querySelectorAll('.chat-bubble.node-thought').forEach(el => el.remove());
-                    rebuildPlanTreeFromEvents(evtData.events || []);
+                    // 任务块：清空后按 events 重建
+                    document.querySelectorAll('.chat-bubble.task').forEach(el => el.remove());
+                    rebuildTasksFromEvents(evtData.events || []);
                     // 重放节点气泡：用户刷新后能恢复上下文（数量一般 < 10，不影响阅读）
                     (evtData.events || []).filter(e => e.type === 'node_thought').forEach(appendNodeBubble);
                 }
@@ -889,15 +878,11 @@
         }
 
         async function _sendChatInner() {
-            // 新对话：重置执行树（任务列表清空 + 移除聊天流任务块，显示占位）
+            // 新对话：重置任务块 + 节点气泡（state 不缓存业务数据，无需重置）
             planTree.tasks = [];
-            // 清除 UI 状态（折叠持久化），避免旧会话的用户操作影响新会话
-            planTreeUiState.nodeOpen = true;
-            Object.keys(subOpenState).forEach(k => delete subOpenState[k]);
             Object.keys(taskBlockState).forEach(k => delete taskBlockState[k]);
-            // 清空旧的节点气泡
             document.querySelectorAll('.chat-bubble.node-thought').forEach(el => el.remove());
-            renderPlanTree();
+            document.querySelectorAll('.chat-bubble.task').forEach(el => el.remove());
             renderTaskBlocks();
             const input = document.getElementById('chatInput');
             const text = input.value.trim();
@@ -1045,9 +1030,9 @@
                             if (evt.phase === 'start' && !stepLogs.includes(evt.name)) stepLogs.push(evt.name);
                             setChatStatus('⏳ 执行节点: ' + stepLogs.join(' → '), true);
                             if (evt.phase === 'start' && evt.name === 'chatbot') fullReply = '';
-                            // 规划/执行/验证等节点 → 事件树（applyPlanEvent 幂等更新）
-                            if (evt.name !== 'chatbot') {
-                                applyPlanEvent(evt.name, { data: evt.info || {} });
+                            // 规划/执行等节点 → 任务块更新（applyTaskEvent 幂等）
+                            if (evt.name !== 'chatbot' && (evt.name === 'planner' || evt.name === 'executor')) {
+                                applyTaskEvent(evt.name, { data: evt.info || {} });
                             }
                         } else if (evt.step === 'token') {
                             // 只渲染 chatbot 节点的对话 token；executor/planner 的输出由执行树+事件表达，
@@ -1133,82 +1118,52 @@
             }
         }
 
-        // ===== 执行树（多任务版）=====
-        // planTree.tasks：同一会话多个任务的列表。每个任务：
-        //   { goal, status(running/done/failed), subtask_count,
-        //     subtasks: [{id, desc, status, tools:[]}], looseTools:[] }
-        // planner 事件 = 任务边界：goal 与当前任务相同视为重规划（更新），不同则新建任务组。
+        // ===== 聊天流任务块（多任务分组）=====
+        // tasks：会话内多个任务的列表。planner/executor 事件经由 applyTaskEvent 累加到此结构。
+        // 每个任务：{ goal, status(running/done/failed), subtasks: [{id, desc, status}] }
         const planTree = { tasks: [] };
+        const taskBlockState = {}; // key=taskKey → 'open'/'closed'，用户收起后保持
 
-        function currentTask() {
-            return planTree.tasks[planTree.tasks.length - 1] || null;
-        }
-
-        function applyPlanEvent(node, evt) {
+        // 任务事件应用：planner = 任务边界（重规划归并同 goal，新建不同 goal）
+        // executor = 更新子任务状态
+        function applyTaskEvent(node, evt) {
             const info = (evt && evt.data) || {};
             if (node === 'planner') {
                 const goal = info.goal || '';
-                const last = currentTask();
+                const last = planTree.tasks[planTree.tasks.length - 1];
                 if (last && goal && last.goal && last.goal === goal) {
-                    // 重规划（同 goal）：更新当前任务组；带 subtasks 时重建骨架
+                    // 重规划：更新当前任务组（带 subtasks 时重建骨架）
                     last.subtask_count = info.subtask_count || ((info.subtasks || []).length);
                     if (info.subtasks && info.subtasks.length) {
-                        last.subtasks = info.subtasks.map(s => ({ id: s.id, desc: s.desc, status: s.status || 'pending', tools: [] }));
+                        last.subtasks = info.subtasks.map(s => ({ id: s.id, desc: s.desc, status: s.status || 'pending' }));
                     }
                 } else {
-                    // 新任务（首个任务或 goal 不同）
+                    // 新任务
                     planTree.tasks.push({
-                        goal: goal,
+                        goal,
                         status: 'running',
                         subtask_count: info.subtask_count || ((info.subtasks || []).length),
-                        subtasks: (info.subtasks || []).map(s => ({ id: s.id, desc: s.desc, status: s.status || 'pending', tools: [] })),
-                        looseTools: [],
+                        subtasks: (info.subtasks || []).map(s => ({ id: s.id, desc: s.desc, status: s.status || 'pending' })),
                     });
                 }
-            } else {
-                const task = currentTask();
+            } else if (node === 'executor') {
+                const task = planTree.tasks[planTree.tasks.length - 1];
                 if (!task) return;
-                if (node === 'executor') {
-                    if (info.subtasks && info.subtasks.length) {
-                        // 全量快照：同步子任务状态（保留已挂载的工具）
-                        const byId = {};
-                        task.subtasks.forEach(s => { byId[String(s.id)] = s; });
-                        task.subtasks = info.subtasks.map(s => {
-                            const exist = byId[String(s.id)];
-                            return { id: s.id, desc: s.desc, status: s.status, tools: exist ? exist.tools : [] };
-                        });
-                        if (info.goal && !task.goal) task.goal = info.goal;
-                    } else if (info.subtask) {
-                        // 单条状态更新
-                        const idx = task.subtasks.findIndex(s => String(s.id) === String(info.subtask));
-                        if (idx >= 0) task.subtasks[idx].status = info.status;
-                    }
-                } else if (node === 'tool_call') {
-                    // 每个工具调用事件都是一个节点（按事件时间戳 id 去重，不合并同名工具）
-                    const tool = { name: info.name || 'tool', args: info.params ? JSON.stringify(info.params) : '', id: evt.timestamp || null };
-                    if (info.subtask) {
-                        const idx = task.subtasks.findIndex(s => String(s.id) === String(info.subtask));
-                        if (idx >= 0) {
-                            if (tool.id && task.subtasks[idx].tools.some(t => t.id === tool.id)) return;
-                            task.subtasks[idx].tools.push(tool);
-                        }
-                    } else {
-                        // 无归属工具（如 request_planning，触发规划前调用）
-                        if (tool.id && task.looseTools.some(t => t.id === tool.id)) return;
-                        task.looseTools.push(tool);
-                    }
+                if (info.subtasks && info.subtasks.length) {
+                    // 全量快照
+                    task.subtasks = info.subtasks.map(s => ({ id: s.id, desc: s.desc, status: s.status }));
+                } else if (info.subtask) {
+                    // 单条状态更新
+                    const idx = task.subtasks.findIndex(s => String(s.id) === String(info.subtask));
+                    if (idx >= 0) task.subtasks[idx].status = info.status;
                 }
                 updateTaskStatus(task);
             }
-            renderPlanTree();
-            renderTaskBlocks();
         }
 
-        // 根据子任务状态推算任务组状态
         function updateTaskStatus(task) {
             const subs = task.subtasks || [];
-            if (!subs.length) return;
-            if (subs.every(s => s.status === 'done' || s.status === 'failed')) {
+            if (subs.length && subs.every(s => s.status === 'done' || s.status === 'failed')) {
                 task.status = subs.some(s => s.status === 'failed') ? 'failed' : 'done';
             } else if (subs.some(s => s.status === 'running')) {
                 task.status = 'running';
@@ -1216,129 +1171,33 @@
         }
 
         // 从 events 列表按时间正序重放（先清空再重建 → 幂等）。
-        // 事件为空（新会话/无任务）时清空并显示占位，避免旧 thread 残留。
-        function rebuildPlanTreeFromEvents(events) {
+        // 事件为空（新会话/无任务）时清空 planTree 避免旧 thread 残留。
+        function rebuildTasksFromEvents(events) {
             planTree.tasks = [];
-            // 重放也清空 UI 状态（避免与重放事件内容错位）
-            planTreeUiState.nodeOpen = true;
-            Object.keys(subOpenState).forEach(k => delete subOpenState[k]);
-            // taskBlockState 保留（用户对历史任务的折叠操作跨重放持久化）
+            // 任务块折叠状态也清空（避免旧会话操作影响新会话）
+            Object.keys(taskBlockState).forEach(k => delete taskBlockState[k]);
             if (!events || !events.length) {
-                renderPlanTree();
                 renderTaskBlocks();
                 return;
             }
             for (const evt of events) {
-                if (evt.type === 'planner' || evt.type === 'executor' || evt.type === 'tool_call') {
-                    applyPlanEvent(evt.type, evt);
+                if (evt.type === 'planner' || evt.type === 'executor') {
+                    applyTaskEvent(evt.type, evt);
                 }
             }
+            renderTaskBlocks();
         }
 
-        // ===== 顶部执行树（planProgress）：当前任务（最近一个）的详细树 =====
-        // 折叠状态由 planTreeUiState 持久化：用户收起后保持折叠，不被新事件重置。
-        const planTreeUiState = { nodeOpen: true };
-        function renderPlanTree() {
-            const prog = document.getElementById('planProgress');
-            const inner = document.getElementById('planProgressInner');
-            if (!prog || !inner) return;
-            const task = currentTask();
-            if (!task) {
-                prog.style.display = 'block';
-                inner.innerHTML = '<div style="color:var(--ink-soft);font-size:12px;padding:2px;">暂无任务执行 —— 规划后此处显示执行进度</div>';
-                return;
-            }
-            const stIcon = task.status === 'done' ? '✅' : (task.status === 'failed' ? '❌' : '⏳');
-            const n = task.subtask_count || task.subtasks.length;
-            const isOpen = planTreeUiState.nodeOpen !== false; // 默认 true；用户收起后置 false
-            let html = '<div style="font-size:12px;line-height:1.7;">';
-            html += `<div class="plan-node${isOpen ? ' open' : ''}" style="margin-bottom:6px;padding:6px 10px;border-left:3px solid ${task.status === 'done' ? 'var(--green)' : 'var(--blue)'};background:rgba(255,255,255,0.6);border-radius:8px;">
-                <div class="plan-node-head" onclick="togglePlanNode(this)" style="font-weight:700;color:var(--ink);cursor:pointer;user-select:none;">
-                    <span>🔢 任务${planTree.tasks.length} ${stIcon} ${n ? `<span style="color:var(--ink-soft);font-weight:400;font-size:11px;">(${n} 个子任务)</span>` : ''}</span>
-                    <span class="plan-node-toggle">${isOpen ? '▾ 收起' : '▸ 展开'}</span>
-                </div>
-                <div class="plan-node-body">
-                    ${task.goal ? `<div style="color:var(--ink-soft);font-weight:400;padding-left:14px;font-size:12px;">🎯 ${escapeHtml(task.goal)}</div>` : ''}
-                    ${renderLooseTools(task)}
-                    ${renderSubtaskTree(task, true)}
-                </div>
-            </div>`;
-            html += '</div>';
-            prog.style.display = 'block';
-            inner.innerHTML = html;
-            prog.scrollTop = prog.scrollHeight;
-        }
-
-        // 无归属工具（request_planning 等触发规划前调用的工具）
-        function renderLooseTools(task) {
-            const tools = (task && task.looseTools) || [];
-            return tools.map(t =>
-                `<div style="padding-left:26px;color:var(--purple);font-size:12px;font-family:monospace;">🔧 ${escapeHtml(t.name)}${t.args ? ` <span style="color:var(--ink-soft);">${escapeHtml(t.args.slice(0, 80))}</span>` : ''}</div>`
-            ).join('');
-        }
-
-        // 子任务渲染。verbose=true → 顶部执行树用：每子任务行下挂工具行；
-        // verbose=false → 聊天流任务块用：只显示子任务清单（一行一步），不嵌套工具细节。
-        function renderSubtaskTree(task, verbose) {
+        // 任务块子任务渲染：极简版（每步 1 行，无工具行）
+        function renderSubtaskTree(task) {
             const subs = (task && task.subtasks) || [];
             return subs.map(s => {
                 const st = s.status === 'done' ? '✅' : (s.status === 'running' ? '⏳' : (s.status === 'failed' ? '❌' : '⬜'));
                 const doneCls = s.status === 'done' ? ' style="color:var(--ink-soft);text-decoration:line-through;opacity:0.7;"' : '';
-                if (!verbose) {
-                    // 任务块用：极简一行（图标 + 序号 + 描述），无工具行
-                    return `<div style="padding-left:14px;font-size:12px;margin:1px 0;"><span${doneCls}>${st} ${escapeHtml(String(s.id))}. ${escapeHtml(s.desc)}</span></div>`;
-                }
-                // 顶部执行树用：含工具行；子任务行收起的折叠状态由 subOpenState 持久化
-                const subKey = (task.goal || '') + '::' + s.id;
-                const userOpen = subOpenState[subKey];
-                const isOpen = userOpen !== undefined ? userOpen : (s.status === 'running' || s.status === 'pending');
-                const hasTools = s.tools && s.tools.length;
-                const toolsHtml = hasTools ? s.tools.map(t =>
-                    `<div style="padding-left:52px;color:var(--purple);font-size:12px;font-family:monospace;">🔧 ${escapeHtml(t.name)}${t.args ? ` <span style="color:var(--ink-soft);">${escapeHtml(t.args.slice(0, 60))}</span>` : ''}</div>`
-                ).join('') : '';
-                return `<div class="plan-node${isOpen ? ' open' : ''}" style="margin:2px 0;">
-                    <div class="plan-node-head" ${hasTools ? 'onclick="toggleSubTask(this, event)" style="cursor:pointer;user-select:none;"' : ''}>
-                        <span${doneCls} style="padding-left:14px;font-size:12px;">${st} ${escapeHtml(String(s.id))}. ${escapeHtml(s.desc)}</span>
-                        ${hasTools ? `<span class="plan-node-toggle" style="float:right;color:var(--ink-soft);font-size:11px;">${isOpen ? '▾ 收起' : '▸ 展开'}</span>` : ''}
-                    </div>
-                    <div class="plan-node-body">${toolsHtml}</div>
-                </div>`;
+                return `<div style="padding-left:14px;font-size:12px;margin:1px 0;"><span${doneCls}>${st} ${escapeHtml(String(s.id))}. ${escapeHtml(s.desc)}</span></div>`;
             }).join('');
         }
-        // 子任务折叠状态：key = goal + subtask_id；用户操作持久化
-        const subOpenState = {};
-        function toggleSubTask(head, ev) {
-            ev && ev.stopPropagation();
-            const card = head && head.closest ? head.closest('.plan-node') : null;
-            if (!card) return;
-            card.classList.toggle('open');
-            const tg = head.querySelector('.plan-node-toggle');
-            if (tg) tg.textContent = card.classList.contains('open') ? '▾ 收起' : '▸ 展开';
-            // 持久化（用任务在数组中的下标 + 子任务 id 定位）
-            const tasks = planTree.tasks;
-            for (let i = 0; i < tasks.length; i++) {
-                for (const s of tasks[i].subtasks) {
-                    if (card.innerHTML.indexOf(' ' + s.id + '. ') > -1) {
-                        subOpenState[(tasks[i].goal || '') + '::' + s.id] = card.classList.contains('open');
-                        return;
-                    }
-                }
-            }
-        }
 
-        // 点击执行树节点头部：切换任务组（最外层）的折叠/展开，并持久化
-        function togglePlanNode(head) {
-            const card = head && head.closest ? head.closest('.plan-node') : null;
-            if (!card) return;
-            card.classList.toggle('open');
-            const tg = head.querySelector('.plan-node-toggle');
-            if (tg) tg.textContent = card.classList.contains('open') ? '▾ 收起' : '▸ 展开';
-            planTreeUiState.nodeOpen = card.classList.contains('open');
-        }
-
-        // ===== 聊天流任务块（ChatGPT 风格：标题 + 子任务清单，无工具细节）=====
-        // 工具细节只在顶部执行树显示（不在聊天流重复），避免干扰对话阅读。
-        const taskBlockState = {}; // key=taskKey → 'open'/'closed'，用户收起后保持
         function renderTaskBlocks() {
             const c = document.getElementById('chatMessages');
             if (!c) return;
@@ -1378,14 +1237,13 @@
             const subs = task.subtasks || [];
             const done = subs.filter(s => s.status === 'done' || s.status === 'failed').length;
             const stIcon = task.status === 'done' ? '✅' : (task.status === 'failed' ? '❌' : '⏳');
-            // 简洁版：只显示子任务清单（无工具行），模仿 ChatGPT Deep Research 步骤列表
             return `<div class="task-head" onclick="toggleTaskBlock(this)" style="cursor:pointer;user-select:none;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
                 <span style="font-weight:700;">📋 任务${i + 1} ${stIcon}</span>
                 <span style="color:var(--ink);font-weight:400;font-size:12px;">${escapeHtml((task.goal || '').slice(0, 80))}</span>
                 ${subs.length ? `<span style="color:var(--ink-soft);font-size:11px;border:1px solid var(--line);border-radius:8px;padding:0 6px;">${done}/${subs.length}</span>` : ''}
                 <span class="task-toggle" style="margin-left:auto;color:var(--ink-soft);font-size:11px;">${isOpen ? '▾ 收起' : '▸ 展开'}</span>
             </div>
-            <div class="task-body">${renderSubtaskTree(task, false)}</div>`;
+            <div class="task-body">${renderSubtaskTree(task)}</div>`;
         }
 
         // 点击任务块头部：切换折叠/展开
@@ -1618,10 +1476,11 @@
                     try {
                         const data = JSON.parse(event.data);
                         if (data.type === 'log') refreshAll();
-                        // 执行树事件（CLI/页面对话都会产生）：实时更新
-                        else if (data.type === 'planner' || data.type === 'executor' || data.type === 'tool_call') {
+                        // 任务块事件：planner/executor 累积到 planTree.tasks；tool_call 不再需要（事件 tab 可见）
+                        else if (data.type === 'planner' || data.type === 'executor') {
                             if (data.thread_id && currentThreadId && data.thread_id !== currentThreadId) return;
-                            applyPlanEvent(data.type, data);
+                            applyTaskEvent(data.type, data);
+                            renderTaskBlocks();
                         }
                         // 节点思考/结果气泡：planner/executor/validator/summarizer 各自独立气泡
                         else if (data.type === 'node_thought') {

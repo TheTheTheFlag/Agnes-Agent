@@ -257,11 +257,19 @@ def chatbot(state: State, config: RunnableConfig):
     if not content:
         content = "已处理完毕。"
 
-    # 若已触发规划（pending_plan），不要显示模型输出的 JSON 规划内容或"已提交"占位，
-    # 统一给友好提示，后续由执行树展示规划详情、summarizer 输出最终结果。
-    if state.get("pending_plan"):
-        goal = state["pending_plan"]
-        content = f"🚀 正在为你规划并执行：{goal[:80]}"
+    # 检测是否刚触发了规划：查找 request_planning 工具的 ToolMessage（消息里提取 goal）。
+    # 不用 state.pending_plan 是因为 LangGraph 的 Command(update=...) 不会回写到本节点局部 state。
+    triggered_goal = None
+    for m in reversed(state.get("messages", [])[-5:]):
+        if hasattr(m, 'type') and m.type == 'tool' and '已接收规划请求' in (m.content or ''):
+            try:
+                # content 形如："已接收规划请求，目标：<goal>..."
+                triggered_goal = m.content.split('目标：', 1)[1].strip()
+            except Exception:
+                pass
+            break
+    if triggered_goal:
+        content = f"🚀 正在为你规划并执行：{triggered_goal[:80]}"
 
     # 摘要更新
     if len(state["messages"]) > 0:
@@ -281,8 +289,9 @@ def chatbot(state: State, config: RunnableConfig):
     # 必须随 return 传回 graph state，route_after_chatbot 才能据此跳转 planner。
     # 同时 thread_id 也要传回（planner/executor 需要真实 thread_id 而非 "default"）。
     ret = {"messages": [AIMessage(content=content)], "thread_id": thread_id}
-    if state.get("pending_plan"):
-        ret["pending_plan"] = state["pending_plan"]
+    # 触发了规划 → 让 route_after_chatbot 跳到 planner（基于消息检测判断，与上面 content 替换同一来源）
+    if triggered_goal:
+        ret["pending_plan"] = triggered_goal
     # approval_mode 存 _srv_cfg._CONFIG（不再写 state）
     # 自动 git 版本快照：Agent 本轮改动（代码/交付物）提交入库
     try:

@@ -17,8 +17,24 @@ def create_planner_node(llm):
         if old_plan:
             mm.delete_task_plan(thread_id, old_plan["id"])
 
-        last_msg = state["messages"][-1]
-        goal = last_msg.content
+        # goal 来源：state.pending_plan（chatbot 节点从 ToolMessage 提取后写入 ret，
+        # route_after_chatbot 透传至 planner；不依赖 messages 末尾是因为最后一条可能是
+        # ToolMessage 污染："已接收规划请求，目标：..."）
+        goal = state.get("pending_plan")
+        if not goal:
+            # 兜底：反向从最近 ToolMessage 提取
+            for m in reversed(state.get("messages", [])[-5:]):
+                if hasattr(m, 'type') and m.type == 'tool' and '已接收规划请求' in (m.content or ''):
+                    goal = m.content.split('目标：', 1)[1].strip()
+                    break
+        if not goal:
+            # 最后兜底：取用户消息
+            for m in reversed(state.get("messages", [])):
+                if hasattr(m, 'type') and m.type == 'human':
+                    goal = m.content
+                    break
+        if not goal:
+            goal = "执行当前请求"
 
         system_prompt = """你是一个任务规划专家。将用户目标拆解为 2-4 个子任务。每个子任务包含 id, description, dependencies。输出 JSON 数组。"""
         response = llm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=f"目标：{goal}")])
