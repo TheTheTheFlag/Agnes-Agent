@@ -37,7 +37,8 @@ async def root():
     idx = _os.path.join(_STATIC_DIR, "index.html")
     if _os.path.exists(idx):
         with open(idx, 'r', encoding='utf-8') as fh:
-            return HTMLResponse(fh.read())
+            # no-cache：前端代码更新后浏览器必须重新拉取，避免"改了代码页面不生效"
+            return HTMLResponse(fh.read(), headers={"Cache-Control": "no-cache"})
     return HTMLResponse('<h1>index.html 缺失</h1>', status_code=500)
 
 def start_debug_server(host: str = "0.0.0.0", port: int = 8000, max_tries: int = 10):

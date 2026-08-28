@@ -16,6 +16,32 @@ _BASE_DIR = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(
 
 router = APIRouter()
 
+# 内部 LLM 输出过滤（摘要生成等非对话调用）的摘要结构 marker。
+# 用"前缀"形式（去掉尾部 **）：token 逐字到达时，一旦拼出"**用户目标"即可判定
+# 为内部摘要，无需等完整"**用户目标**"，避免前几个 token 泄漏到前端。
+_SUMMARY_MARKERS = ("**用户目标", "**已完成步骤", "**待办事项", "更新后的摘要", "对话摘要")
+
+
+def _filter_internal_tokens(node: str, run_id, text: str, state: dict) -> str:
+    """过滤节点内的"内部 LLM"输出（如 update_summary 的摘要生成）。
+
+    update_summary 等调用发生在 chatbot 节点内部，其 token 会被 messages 流以
+    node='chatbot' 捕获并推给前端，导致摘要文本污染聊天框。
+    检测策略：按 LLM 调用 run_id 分段；某段一旦出现摘要结构 marker，整段后续 token 丢弃。
+    返回过滤后的 text（可能为空字符串）。state 为跨 token 的累积状态（每请求独立）。
+    """
+    if node != "chatbot":
+        return text
+    if run_id != state.get("run_id"):
+        state.update(run_id=run_id, text="", internal=False)
+    if state.get("internal"):
+        return ""
+    state["text"] = (state.get("text", "") + text)[-60:]
+    if any(mk in state["text"] for mk in _SUMMARY_MARKERS):
+        state["internal"] = True
+        return ""
+    return text
+
 @router.post("/api/chat")
 async def chat_endpoint(payload: dict):
     """主对话窗口的发送端点（流式 SSE 推送 token）。
@@ -60,6 +86,9 @@ async def chat_endpoint(payload: dict):
             sync_q: Queue = Queue()
 
             def sync_runner():
+                # 内部 LLM 输出过滤：update_summary 等节点内的非对话 LLM 调用（摘要生成）也会
+                # 被 messages 流以 node='chatbot' 捕获，必须丢弃，否则摘要文本污染聊天框。
+                _tok_state = {}
                 try:
                     for mode, payload in _srv_cfg._GRAPH.stream(
                         inputs, config,
@@ -76,7 +105,9 @@ async def chat_endpoint(payload: dict):
                             elif isinstance(chunk, dict):
                                 text = chunk.get("content") or ""
                             if text:
-                                sync_q.put({"step": "token", "text": text, "node": node})
+                                text = _filter_internal_tokens(node, (meta or {}).get("run_id"), text, _tok_state)
+                                if text:
+                                    sync_q.put({"step": "token", "text": text, "node": node})
                             # 工具调用参数增量也透传（便于前端展示意图）
                             tool_calls = getattr(chunk, "tool_call_chunks", None)
                             if tool_calls:
