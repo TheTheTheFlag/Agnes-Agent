@@ -105,6 +105,14 @@ def create_executor_node(llm, tools_list):
         print(f"  ▶️ 执行 {sub_id}: {description[:50]}...")
         mm.update_subtask_status(task_plan_id, sub_id, "running")
 
+        # 执行气泡：让用户看到当前子任务是什么
+        add_event("node_thought", {
+            "role": "executor",
+            "title": f"⚙️ 子任务{sub_id}：{description[:60]}",
+            "text": f"目标：{(getattr(state.get('task_plan'), 'goal', '') or '')[:80]}\n子任务：{description}",
+            "subtask": sub_id,
+        }, thread_id)
+
         # 全量子任务状态快照（供前端执行树实时渲染；每次进入 executor 都会更新）
         _tp = state.get("task_plan")
         _goal = getattr(_tp, "goal", "") if _tp else ""
@@ -234,9 +242,21 @@ def create_executor_node(llm, tools_list):
         if status == "done":
             print(f"  ✅ 完成，产出: {artifacts}")
             add_log_entry("success", f"子任务 {sub_id} 完成", {"artifacts": artifacts})
+            add_event("node_thought", {
+                "role": "executor-result",
+                "title": f"✅ 子任务{sub_id} 完成",
+                "text": f"产出：{', '.join(artifacts) if artifacts else '（无文件）'}\n结果摘要：{(final_result or '')[:200]}",
+                "subtask": sub_id,
+            }, thread_id)
         else:
             print(f"  ❌ 失败")
             add_log_entry("error", f"子任务 {sub_id} 失败", {"error": final_result[:100]})
+            add_event("node_thought", {
+                "role": "executor-result",
+                "title": f"❌ 子任务{sub_id} 失败",
+                "text": (final_result or '')[:300],
+                "subtask": sub_id,
+            }, thread_id)
         add_event("executor", {
             "subtask": sub_id, "status": status,
             "goal": (getattr(state.get("task_plan"), "goal", "") or "")[:80],

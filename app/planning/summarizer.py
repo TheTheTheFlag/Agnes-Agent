@@ -51,6 +51,13 @@ def create_summarizer_node(llm):
         print("[Summarizer] 完成")
         add_log_entry("success", "汇总完成")
         add_event("summarizer", {"done": True}, thread_id)
+        # 总结气泡：让用户看到"我最终怎么回答的"，与 chatbot 助手气泡区分
+        add_event("node_thought", {
+            "role": "summarizer",
+            "title": "📝 最终总结",
+            "text": summary[:2000],
+            "subtask": "",
+        }, thread_id)
 
         # 显式 return 整个 state 的更新，避免 LangGraph 漏掉 in-memory 改动
         return {

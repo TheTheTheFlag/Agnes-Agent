@@ -104,6 +104,18 @@
         .plan-node-head .plan-node-toggle { float: right; color: var(--ink-soft); font-size: 11px; }
         /* 工具卡片：完成后自动折叠成单行，点击头部展开详情 */
         .tool-card.collapsed .tc-body { display: none; }
+        /* 节点气泡（中间过程的思考/结果/总结）：与最终对话区分，每种角色独立配色与图标 */
+        .chat-bubble.node-thought { align-self: stretch; max-width: 95%; padding: 8px 12px; border-radius: 10px; font-size: 12px; line-height: 1.6; border: 1px solid var(--line); background: rgba(255,255,255,0.7); color: var(--ink); box-shadow: 0 1px 4px rgba(0,0,0,0.04); }
+        .chat-bubble.node-thought .nt-head { display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; font-weight: 700; }
+        .chat-bubble.node-thought .nt-toggle { margin-left: auto; color: var(--ink-soft); font-size: 11px; }
+        .chat-bubble.node-thought .nt-body { margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--line); white-space: pre-wrap; word-break: break-word; color: var(--ink); }
+        .chat-bubble.node-thought.collapsed .nt-body { display: none; }
+        /* 各角色配色：左色条 + 浅底色 */
+        .chat-bubble.node-thought.role-planner { border-left: 4px solid #f59e0b; background: rgba(255,209,102,0.12); }
+        .chat-bubble.node-thought.role-executor { border-left: 4px solid #3b82f6; background: rgba(99,159,255,0.10); }
+        .chat-bubble.node-thought.role-executor-result { border-left: 4px solid #06d6a0; background: rgba(6,214,160,0.10); }
+        .chat-bubble.node-thought.role-validator { border-left: 4px solid #ef476f; background: rgba(239,71,111,0.10); }
+        .chat-bubble.node-thought.role-summarizer { border-left: 4px solid #a663cc; background: rgba(166,99,204,0.10); }
         /* 聊天流任务块（ChatGPT 风格）：每任务一个可折叠块，进行中展开、完成/失败折叠 */
         .chat-bubble.task { align-self: stretch; margin: 4px 0; background: rgba(255,255,255,0.7); border: 1px solid var(--line); border-left: 3px solid var(--green); border-radius: 10px; padding: 8px 12px; font-size: 12px; }
         .chat-bubble.task .task-body { margin-top: 4px; border-top: 1px dashed var(--line); padding-top: 4px; }
@@ -662,7 +674,13 @@
                 renderEvents(evtData);
                 // 仅当前 thread 已确定时才重建执行树：currentThreadId 为 null 时 events 是全局的，
                 // 重放会把其他 thread 的旧执行树显示出来（跨会话串扰）。
-                if (tid) rebuildPlanTreeFromEvents(evtData.events || []);
+                if (tid) {
+                    // 先清空旧的节点气泡（避免重放时重复累积）
+                    document.querySelectorAll('.chat-bubble.node-thought').forEach(el => el.remove());
+                    rebuildPlanTreeFromEvents(evtData.events || []);
+                    // 重放节点气泡：用户刷新后能恢复上下文（数量一般 < 10，不影响阅读）
+                    (evtData.events || []).filter(e => e.type === 'node_thought').forEach(appendNodeBubble);
+                }
             } catch(e) { document.getElementById('statusText').textContent = '⚠️ 连接失败'; }
         }
 
@@ -873,6 +891,12 @@
         async function _sendChatInner() {
             // 新对话：重置执行树（任务列表清空 + 移除聊天流任务块，显示占位）
             planTree.tasks = [];
+            // 清除 UI 状态（折叠持久化），避免旧会话的用户操作影响新会话
+            planTreeUiState.nodeOpen = true;
+            Object.keys(subOpenState).forEach(k => delete subOpenState[k]);
+            Object.keys(taskBlockState).forEach(k => delete taskBlockState[k]);
+            // 清空旧的节点气泡
+            document.querySelectorAll('.chat-bubble.node-thought').forEach(el => el.remove());
             renderPlanTree();
             renderTaskBlocks();
             const input = document.getElementById('chatInput');
@@ -1195,6 +1219,10 @@
         // 事件为空（新会话/无任务）时清空并显示占位，避免旧 thread 残留。
         function rebuildPlanTreeFromEvents(events) {
             planTree.tasks = [];
+            // 重放也清空 UI 状态（避免与重放事件内容错位）
+            planTreeUiState.nodeOpen = true;
+            Object.keys(subOpenState).forEach(k => delete subOpenState[k]);
+            // taskBlockState 保留（用户对历史任务的折叠操作跨重放持久化）
             if (!events || !events.length) {
                 renderPlanTree();
                 renderTaskBlocks();
@@ -1207,7 +1235,9 @@
             }
         }
 
-        // ===== 顶部执行树（planProgress）：当前任务（最近一个）的紧凑树 =====
+        // ===== 顶部执行树（planProgress）：当前任务（最近一个）的详细树 =====
+        // 折叠状态由 planTreeUiState 持久化：用户收起后保持折叠，不被新事件重置。
+        const planTreeUiState = { nodeOpen: true };
         function renderPlanTree() {
             const prog = document.getElementById('planProgress');
             const inner = document.getElementById('planProgressInner');
@@ -1220,16 +1250,17 @@
             }
             const stIcon = task.status === 'done' ? '✅' : (task.status === 'failed' ? '❌' : '⏳');
             const n = task.subtask_count || task.subtasks.length;
+            const isOpen = planTreeUiState.nodeOpen !== false; // 默认 true；用户收起后置 false
             let html = '<div style="font-size:12px;line-height:1.7;">';
-            html += `<div class="plan-node open" style="margin-bottom:6px;padding:6px 10px;border-left:3px solid ${task.status === 'done' ? 'var(--green)' : 'var(--blue)'};background:rgba(255,255,255,0.6);border-radius:8px;">
+            html += `<div class="plan-node${isOpen ? ' open' : ''}" style="margin-bottom:6px;padding:6px 10px;border-left:3px solid ${task.status === 'done' ? 'var(--green)' : 'var(--blue)'};background:rgba(255,255,255,0.6);border-radius:8px;">
                 <div class="plan-node-head" onclick="togglePlanNode(this)" style="font-weight:700;color:var(--ink);cursor:pointer;user-select:none;">
                     <span>🔢 任务${planTree.tasks.length} ${stIcon} ${n ? `<span style="color:var(--ink-soft);font-weight:400;font-size:11px;">(${n} 个子任务)</span>` : ''}</span>
-                    <span class="plan-node-toggle">▾ 收起</span>
+                    <span class="plan-node-toggle">${isOpen ? '▾ 收起' : '▸ 展开'}</span>
                 </div>
                 <div class="plan-node-body">
                     ${task.goal ? `<div style="color:var(--ink-soft);font-weight:400;padding-left:14px;font-size:12px;">🎯 ${escapeHtml(task.goal)}</div>` : ''}
                     ${renderLooseTools(task)}
-                    ${renderSubtaskTree(task)}
+                    ${renderSubtaskTree(task, true)}
                 </div>
             </div>`;
             html += '</div>';
@@ -1246,41 +1277,72 @@
             ).join('');
         }
 
-        // 子任务树：每个子任务行 + 其下挂载的工具调用（缩进 2 级）
-        function renderSubtaskTree(task) {
+        // 子任务渲染。verbose=true → 顶部执行树用：每子任务行下挂工具行；
+        // verbose=false → 聊天流任务块用：只显示子任务清单（一行一步），不嵌套工具细节。
+        function renderSubtaskTree(task, verbose) {
             const subs = (task && task.subtasks) || [];
             return subs.map(s => {
                 const st = s.status === 'done' ? '✅' : (s.status === 'running' ? '⏳' : (s.status === 'failed' ? '❌' : '⬜'));
-                const open = (s.status === 'running' || s.status === 'pending') ? ' open' : '';
                 const doneCls = s.status === 'done' ? ' style="color:var(--ink-soft);text-decoration:line-through;opacity:0.7;"' : '';
+                if (!verbose) {
+                    // 任务块用：极简一行（图标 + 序号 + 描述），无工具行
+                    return `<div style="padding-left:14px;font-size:12px;margin:1px 0;"><span${doneCls}>${st} ${escapeHtml(String(s.id))}. ${escapeHtml(s.desc)}</span></div>`;
+                }
+                // 顶部执行树用：含工具行；子任务行收起的折叠状态由 subOpenState 持久化
+                const subKey = (task.goal || '') + '::' + s.id;
+                const userOpen = subOpenState[subKey];
+                const isOpen = userOpen !== undefined ? userOpen : (s.status === 'running' || s.status === 'pending');
                 const hasTools = s.tools && s.tools.length;
                 const toolsHtml = hasTools ? s.tools.map(t =>
                     `<div style="padding-left:52px;color:var(--purple);font-size:12px;font-family:monospace;">🔧 ${escapeHtml(t.name)}${t.args ? ` <span style="color:var(--ink-soft);">${escapeHtml(t.args.slice(0, 60))}</span>` : ''}</div>`
                 ).join('') : '';
-                return `<div class="plan-node${open}" style="margin:2px 0;">
-                    <div class="plan-node-head" ${hasTools ? 'onclick="togglePlanNode(this)" style="cursor:pointer;user-select:none;"' : ''}>
+                return `<div class="plan-node${isOpen ? ' open' : ''}" style="margin:2px 0;">
+                    <div class="plan-node-head" ${hasTools ? 'onclick="toggleSubTask(this, event)" style="cursor:pointer;user-select:none;"' : ''}>
                         <span${doneCls} style="padding-left:14px;font-size:12px;">${st} ${escapeHtml(String(s.id))}. ${escapeHtml(s.desc)}</span>
-                        ${hasTools ? `<span class="plan-node-toggle" style="float:right;color:var(--ink-soft);font-size:11px;">${open ? '▾ 收起' : '▸ 展开'}</span>` : ''}
+                        ${hasTools ? `<span class="plan-node-toggle" style="float:right;color:var(--ink-soft);font-size:11px;">${isOpen ? '▾ 收起' : '▸ 展开'}</span>` : ''}
                     </div>
                     <div class="plan-node-body">${toolsHtml}</div>
                 </div>`;
             }).join('');
         }
+        // 子任务折叠状态：key = goal + subtask_id；用户操作持久化
+        const subOpenState = {};
+        function toggleSubTask(head, ev) {
+            ev && ev.stopPropagation();
+            const card = head && head.closest ? head.closest('.plan-node') : null;
+            if (!card) return;
+            card.classList.toggle('open');
+            const tg = head.querySelector('.plan-node-toggle');
+            if (tg) tg.textContent = card.classList.contains('open') ? '▾ 收起' : '▸ 展开';
+            // 持久化（用任务在数组中的下标 + 子任务 id 定位）
+            const tasks = planTree.tasks;
+            for (let i = 0; i < tasks.length; i++) {
+                for (const s of tasks[i].subtasks) {
+                    if (card.innerHTML.indexOf(' ' + s.id + '. ') > -1) {
+                        subOpenState[(tasks[i].goal || '') + '::' + s.id] = card.classList.contains('open');
+                        return;
+                    }
+                }
+            }
+        }
 
-        // 点击执行树节点头部：切换折叠/展开
+        // 点击执行树节点头部：切换任务组（最外层）的折叠/展开，并持久化
         function togglePlanNode(head) {
             const card = head && head.closest ? head.closest('.plan-node') : null;
             if (!card) return;
             card.classList.toggle('open');
             const tg = head.querySelector('.plan-node-toggle');
             if (tg) tg.textContent = card.classList.contains('open') ? '▾ 收起' : '▸ 展开';
+            planTreeUiState.nodeOpen = card.classList.contains('open');
         }
 
-        // ===== 聊天流任务块（ChatGPT 风格：每任务一个可折叠块，最新在底部按时间排列）=====
+        // ===== 聊天流任务块（ChatGPT 风格：标题 + 子任务清单，无工具细节）=====
+        // 工具细节只在顶部执行树显示（不在聊天流重复），避免干扰对话阅读。
+        const taskBlockState = {}; // key=taskKey → 'open'/'closed'，用户收起后保持
         function renderTaskBlocks() {
             const c = document.getElementById('chatMessages');
             if (!c) return;
-            // 移除多余的旧任务块（tasks 减少/清空时）
+            // 移除多余旧块
             const oldBlocks = c.querySelectorAll('.chat-bubble.task');
             if (oldBlocks.length > planTree.tasks.length) {
                 for (let i = planTree.tasks.length; i < oldBlocks.length; i++) {
@@ -1295,31 +1357,35 @@
                     el = document.createElement('div');
                     el.id = id;
                     el.className = 'chat-bubble task';
-                    c.appendChild(el); // 按任务先后顺序追加
+                    c.appendChild(el);
                 }
-                // 完成/失败默认折叠，进行中展开
-                el.classList.toggle('collapsed', task.status !== 'running');
-                el.innerHTML = buildTaskBlockHtml(task, i);
+                // 折叠状态：进行中默认展开；其他状态默认折叠；用户操作后持久化
+                const key = (task.goal || '') + '::' + i;
+                if (taskBlockState[key] === undefined) {
+                    taskBlockState[key] = task.status === 'running' ? 'open' : 'closed';
+                }
+                const isOpen = taskBlockState[key] === 'open';
+                el.classList.toggle('collapsed', !isOpen);
+                el.innerHTML = buildTaskBlockHtml(task, i, isOpen);
             });
-            // 移除聊天流空态占位（有任务块时）
             if (planTree.tasks.length) {
                 const empty = c.querySelector('.empty-state');
                 if (empty) empty.remove();
             }
         }
 
-        function buildTaskBlockHtml(task, i) {
+        function buildTaskBlockHtml(task, i, isOpen) {
             const subs = task.subtasks || [];
             const done = subs.filter(s => s.status === 'done' || s.status === 'failed').length;
             const stIcon = task.status === 'done' ? '✅' : (task.status === 'failed' ? '❌' : '⏳');
-            const collapsed = task.status !== 'running';
+            // 简洁版：只显示子任务清单（无工具行），模仿 ChatGPT Deep Research 步骤列表
             return `<div class="task-head" onclick="toggleTaskBlock(this)" style="cursor:pointer;user-select:none;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
-                <span style="font-weight:700;">🔢 任务${i + 1} ${stIcon}</span>
-                <span style="color:var(--ink-soft);font-weight:400;">${escapeHtml((task.goal || '').slice(0, 60))}</span>
+                <span style="font-weight:700;">📋 任务${i + 1} ${stIcon}</span>
+                <span style="color:var(--ink);font-weight:400;font-size:12px;">${escapeHtml((task.goal || '').slice(0, 80))}</span>
                 ${subs.length ? `<span style="color:var(--ink-soft);font-size:11px;border:1px solid var(--line);border-radius:8px;padding:0 6px;">${done}/${subs.length}</span>` : ''}
-                <span class="task-toggle" style="margin-left:auto;color:var(--ink-soft);font-size:11px;">${collapsed ? '▸ 展开' : '▾ 收起'}</span>
+                <span class="task-toggle" style="margin-left:auto;color:var(--ink-soft);font-size:11px;">${isOpen ? '▾ 收起' : '▸ 展开'}</span>
             </div>
-            <div class="task-body">${renderLooseTools(task)}${renderSubtaskTree(task)}</div>`;
+            <div class="task-body">${renderSubtaskTree(task, false)}</div>`;
         }
 
         // 点击任务块头部：切换折叠/展开
@@ -1327,6 +1393,11 @@
             const block = head && head.closest ? head.closest('.chat-bubble.task') : null;
             if (!block) return;
             block.classList.toggle('collapsed');
+            const idx = parseInt(block.id.replace('task-block-', ''), 10);
+            const task = planTree.tasks[idx];
+            if (task) {
+                taskBlockState[(task.goal || '') + '::' + idx] = block.classList.contains('collapsed') ? 'closed' : 'open';
+            }
             const tg = head.querySelector('.task-toggle');
             if (tg) tg.textContent = block.classList.contains('collapsed') ? '▸ 展开' : '▾ 收起';
         }
@@ -1404,6 +1475,39 @@
             if (!card) return;
             card.classList.toggle('collapsed');
             const tg = head.querySelector('.tc-toggle');
+            if (tg) tg.textContent = card.classList.contains('collapsed') ? '展开 ▸' : '收起 ▾';
+        }
+
+        // 节点思考/结果气泡：每条 node_thought 事件对应一个独立气泡（默认折叠，
+        // 标题一行 + 点击展开正文）。5 种角色用不同配色 + 图标区分。
+        function appendNodeBubble(evt) {
+            const info = (evt && evt.data) || {};
+            const role = info.role || 'planner';
+            const title = info.title || role;
+            const text = info.text || '';
+            if (!text) return;  // 空文本不显示
+            const c = document.getElementById('chatMessages');
+            if (!c) return;
+            const empty = c.querySelector('.empty-state');
+            if (empty) empty.remove();
+            const div = document.createElement('div');
+            div.className = 'chat-bubble node-thought role-' + role;
+            // summarizer 默认展开（这是用户最终想要的答案），其他默认折叠
+            const isOpen = role === 'summarizer';
+            if (!isOpen) div.classList.add('collapsed');
+            div.innerHTML = `<div class="nt-head" onclick="toggleNodeBubble(this)">
+                <span>${escapeHtml(title)}</span>
+                <span class="nt-toggle">${isOpen ? '收起 ▾' : '展开 ▸'}</span>
+            </div><div class="nt-body">${escapeHtml(text)}</div>`;
+            c.appendChild(div);
+            c.scrollTop = c.scrollHeight;
+        }
+
+        function toggleNodeBubble(head) {
+            const card = head && head.closest ? head.closest('.chat-bubble.node-thought') : null;
+            if (!card) return;
+            card.classList.toggle('collapsed');
+            const tg = head.querySelector('.nt-toggle');
             if (tg) tg.textContent = card.classList.contains('collapsed') ? '展开 ▸' : '收起 ▾';
         }
 
@@ -1518,6 +1622,11 @@
                         else if (data.type === 'planner' || data.type === 'executor' || data.type === 'tool_call') {
                             if (data.thread_id && currentThreadId && data.thread_id !== currentThreadId) return;
                             applyPlanEvent(data.type, data);
+                        }
+                        // 节点思考/结果气泡：planner/executor/validator/summarizer 各自独立气泡
+                        else if (data.type === 'node_thought') {
+                            if (data.thread_id && currentThreadId && data.thread_id !== currentThreadId) return;
+                            appendNodeBubble(data);
                         }
                     } catch(e) {}
                 };

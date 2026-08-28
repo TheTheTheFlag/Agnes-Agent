@@ -76,6 +76,14 @@ def create_validator_node():
         print(f"[Validator] {'通过' if state['_validation_passed'] else '失败'}")
         add_log_entry("info", f"验证: {'通过' if state['_validation_passed'] else '失败'}", {"passed": state["_validation_passed"]})
         add_event("validator", {"passed": state["_validation_passed"]}, thread_id)
+        # 验证气泡（仅失败时显示：用户能看到为什么重规划）
+        if not state["_validation_passed"]:
+            add_event("node_thought", {
+                "role": "validator",
+                "title": "❌ 验证失败",
+                "text": (state.get("_validation_message") or "验证未通过")[:500],
+                "subtask": "",
+            }, thread_id)
         return state
     return validator_node
 

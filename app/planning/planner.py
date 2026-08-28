@@ -80,5 +80,13 @@ def create_planner_node(llm):
             "subtask_count": len(subtasks),
             "subtasks": [{"id": s.id, "desc": s.description[:40], "status": "pending"} for s in subtasks],
         }, thread_id)
+        # 规划思考气泡：给用户看到"我打算怎么拆解"
+        descs = "\n".join([f"  {i+1}. {s.description}" for i, s in enumerate(subtasks)])
+        add_event("node_thought", {
+            "role": "planner",
+            "title": f"📋 规划：{goal[:60]}",
+            "text": f"将目标拆解为 {len(subtasks)} 个子任务：\n{descs}",
+            "subtask": "",
+        }, thread_id)
         return state
     return planner_node
