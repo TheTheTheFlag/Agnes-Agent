@@ -29,6 +29,11 @@ def create_executor_node(llm, tools_list):
                 if existing:
                     task_plan_id = existing["id"]
                     state["task_plan_id"] = task_plan_id
+                elif plan.subtasks and all(s.status in ("done", "failed") for s in plan.subtasks):
+                    # 防御：查不到进行中计划但内存计划子任务已全部完成（节点重放/异常导致 task_plan_id 丢失），
+                    # 直接返回，避免把已完成任务重新入库导致重复执行。
+                    print("[Executor] 计划已完成但 task_plan_id 丢失，跳过重建")
+                    return state
                 else:
                     new_id = mm.create_task_plan(thread_id, plan.goal)
                     for sub in plan.subtasks:
@@ -169,7 +174,8 @@ def create_executor_node(llm, tools_list):
             except Exception:
                 pass
             add_log_entry("info", f"工具: {name}", {"params": params, "result_preview": str(result)[:200]})
-            add_event("tool_call", {"name": name, "params": params}, thread_id)
+            # subtask 字段：标记工具归属的当前子任务，前端执行树据此把工具挂到对应子任务下
+            add_event("tool_call", {"name": name, "params": params, "subtask": sub_id}, thread_id)
 
         def _interrupt_handler(name, params):
             if name in _APPROVAL_TOOLS:
@@ -266,11 +272,10 @@ def create_executor_node(llm, tools_list):
             print(f"[Executor] 有失败子任务，重规划计数 -> {state['_total_replans']}")
         if all_done:
             print("[Executor] 所有子任务已完成，标记 plan 为 done")
-            # 同步更新 DB 主任务状态（子任务全 done 后主任务不应停留在 planning/executing）
-            try:
-                mm.update_task_plan_status(task_plan_id, "completed")
-            except Exception:
-                pass
+            # 注意：这里【不】把 DB 计划标 completed——验证/汇总还没做，"completed" 由
+            # summarizer 在真正完成时标记。若提前标 completed，validator/summarizer 用
+            # get_task_plan_by_thread（只查 planning/executing）会查不到计划，
+            # 导致"执行完 → 验证误判无计划 → 重复规划"。
             if state.get("task_plan"):
                 # 必须显式 return 才能让 LangGraph 把状态写回 checkpoint，
                 # 否则 in-memory 改动会被下一次 state 读取忽略，触发环。

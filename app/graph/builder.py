@@ -339,6 +339,10 @@ def route_after_executor(state: State):
             pending = [s for s in subtasks if s.status == "pending"]
             failed = [s for s in subtasks if s.status == "failed"]
         # 1) 还有未执行的子任务 → 继续执行（单个失败不影响整体推进）
+        try:
+            add_log_entry("info", f"路由判定: pending={len(pending)} failed={len(failed)} replans={state.get('_total_replans', 0)}")
+        except Exception:
+            pass
         if pending:
             return "executor"
         # 2) 全部成功 → 验证

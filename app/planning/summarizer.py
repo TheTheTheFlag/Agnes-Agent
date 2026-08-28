@@ -16,9 +16,17 @@ def create_summarizer_node(llm):
         # 防御性：thread_id 在条件边传递时可能丢失
         thread_id = state.get("thread_id") or state.get("_thread_id") or "default"
         mm = MemoryManager(db_path=DB_PATH, thread_id=thread_id)
-        plan_meta = mm.get_task_plan_by_thread(thread_id)
-        if plan_meta:
-            mm.complete_task_plan(plan_meta["id"])
+        # 标记计划 completed（真正完成）：优先用 state 里的 task_plan_id（与 validator/route 一致），
+        # fallback 按 thread 查进行中计划。
+        tid = state.get("task_plan_id")
+        if not tid:
+            meta = mm.get_task_plan_by_thread(thread_id)
+            tid = meta["id"] if meta else None
+        if tid:
+            try:
+                mm.complete_task_plan(tid)
+            except Exception:
+                pass
 
         results = [f"子任务 {sub.id}（{sub.description}）结果：{sub.result}" for sub in plan.subtasks]
         combined = "\n".join(results)

@@ -20,11 +20,21 @@ def create_validator_node():
             state["_validation_message"] = msg
             state["_total_replans"] = state.get("_total_replans", 0) + 1
             print(f"[Validator] 失败（重规划计数 -> {state['_total_replans']}）: {msg}")
+            # 失败也要进日志/事件，否则页面只看到"执行完又规划"却不知道为什么
+            add_log_entry("error", f"验证失败: {msg}", {"passed": False})
+            add_event("validator", {"passed": False, "message": msg}, thread_id)
             return state
 
-        plan_meta = mm.get_task_plan_by_thread(thread_id)
-        if not plan_meta:
+        # 计划 id 与 route_after_executor / executor / summarizer 保持一致：优先用 state 里的
+        # task_plan_id（避免依赖"按状态查进行中计划"的查询路径，计划在验证阶段仍处于 executing）。
+        plan_meta = None
+        tid = state.get("task_plan_id")
+        if not tid:
+            meta = mm.get_task_plan_by_thread(thread_id)
+            tid = meta["id"] if meta else None
+        if not tid:
             return _fail("无任务计划")
+        plan_meta = {"id": tid}
 
         subtasks = mm.get_subtasks(plan_meta["id"])
         all_artifacts = []
