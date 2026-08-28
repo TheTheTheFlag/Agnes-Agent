@@ -104,9 +104,11 @@
         .approval-btn { background: rgba(255,255,255,0.7); border: 1px solid var(--line); color: var(--ink-soft); padding: 4px 12px; border-radius: 14px; cursor: pointer; font-size: 11px; transition: all 0.2s; }
         .approval-btn:hover { border-color: var(--pink); color: var(--ink); }
         .approval-btn.active { background: linear-gradient(135deg, var(--pink), var(--purple)); color: #fff; border-color: transparent; box-shadow: 0 2px 8px rgba(255,92,138,0.3); }
+        /* 对话页模型栏（默认模型设置） */
+        .chat-model-bar { display: flex; align-items: center; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
         .chat-input-wrap textarea { width: 100%; background: #fff; color: var(--ink); border: 1px solid var(--line); border-radius: 10px; padding: 10px; font-size: 14px; font-family: inherit; resize: vertical; }
         .chat-input-wrap textarea:focus { outline: none; border-color: var(--pink); box-shadow: 0 0 0 3px rgba(255,92,138,0.15); }
-        .chat-actions { display: flex; gap: 8px; margin-top: 8px; justify-content: flex-end; }
+        .chat-actions { display: flex; gap: 8px; margin-top: 8px; justify-content: flex-end; align-items: center; flex-wrap: wrap; }
         .chat-suggest { position: absolute; bottom: 100%; left: 0; right: 0; background: #fff; border: 1px solid var(--line); border-radius: 12px 12px 0 0; max-height: 240px; overflow-y: auto; z-index: 10; box-shadow: 0 -4px 16px rgba(166,99,204,0.12); }
         .chat-suggest-item { padding: 8px 14px; cursor: pointer; font-size: 13px; border-bottom: 1px solid var(--line); color: var(--ink); }
         .chat-suggest-item:hover, .chat-suggest-item.active { background: rgba(255,92,138,0.08); }
@@ -286,15 +288,20 @@
                 <div class="chat-suggest" id="chatSuggest" style="display:none;"></div>
                 <textarea id="chatInput" rows="3" placeholder="输入消息，Enter 发送，Shift+Enter 换行；/ 触发命令"></textarea>
                 <div class="chat-actions">
-                    <button class="btn" onclick="stopChat()">⏹ 停止</button>
-                    <button class="refresh-btn" onclick="sendChat()">📤 发送 (Enter)</button>
-                </div>
-                <!-- 审批模式快捷按钮：发送框下方 -->
-                <div class="chat-approval-bar">
-                    <span class="approval-label">审批模式</span>
+                    <span class="approval-label" style="margin-right:4px;">审批模式</span>
                     <button class="approval-btn active" data-mode="per_ask" onclick="setApprovalMode('per_ask')">🔔 每次询问</button>
                     <button class="approval-btn" data-mode="session_allow" onclick="setApprovalMode('session_allow')">♻️ 本次会话允许</button>
                     <button class="approval-btn" data-mode="always_allow" onclick="setApprovalMode('always_allow')">🔓 完全无限制</button>
+                    <span style="flex:1"></span>
+                    <button class="btn" onclick="stopChat()">⏹ 停止</button>
+                    <button class="refresh-btn" onclick="sendChat()">📤 发送 (Enter)</button>
+                </div>
+                <!-- 默认模型设置：审批模式后一行 -->
+                <div class="chat-model-bar">
+                    <span class="approval-label">模型</span>
+                    <select id="chatModelProvider" style="background:#fff;color:var(--ink);border:1px solid var(--line);padding:4px 8px;border-radius:8px;font-size:12px;"></select>
+                    <select id="chatModelName" style="background:#fff;color:var(--ink);border:1px solid var(--line);padding:4px 8px;border-radius:8px;font-size:12px;"></select>
+                    <button class="btn" style="font-size:11px;padding:4px 10px;" onclick="setChatDefaultModel()">💾 设为默认</button>
                 </div>
             </div>
         </div>
@@ -392,16 +399,6 @@
 
     <div class="tab-content" id="tab-settings">
         <div class="panel">
-            <div class="panel-title"><span>🎯 默认模型设置</span><span class="badge" id="settingsBadge">-</span></div>
-            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
-                <select id="settingsProvider" style="background:#fff;color:var(--ink);border:1px solid var(--line);padding:6px 10px;border-radius:8px;font-size:13px;min-width:200px;"></select>
-                <select id="settingsModel" style="background:#fff;color:var(--ink);border:1px solid var(--line);padding:6px 10px;border-radius:8px;font-size:13px;min-width:180px;"></select>
-                <button class="refresh-btn" onclick="setDefaultModel()">💾 设为默认</button>
-                <span style="font-size:12px;color:var(--ink-soft);">保存后下次启动自动使用</span>
-            </div>
-        </div>
-
-        <div class="panel">
             <div class="flex-between">
                 <div class="panel-title" style="margin-bottom:0;"><span>🔌 已接入模型</span><span class="badge" id="customModelsBadge">-</span></div>
                 <button class="btn" onclick="loadSettings()">刷新</button>
@@ -473,7 +470,7 @@
             { id: 'memorydb',  label: '🗄 数据库' },
             { id: 'tools',     label: '🔧 工具注册' },
             { id: 'scheduler', label: '🗓 定时任务' },
-            { id: 'settings',  label: '⚙ 设置' },
+            { id: 'settings',  label: '🔌 模型接入' },
         ];
         const DRAWER_LOADERS = {
             memory: loadMemory,
@@ -928,6 +925,43 @@
         }
         initApprovalMode();
 
+        // 对话页默认模型设置：填充下拉 + 设为默认
+        async function initChatModelBar() {
+            try {
+                const r = await fetch('/api/models');
+                const data = await r.json();
+                const cat = data.catalog || {};
+                const cur = data.current || {};
+                const p = document.getElementById('chatModelProvider');
+                p.innerHTML = Object.keys(cat).map(pid => `<option value="${pid}">${cat[pid].label}</option>`).join('');
+                p.value = cur.provider || '';
+                updateChatModelName(p.value, cur.model);
+                p.onchange = () => updateChatModelName(p.value, '');
+            } catch (e) {}
+        }
+        function updateChatModelName(provider, selected) {
+            fetch('/api/models').then(r => r.json()).then(data => {
+                const info = (data.catalog || {})[provider];
+                const m = document.getElementById('chatModelName');
+                if (!info) { m.innerHTML = '<option value="">（无）</option>'; return; }
+                m.innerHTML = (info.models || []).map(x => `<option value="${x}">${x}</option>`).join('');
+                if (selected && (info.models || []).includes(selected)) m.value = selected;
+            });
+        }
+        async function setChatDefaultModel() {
+            const provider = document.getElementById('chatModelProvider').value;
+            const model = document.getElementById('chatModelName').value;
+            if (!provider || !model) return;
+            const r = await fetch('/api/models/set-default', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({provider, model})
+            });
+            const d = await r.json();
+            if (d.error) { alert('❌ ' + d.error); return; }
+            alert('✅ 已设为默认: ' + provider + ' / ' + model);
+        }
+        initChatModelBar();
+
         // 过滤流式拼接里混入的"内部 LLM"内容（如对话摘要生成），只保留真正对话回复
         const SUMMARY_MARKERS = ['更新后的摘要', '**用户目标**', '已完成步骤', '待办事项', '摘要生成助手', '[对话摘要]'];
         function cleanReply(text) {
@@ -1078,8 +1112,7 @@
             }
 
             // 渲染整棵树（卡片容器）
-            const NODE_ORDER = ['planner', 'executor', 'validator', 'summarizer'];
-            let html = '<div style="font-size:12px;line-height:1.7;">';
+            const NODE_ORDER = ['planner', 'executor', 'validator', 'summarizer'];            let html = '<div style="font-size:12px;line-height:1.7;">';
             for (const n of NODE_ORDER) {
                 if (!planTree[n]) continue;
                 const label = NODE_LABELS[n] || n;
@@ -1447,20 +1480,11 @@
         let mdbCurrentTable = '';
 
         // ===== 设置 tab：默认模型 + 模型接入管理 =====
-        // ===== 版本管理 tab（git 快照历史）=====
+        // ===== 模型接入 tab =====
         async function loadSettings() {
             const r = await fetch('/api/models');
             const data = await r.json();
             const catalog = data.catalog || {};
-            const cur = data.current || {};
-            // 默认模型设置下拉
-            const provSel = document.getElementById('settingsProvider');
-            provSel.innerHTML = Object.entries(catalog).map(([pid, info]) =>
-                `<option value="${pid}">${info.custom ? '🔌 ' : ''}${info.label}</option>`).join('');
-            provSel.value = cur.provider || '';
-            updateSettingsModels(provSel.value, cur.model);
-            provSel.onchange = () => updateSettingsModels(provSel.value, '');
-            document.getElementById('settingsBadge').textContent = (cur.provider || '') + ' / ' + (cur.model || '');
             // 自定义模型列表
             const customList = Object.entries(catalog).filter(([pid, info]) => info.custom);
             const listEl = document.getElementById('customModelsList');
@@ -1485,31 +1509,6 @@
                         <button class="btn btn-danger" onclick="deleteCustomModel('${pid}')">删除</button>
                     </div>
                 </div>`).join('');
-        }
-
-        function updateSettingsModels(provider, selected) {
-            fetch('/api/models').then(r => r.json()).then(data => {
-                const info = (data.catalog || {})[provider];
-                const mSel = document.getElementById('settingsModel');
-                if (!info) { mSel.innerHTML = '<option value="">（无）</option>'; return; }
-                mSel.innerHTML = (info.models || []).map(m => `<option value="${m}">${m}</option>`).join('');
-                if (selected && (info.models || []).includes(selected)) mSel.value = selected;
-            });
-        }
-
-        async function setDefaultModel() {
-            const provider = document.getElementById('settingsProvider').value;
-            const model = document.getElementById('settingsModel').value;
-            if (!provider || !model) { alert('请选择厂商和模型'); return; }
-            const r = await fetch('/api/models/set-default', {
-                method: 'POST', headers: {'Content-Type':'application/json'},
-                body: JSON.stringify({provider, model})
-            });
-            const data = await r.json();
-            if (data.error) { alert('❌ ' + data.error); return; }
-            alert('✅ 已设为默认模型: ' + provider + ' / ' + model);
-            loadModelOptions();
-            loadSettings();
         }
 
         async function fetchModelList() {

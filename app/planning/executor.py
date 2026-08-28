@@ -152,7 +152,13 @@ def create_executor_node(llm, tools_list):
 
         def _interrupt_handler(name, params):
             if name in _APPROVAL_TOOLS:
-                mode = state.get("approval_mode", "per_ask")
+                # 审批模式优先级：前端按钮设置的 _CONFIG > graph state
+                try:
+                    from app.server import config as _srv_cfg
+                    cfg_mode = (_srv_cfg._CONFIG or {}).get("configurable", {}).get("approval_mode")
+                except Exception:
+                    cfg_mode = None
+                mode = cfg_mode or state.get("approval_mode", "per_ask")
                 if mode == "per_ask":
                     desc = params.get('command') or params.get('path') or ''
                     resp = interrupt({"question": f"执行操作？\n{name}: {desc}", "command": desc, "mode": mode})
