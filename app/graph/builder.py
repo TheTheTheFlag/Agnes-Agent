@@ -239,6 +239,12 @@ def chatbot(state: State, config: RunnableConfig):
     if not content:
         content = "已处理完毕。"
 
+    # 若已触发规划（pending_plan），不要显示模型输出的 JSON 规划内容或"已提交"占位，
+    # 统一给友好提示，后续由执行树展示规划详情、summarizer 输出最终结果。
+    if state.get("pending_plan"):
+        goal = state["pending_plan"]
+        content = f"🚀 正在为你规划并执行：{goal[:80]}"
+
     # 摘要更新
     if len(state["messages"]) > 0:
         try:

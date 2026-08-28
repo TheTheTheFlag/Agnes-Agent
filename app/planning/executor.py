@@ -53,10 +53,10 @@ def create_executor_node(llm, tools_list):
                 state["task_plan"].status = "done"
             return state
 
-        # 找可执行的 pending 任务（依赖已满足）
+        # 找可执行的子任务（pending 或 running——running 表示上次审批中断，需要恢复执行）
         executable = None
         for sub in subtasks:
-            if sub["status"] == "pending":
+            if sub["status"] in ("pending", "running"):
                 deps = sub.get("dependencies", [])
                 if not isinstance(deps, list):
                     deps = []
@@ -66,18 +66,20 @@ def create_executor_node(llm, tools_list):
                 )
                 if deps_done:
                     executable = sub
+                    if sub["status"] == "running":
+                        print(f"[Executor] 恢复中断的子任务: {sub['id']}")
                     break
 
-        # 如果找不到可执行任务，尝试强制执行第一个 pending（打破死锁）
+        # 如果找不到可执行任务，尝试强制执行第一个 pending/running（打破死锁）
         if not executable:
             for sub in subtasks:
-                if sub["status"] == "pending":
+                if sub["status"] in ("pending", "running"):
                     executable = sub
                     print(f"[Executor] 无可用任务，强制执行: {sub['id']}")
                     break
 
         if not executable:
-            print("[Executor] 没有 pending 任务，返回")
+            print("[Executor] 没有待执行任务，返回")
             return state
 
         sub_id = executable["id"]
