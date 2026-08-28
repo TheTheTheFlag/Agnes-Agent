@@ -640,13 +640,16 @@
                 const tid = currentThreadId ? encodeURIComponent(currentThreadId) : '';
                 const stateUrl = tid ? '/api/state?thread_id=' + tid : '/api/state';
                 const promptUrl = tid ? '/api/prompt?thread_id=' + tid : '/api/prompt';
-                const eventsUrl = tid ? '/api/events?limit=50&thread_id=' + tid : '/api/events?limit=50';
+                const eventsUrl = tid ? '/api/events?limit=100&thread_id=' + tid : '/api/events?limit=100';
                 const [stateRes, promptRes, eventsRes] = await Promise.all([
                     fetch(stateUrl), fetch(promptUrl), fetch(eventsUrl)
                 ]);
                 renderState(await stateRes.json());
                 renderPrompt(await promptRes.json());
-                renderEvents(await eventsRes.json());
+                const evtData = await eventsRes.json();
+                renderEvents(evtData);
+                // 从事件流重放，重建/刷新执行树（CLI 模式对话后页面刷新仍可见）
+                rebuildPlanTreeFromEvents(evtData.events || []);
             } catch(e) { document.getElementById('statusText').textContent = '⚠️ 连接失败'; }
         }
 
@@ -1153,6 +1156,48 @@
             }
         }
 
+        // 从通用事件流更新执行树：CLI 模式/页面直连时 /api/chat 的 node 事件不会产生，
+        // 执行树改由 add_event 推送的 planner/executor/tool_call 事件驱动（SSE 实时 + 刷新重放）。
+        function applyPlanEvent(node, evt) {
+            const info = (evt && evt.data) || {};
+            if (node === 'planner') {
+                renderNodeBubble('planner', '✅', {
+                    goal: info.goal, subtask_count: info.subtask_count, subtasks: info.subtasks
+                });
+            } else if (node === 'executor') {
+                if (info.subtasks && info.subtasks.length) {
+                    const list = info.subtasks.map(s => ({id: s.id, desc: s.desc, status: s.status}));
+                    const doneAll = list.every(s => s.status === 'done' || s.status === 'failed');
+                    renderNodeBubble('executor', doneAll ? '✅' : '⏳', {goal: info.goal, subtasks: list});
+                } else if (info.subtask && planTree['executor'] && planTree['executor'].subtasks) {
+                    // 无全量快照时的兜底：只更新单条状态
+                    const list = planTree['executor'].subtasks;
+                    const idx = list.findIndex(s => String(s.id) === String(info.subtask));
+                    if (idx >= 0) list[idx].status = info.status;
+                    const doneAll = list.length > 0 && list.every(s => s.status === 'done' || s.status === 'failed');
+                    renderNodeBubble('executor', doneAll ? '✅' : '⏳', {subtasks: list});
+                }
+            } else if (node === 'tool_call') {
+                // 工具调用行挂在执行树 executor 节点下（无执行上下文则忽略）
+                if (!planTree['executor']) return;
+                const args = info.params ? JSON.stringify(info.params) : '';
+                renderNodeBubble('executor', planTree['executor'].icon || '⏳', {
+                    tool: info.name, args: args.slice(0, 200), phase: 'done'
+                });
+            }
+        }
+
+        // 从 events 列表按时间正序重放，重建执行树（页面刷新/轮询时保证可见）
+        function rebuildPlanTreeFromEvents(events) {
+            if (!events || !events.length) return;
+            for (const evt of events) {
+                if (evt.type === 'planner' || evt.type === 'executor' || evt.type === 'tool_call') {
+                    applyPlanEvent(evt.type, evt);
+                }
+            }
+        }
+
+
         // 工具调用卡片：对话过程中可视化"调了什么工具 + 输入/输出"
         const toolCardMap = {};
         function renderToolCard(evt) {
@@ -1307,8 +1352,15 @@
             try {
                 eventSource = new EventSource('/api/sse');
                 eventSource.onmessage = function(event) {
-                    try { const data = JSON.parse(event.data); if (data.type === 'log') refreshAll(); }
-                    catch(e) {}
+                    try {
+                        const data = JSON.parse(event.data);
+                        if (data.type === 'log') refreshAll();
+                        // 执行树事件（CLI/页面对话都会产生）：实时更新
+                        else if (data.type === 'planner' || data.type === 'executor' || data.type === 'tool_call') {
+                            if (data.thread_id && currentThreadId && data.thread_id !== currentThreadId) return;
+                            applyPlanEvent(data.type, data);
+                        }
+                    } catch(e) {}
                 };
                 eventSource.onerror = function() { setTimeout(connectSSE, 3000); };
                 document.getElementById('statusText').textContent = '🟢 实时';

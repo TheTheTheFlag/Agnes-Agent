@@ -74,6 +74,11 @@ def create_planner_node(llm):
 
         print(f"[Planner] 生成 {len(subtasks)} 个子任务")
         add_log_entry("info", f"规划: {len(subtasks)} 个子任务", {"goal": goal[:100]})
-        add_event("planner", {"subtasks": len(subtasks)}, thread_id)
+        # 事件携带完整子任务清单（供前端执行树渲染；/api/chat 的 node 事件也走同一数据结构）
+        add_event("planner", {
+            "goal": goal[:80],
+            "subtask_count": len(subtasks),
+            "subtasks": [{"id": s.id, "desc": s.description[:40], "status": "pending"} for s in subtasks],
+        }, thread_id)
         return state
     return planner_node

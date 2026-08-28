@@ -100,6 +100,14 @@ def create_executor_node(llm, tools_list):
         print(f"  ▶️ 执行 {sub_id}: {description[:50]}...")
         mm.update_subtask_status(task_plan_id, sub_id, "running")
 
+        # 全量子任务状态快照（供前端执行树实时渲染；每次进入 executor 都会更新）
+        _tp = state.get("task_plan")
+        _goal = getattr(_tp, "goal", "") if _tp else ""
+        add_event("executor", {
+            "goal": _goal[:80],
+            "subtasks": [{"id": s["id"], "desc": s["description"][:40], "status": s["status"]} for s in mm.get_subtasks(task_plan_id)],
+        }, thread_id)
+
         # 收集依赖产出
         deps_artifacts = []
         for dep_id in executable.get("dependencies", []):
@@ -223,7 +231,12 @@ def create_executor_node(llm, tools_list):
         else:
             print(f"  ❌ 失败")
             add_log_entry("error", f"子任务 {sub_id} 失败", {"error": final_result[:100]})
-        add_event("executor", {"subtask": sub_id, "status": status}, thread_id)
+        add_event("executor", {
+            "subtask": sub_id, "status": status,
+            "goal": (getattr(state.get("task_plan"), "goal", "") or "")[:80],
+            # 附带最新全量快照：DB 已写入本次状态，前端刷新/重放时直接覆盖
+            "subtasks": [{"id": s["id"], "desc": s["description"][:40], "status": s["status"]} for s in mm.get_subtasks(task_plan_id)],
+        }, thread_id)
 
         # 关键：从 DB 重新加载最新 subtask 状态，重建 state["task_plan"] 中的 subtasks 列表，
         # 否则 route_after_executor 看到的还是创建时的 pending 状态，会导致死循环。

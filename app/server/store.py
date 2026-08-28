@@ -162,6 +162,7 @@ def update_prompt(prompt: str, thread_id: str = None):
 def add_log_entry(level: str, message: str, data: Optional[Dict] = None):
     global _log_entries
     entry = {
+        "type": "log",  # 供前端 SSE 识别（与 add_event 的 entry 结构对齐）
         "timestamp": datetime.now().isoformat(),
         "level": level,
         "message": message,
