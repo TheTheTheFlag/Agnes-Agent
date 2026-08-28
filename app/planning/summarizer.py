@@ -9,29 +9,26 @@ from app.config import DB_PATH
 
 def create_summarizer_node(llm):
     def summarizer_node(state: State):
-        plan = state.get("task_plan")
-        if not plan:
-            return state
-
-        # 防御性：thread_id 在条件边传递时可能丢失
         thread_id = state.get("thread_id") or state.get("_thread_id") or "default"
         mm = MemoryManager(db_path=DB_PATH, thread_id=thread_id)
-        # 标记计划 completed（真正完成）：优先用 state 里的 task_plan_id（与 validator/route 一致），
-        # fallback 按 thread 查进行中计划。
-        tid = state.get("task_plan_id")
-        if not tid:
-            meta = mm.get_task_plan_by_thread(thread_id)
-            tid = meta["id"] if meta else None
-        if tid:
-            try:
-                mm.complete_task_plan(tid)
-            except Exception:
-                pass
+        # DB 唯一来源：按 thread 查当前进行中计划
+        plan_meta = mm.get_task_plan_by_thread(thread_id)
+        if not plan_meta:
+            return {"thread_id": thread_id, "messages": state.get("messages", [])}
+        tid = plan_meta["id"]
+        # 标记计划 completed（真正完成）
+        try:
+            mm.complete_task_plan(tid)
+        except Exception:
+            pass
 
-        results = [f"子任务 {sub.id}（{sub.description}）结果：{sub.result}" for sub in plan.subtasks]
+        # ===== 数据流：所有子任务/结果从 DB 查（state 不缓存）=====
+        goal = plan_meta.get("goal", "")
+        db_subs = mm.get_subtasks(tid)
+        results = [f"子任务 {s['id']}（{s['description']}）结果：{s.get('result') or ''}" for s in db_subs]
         combined = "\n".join(results)
 
-        if any(s.status == "failed" for s in plan.subtasks):
+        if any(s['status'] == "failed" for s in db_subs):
             summary = f"部分失败：\n{combined}"
         else:
             system_prompt = (
@@ -41,7 +38,7 @@ def create_summarizer_node(llm):
             )
             response = llm.invoke([
                 SystemMessage(content=system_prompt),
-                HumanMessage(content=f"目标：{plan.goal}\n结果：\n{combined}")
+                HumanMessage(content=f"目标：{goal}\n结果：\n{combined}")
             ])
             summary = response.content
 
@@ -59,11 +56,10 @@ def create_summarizer_node(llm):
             "subtask": "",
         }, thread_id)
 
-        # 显式 return 整个 state 的更新，避免 LangGraph 漏掉 in-memory 改动
+        # messages 已追加 + DB 已 complete_task_plan；END 触发由 planner_node 重新进入时
+        # 检测到 DB 中无进行中计划，自然走到 END。
         return {
-            **state,
-            "task_plan": None,
-            "task_plan_id": None,
+            "thread_id": thread_id,
             "messages": state["messages"],
         }
     return summarizer_node

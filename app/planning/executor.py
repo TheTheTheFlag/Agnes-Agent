@@ -5,7 +5,7 @@ from typing import List
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from langchain_core.messages import HumanMessage, ToolMessage, SystemMessage
 from langgraph.types import interrupt
-from app.graph.state import State, Subtask
+from app.graph.state import State
 from app.graph.utils import _tool_params_summary
 from app.planning.react_loop import ReActLoop
 from app.server import add_log_entry, add_event
@@ -13,112 +13,62 @@ from app.config import DB_PATH
 
 
 def create_executor_node(llm, tools_list):
+    """Executor 节点：每轮只做一件事 —— 选下一个 pending 子任务 → 执行 → 写回结果。
+    数据流：state 只传 thread_id/task_plan_id，所有子任务/进度决策都从 DB 读（唯一真相源）。
+    """
     llm_with_tools = llm.bind_tools(tools_list)
 
     def executor_node(state: State):
         print("[Executor] 进入")
         thread_id = state.get("thread_id", "default")
-        task_plan_id = state.get("task_plan_id")
         from app.memory import MemoryManager
         mm = MemoryManager(db_path=DB_PATH, thread_id=thread_id)
 
-        if not task_plan_id:
-            if state.get("task_plan"):
-                plan = state["task_plan"]
-                existing = mm.get_task_plan_by_thread(thread_id)
-                if existing:
-                    task_plan_id = existing["id"]
-                    state["task_plan_id"] = task_plan_id
-                elif plan.subtasks and all(s.status in ("done", "failed") for s in plan.subtasks):
-                    # 防御：查不到进行中计划但内存计划子任务已全部完成（节点重放/异常导致 task_plan_id 丢失），
-                    # 直接返回，避免把已完成任务重新入库导致重复执行。
-                    print("[Executor] 计划已完成但 task_plan_id 丢失，跳过重建")
-                    return state
-                else:
-                    new_id = mm.create_task_plan(thread_id, plan.goal)
-                    for sub in plan.subtasks:
-                        mm.add_subtask(new_id, thread_id, sub.id, sub.description, sub.dependencies)
-                    task_plan_id = new_id
-                    state["task_plan_id"] = task_plan_id
-            else:
-                return state
+        # ===== 阶段 1: 查 task_plan_id（DB 唯一来源）=====
+        plan = mm.get_task_plan_by_thread(thread_id)
+        if not plan:
+            print(f"[Executor] 无任务计划 thread={thread_id}")
+            return {}
+        task_plan_id = plan["id"]
 
-        subtasks = mm.get_subtasks(task_plan_id)
-        if not subtasks:
-            return state
+        # ===== 阶段 2: 清理卡死 running（DB 操作，幂等）=====
+        stale = mm.recover_stale_running(task_plan_id, timeout_seconds=300)
+        if stale:
+            print(f"[Executor] 恢复 {stale} 个卡死 running 子任务为 failed")
 
-        # 打印当前状态（调试）
-        status_summary = [(s["id"], s["status"]) for s in subtasks]
-        print(f"[Executor] 子任务状态: {status_summary}")
+        # ===== 阶段 3: 检查是否全部完成（DB 查）=====
+        progress = mm.get_plan_progress(task_plan_id)
+        print(f"[Executor] 进度: {progress}")
+        if progress['all_done']:
+            print("[Executor] 所有子任务已完成，进验证/汇总")
+            return {"thread_id": thread_id}
 
-        # 检查是否全部完成
-        if all(s["status"] in ("done", "failed") for s in subtasks):
-            print("[Executor] 所有子任务已完成，标记 plan 为 done")
-            if state.get("task_plan"):
-                state["task_plan"].status = "done"
-            return state
+        # ===== 阶段 4: 选下一个子任务（DB 决策，避开 running）=====
+        nxt = mm.get_next_executable_subtask(task_plan_id)
+        if nxt is None:
+            # DB 找不到 pending 但还有 running（应被 recover 清理了）；兜底返回
+            print("[Executor] 找不到可执行子任务，退出")
+            return {"thread_id": thread_id}
 
-        # 找可执行的子任务（pending 或 running——running 表示上次审批中断，需要恢复执行）
-        executable = None
-        for sub in subtasks:
-            if sub["status"] in ("pending", "running"):
-                deps = sub.get("dependencies", [])
-                if not isinstance(deps, list):
-                    deps = []
-                deps_done = all(
-                    any(dep_id == s["id"] and s["status"] == "done" for s in subtasks)
-                    for dep_id in deps
-                )
-                if deps_done:
-                    executable = sub
-                    if sub["status"] == "running":
-                        print(f"[Executor] 恢复中断的子任务: {sub['id']}")
-                    break
-
-        # 如果找不到可执行任务，尝试强制执行第一个 pending/running（打破死锁）
-        if not executable:
-            for sub in subtasks:
-                if sub["status"] in ("pending", "running"):
-                    executable = sub
-                    print(f"[Executor] 无可用任务，强制执行: {sub['id']}")
-                    break
-
-        if not executable:
-            print("[Executor] 没有待执行任务，返回")
-            return state
-
-        sub_id = executable["id"]
-        description = executable["description"]
-        # 残留卡死检测：上一轮已标记 running 但实际从未完成（GraphInterrupt 后未恢复），
-        # 强制转为 failed 让本轮新执行接管，避免无限等 running 子任务。
-        exec_status = executable.get("status", "pending")
-        if exec_status == "running":
-            # 距上次更新超过 5 分钟视为卡死
-            try:
-                from datetime import datetime as _dt
-                last_upd = executable.get("updated_at")
-                if last_upd and (_dt.now() - _dt.fromisoformat(last_upd.replace(" ", "T"))).total_seconds() > 300:
-                    print(f"[Executor] {sub_id} 残留 running 超过 5 分钟，标记为 failed 让本轮接管")
-                    mm.update_subtask_status(task_plan_id, sub_id, "failed", result="残留 running 超时，自动清理")
-            except Exception:
-                pass
+        sub_id = nxt['id']
+        description = nxt['description']
         print(f"  ▶️ 执行 {sub_id}: {description[:50]}...")
-        mm.update_subtask_status(task_plan_id, sub_id, "running")
 
-        # 执行气泡：让用户看到当前子任务是什么
+        # ===== 阶段 5: 标 running + 推送事件（DB 写一次）=====
+        mm.update_subtask_status(task_plan_id, sub_id, "running")
+        # executor 事件（前端执行树用）：子任务序号 + 全量子任务状态（DB 当前快照）
+        add_event("executor", {
+            "goal": (mm.get_task_plan_by_thread(thread_id) or {}).get("goal", "")[:80],
+            "subtask": sub_id,
+            "subtasks": [{"id": s["id"], "desc": s["description"][:40], "status": s["status"]}
+                          for s in mm.get_subtasks(task_plan_id)],
+        }, thread_id)
+        # 节点思考气泡
         add_event("node_thought", {
             "role": "executor",
             "title": f"⚙️ 子任务{sub_id}：{description[:60]}",
-            "text": f"目标：{(getattr(state.get('task_plan'), 'goal', '') or '')[:80]}\n子任务：{description}",
+            "text": f"目标：{(mm.get_task_plan_by_thread(thread_id) or {}).get('goal', '')[:80]}\n子任务：{description}",
             "subtask": sub_id,
-        }, thread_id)
-
-        # 全量子任务状态快照（供前端执行树实时渲染；每次进入 executor 都会更新）
-        _tp = state.get("task_plan")
-        _goal = getattr(_tp, "goal", "") if _tp else ""
-        add_event("executor", {
-            "goal": _goal[:80],
-            "subtasks": [{"id": s["id"], "desc": s["description"][:40], "status": s["status"]} for s in mm.get_subtasks(task_plan_id)],
         }, thread_id)
 
         # 收集依赖产出
@@ -131,7 +81,8 @@ def create_executor_node(llm, tools_list):
 
         artifacts_context = f"\n【已有产出】\n" + "\n".join(deps_artifacts) if deps_artifacts else ""
 
-        goal = state['task_plan'].goal if state.get('task_plan') else ""
+        # 目标从 DB 读（state 不缓存）
+        goal = (mm.get_task_plan_by_thread(thread_id) or {}).get("goal", "")
 
         system_prompt = f"""执行子任务：{description}
 目标：{goal}
@@ -187,20 +138,25 @@ def create_executor_node(llm, tools_list):
 
         def _interrupt_handler(name, params):
             if name in _APPROVAL_TOOLS:
-                # 审批模式优先级：前端按钮设置的 _CONFIG > graph state
+                # 审批模式：只读 _srv_cfg._CONFIG，默认 session_allow（不写 state）
                 try:
                     from app.server import config as _srv_cfg
-                    cfg_mode = (_srv_cfg._CONFIG or {}).get("configurable", {}).get("approval_mode")
+                    mode = (_srv_cfg._CONFIG or {}).get("configurable", {}).get("approval_mode") or "session_allow"
                 except Exception:
-                    cfg_mode = None
-                mode = cfg_mode or state.get("approval_mode", "per_ask")
+                    mode = "session_allow"
                 if mode == "per_ask":
                     desc = params.get('command') or params.get('path') or ''
                     resp = interrupt({"question": f"执行操作？\n{name}: {desc}", "command": desc, "mode": mode})
                     allow = resp.get("allow", False)
                     new_mode = resp.get("mode")
                     if new_mode and new_mode in ("per_ask", "session_allow", "always_allow"):
-                        state["approval_mode"] = new_mode
+                        try:
+                            from app.server import config as _srv_cfg
+                            if _srv_cfg._CONFIG is None:
+                                _srv_cfg._CONFIG = {"configurable": {}}
+                            _srv_cfg._CONFIG.setdefault("configurable", {})["approval_mode"] = new_mode
+                        except Exception:
+                            pass
                         print(f"[审批模式] {new_mode}")
                     if not allow:
                         try:
@@ -257,51 +213,23 @@ def create_executor_node(llm, tools_list):
                 "text": (final_result or '')[:300],
                 "subtask": sub_id,
             }, thread_id)
+        # 全量快照事件：DB 刚更新，前端用此覆盖执行树
         add_event("executor", {
             "subtask": sub_id, "status": status,
-            "goal": (getattr(state.get("task_plan"), "goal", "") or "")[:80],
-            # 附带最新全量快照：DB 已写入本次状态，前端刷新/重放时直接覆盖
-            "subtasks": [{"id": s["id"], "desc": s["description"][:40], "status": s["status"]} for s in mm.get_subtasks(task_plan_id)],
+            "goal": (mm.get_task_plan_by_thread(thread_id) or {}).get("goal", "")[:80],
+            "subtasks": [{"id": s["id"], "desc": s["description"][:40], "status": s["status"]}
+                          for s in mm.get_subtasks(task_plan_id)],
         }, thread_id)
 
-        # 关键：从 DB 重新加载最新 subtask 状态，重建 state["task_plan"] 中的 subtasks 列表，
-        # 否则 route_after_executor 看到的还是创建时的 pending 状态，会导致死循环。
-        from app.graph.state import Subtask
-        latest_subtasks = mm.get_subtasks(task_plan_id)
-        if state.get("task_plan") and latest_subtasks:
-            new_subtasks = []
-            for row in latest_subtasks:
-                new_subtasks.append(Subtask(
-                    id=row["id"],
-                    description=row["description"],
-                    dependencies=row.get("dependencies") or [],
-                    status=row["status"],
-                    result=row.get("result"),
-                ))
-            updated_plan = state["task_plan"].model_copy(update={"subtasks": new_subtasks})
-            state["task_plan"] = updated_plan
-
-        # 重新加载子任务，检查是否全部完成
-        updated_subtasks = mm.get_subtasks(task_plan_id)
-        all_done = all(s["status"] in ("done", "failed") for s in updated_subtasks)
-        # 重规划计数：本轮所有子任务执行完且有失败 → 递增（真正写回 graph state，
-        # 注意路由函数里修改 state 无效，必须在节点 return 时带上）
-        any_failed = any(s["status"] == "failed" for s in updated_subtasks)
-        if any_failed and all_done:
-            state["_total_replans"] = state.get("_total_replans", 0) + 1
-            print(f"[Executor] 有失败子任务，重规划计数 -> {state['_total_replans']}")
-        if all_done:
-            print("[Executor] 所有子任务已完成，标记 plan 为 done")
-            # 注意：这里【不】把 DB 计划标 completed——验证/汇总还没做，"completed" 由
-            # summarizer 在真正完成时标记。若提前标 completed，validator/summarizer 用
-            # get_task_plan_by_thread（只查 planning/executing）会查不到计划，
-            # 导致"执行完 → 验证误判无计划 → 重复规划"。
-            if state.get("task_plan"):
-                # 必须显式 return 才能让 LangGraph 把状态写回 checkpoint，
-                # 否则 in-memory 改动会被下一次 state 读取忽略，触发环。
-                updated_plan = state["task_plan"].model_copy(update={"status": "done"})
-                return {**state, "task_plan": updated_plan}
-        return state
+        # ===== 阶段 6: 写回结果（DB 唯一来源）=====
+        # 重规划计数：全部完成 + 有失败 → 计数（路由函数从 state 读，所以必须 return）
+        progress = mm.get_plan_progress(task_plan_id)
+        replans = state.get("_total_replans", 0)
+        if progress['all_done'] and progress['any_failed']:
+            replans = replans + 1
+            print(f"[Executor] 全部完成但有失败，_total_replans++ -> {replans}")
+        # 不再重建 state.task_plan（state 不缓存子任务列表）；路由/validator 都从 DB 读
+        return {"task_plan_id": task_plan_id, "_total_replans": replans}
     return executor_node
 
 def extract_artifacts(text: str) -> List[str]:

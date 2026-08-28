@@ -292,6 +292,58 @@ class MemoryManager:
                     (status, datetime.now(), task_plan_id, subtask_id)
                 )
 
+    def recover_stale_running(self, task_plan_id: int, timeout_seconds: int = 300) -> int:
+        """恢复卡在 running 超过 timeout 的子任务为 failed（避免无限等"running"）。
+        返回恢复的子任务数。"""
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.execute(
+                """SELECT subtask_id, updated_at FROM subtasks
+                   WHERE task_plan_id = ? AND status = 'running'""",
+                (task_plan_id,),
+            )
+            stale = []
+            for r in cur.fetchall():
+                try:
+                    from datetime import datetime as _dt
+                    last = _dt.fromisoformat((r[1] or '').replace(' ', 'T'))
+                    if (_dt.now() - last).total_seconds() > timeout_seconds:
+                        stale.append(r[0])
+                except Exception:
+                    pass
+            for sid in stale:
+                conn.execute(
+                    "UPDATE subtasks SET status = 'failed', result = 'stale running 超时自动清理', updated_at = ? WHERE task_plan_id = ? AND subtask_id = ?",
+                    (datetime.now(), task_plan_id, sid),
+                )
+            return len(stale)
+
+    def get_next_executable_subtask(self, task_plan_id: int) -> Optional[Dict]:
+        """查下一个可执行子任务（DB 唯一来源）：
+          1) pending 状态 + 依赖都已 done 的子任务（按 id 顺序）
+          2) 找不到则返回 None（说明全部完成或无 pending）
+        注意：这里**不**选 running 子任务——重入 executor 时不应重跑正在跑的。
+        """
+        subs = self.get_subtasks(task_plan_id)
+        # 第一轮：依赖都已 done 的 pending 子任务
+        done_ids = {s['id'] for s in subs if s['status'] == 'done'}
+        for s in subs:
+            if s['status'] != 'pending':
+                continue
+            deps = s.get('dependencies') or []
+            if all(d in done_ids for d in deps):
+                return s
+        return None
+
+    def get_plan_progress(self, task_plan_id: int) -> Dict:
+        """统计计划进度（DB 唯一来源）：{pending, running, done, failed, all_done}"""
+        subs = self.get_subtasks(task_plan_id)
+        progress = {'pending': 0, 'running': 0, 'done': 0, 'failed': 0, 'total': len(subs)}
+        for s in subs:
+            progress[s['status']] = progress.get(s['status'], 0) + 1
+        progress['all_done'] = progress['total'] > 0 and (progress['pending'] + progress['running']) == 0
+        progress['any_failed'] = progress['failed'] > 0
+        return progress
+
     def get_task_plan_by_thread(self, thread_id: str, status_filter: str = None) -> Optional[Dict]:
         with sqlite3.connect(self.db_path) as conn:
             if status_filter:

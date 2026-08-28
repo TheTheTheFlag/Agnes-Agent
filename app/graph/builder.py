@@ -17,7 +17,7 @@ from langgraph.types import RunnableConfig, interrupt, Command
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception
 from openai import RateLimitError
 
-from app.graph.state import State, TaskPlan
+from app.graph.state import State
 from app.graph.utils import (count_tokens, retry_llm_call, parse_tool_calls_from_content,
     ensure_tool_calls, compress_messages, ensure_token_limit, sync_state_to_db, load_prompt_template,
     MODEL_CONTEXT_LIMIT, TOKEN_LIMIT, KEEP_RECENT, MAX_TOOL_CALL_ROUNDS, _tool_params_summary)
@@ -56,9 +56,6 @@ def chatbot(state: State, config: RunnableConfig):
     thread_id = config["configurable"]["thread_id"]
     state["thread_id"] = thread_id
 
-    if not state.get("approval_mode"):
-        state["approval_mode"] = "per_ask"
-
     if not state.get("messages"):
         return {"messages": []}
 
@@ -67,9 +64,10 @@ def chatbot(state: State, config: RunnableConfig):
 
     mm = MemoryManager(db_path=DB_PATH, thread_id=thread_id)
     context = mm.build_context()
-    state["profile"] = context["profile"]
-    state["preferences"] = context["preferences"]
-    state["recent_summary"] = context.get("recent_summary")
+    # 业务数据直接用局部变量，不写回 state
+    profile = context["profile"]
+    preferences = context["preferences"]
+    recent_summary = context.get("recent_summary")
 
     # 记录用户消息到长期记忆
     mm.add_message(thread_id, "user", user_content)
@@ -81,12 +79,17 @@ def chatbot(state: State, config: RunnableConfig):
     if os_name == "Windows":
         os_cmds += "\n注意：Windows 控制台默认编码为 GBK，如读取中文文件出现乱码，请先执行 'chcp 65001' 切换为 UTF-8。"
 
-    profile_section = "\n".join([f"{k}: {v}" for k, v in state["profile"].items()]) if state["profile"] else ""
-    preferences_section = "\n".join([f"{k}: {v}" for k, v in state["preferences"].items()]) if state["preferences"] else ""
-    summary_section = state.get("recent_summary", "")
+    profile_section = "\n".join([f"{k}: {v}" for k, v in profile.items()]) if profile else ""
+    preferences_section = "\n".join([f"{k}: {v}" for k, v in preferences.items()]) if preferences else ""
+    summary_section = recent_summary or ""
+    # 当前任务计划从 DB 查（state 不缓存 TaskPlan；当前进行中计划按 thread 查）
     task_plan_section = ""
-    if state.get("task_plan") and state["task_plan"].status in ("planning", "executing"):
-        task_plan_section = f"【当前任务计划】目标：{state['task_plan'].goal}\n进度：\n" + "\n".join([f"  - [{sub.id}] {sub.description} {sub.status}" for sub in state['task_plan'].subtasks])
+    _plan = mm.get_task_plan_by_thread(thread_id) or {}
+    if _plan.get("status") in ("planning", "executing"):
+        _subs = mm.get_subtasks(_plan["id"])
+        task_plan_section = f"【当前任务计划】目标：{_plan.get('goal', '')}\n进度：\n" + "\n".join(
+            [f"  - [{s['id']}] {s['description']} {s['status']}" for s in _subs]
+        )
 
     # ===== 5 层记忆注入（L2 / L3 / L4）=====
     # 每轮自动把"用户画像 + 近期任务 + 近期命令"塞进 system prompt，
@@ -112,7 +115,8 @@ def chatbot(state: State, config: RunnableConfig):
         system_text = system_text + "\n" + memory_section
 
     update_prompt(system_text, thread_id)
-    update_state(state)
+    # state 不缓存业务数据（profile/preferences/task_plan 等都已从 DB 查）
+    state["thread_id"] = thread_id
 
     # 需要人工审批的工具：命令执行 + 文件写/改/删
     _APPROVAL_TOOLS = ("system_command", "execute_command", "write_file", "edit_file", "delete_file")
@@ -186,19 +190,27 @@ def chatbot(state: State, config: RunnableConfig):
     def interrupt_handler(name, params):
         if name in _APPROVAL_TOOLS:
             cmd = params.get('command', '')
-            # 审批模式优先级：前端按钮设置的 _CONFIG > graph state（按钮可实时切换生效）
+            # 审批模式来源（优先级）：
+            #   1) 用户实时点按钮：写到 _srv_cfg._CONFIG（跨进程生效）
+            #   2) 默认：session_allow（本次会话内不重复审批；每次启动 Agent 时重置为这个）
             try:
                 from app.server import config as _srv_cfg
-                cfg_mode = (_srv_cfg._CONFIG or {}).get("configurable", {}).get("approval_mode")
+                mode = (_srv_cfg._CONFIG or {}).get("configurable", {}).get("approval_mode") or "session_allow"
             except Exception:
-                cfg_mode = None
-            mode = cfg_mode or state.get("approval_mode", "per_ask")
+                mode = "session_allow"
             if mode == "per_ask":
                 resp = interrupt({"question": f"执行命令？\n命令: {cmd}", "command": cmd, "mode": mode})
                 allow = resp.get("allow", False)
                 new_mode = resp.get("mode")
                 if new_mode and new_mode in ["per_ask", "session_allow", "always_allow"]:
-                    state["approval_mode"] = new_mode
+                    # 写进程级配置（跨节点/跨轮持久化，无需 state 缓存）
+                    try:
+                        from app.server import config as _srv_cfg
+                        if _srv_cfg._CONFIG is None:
+                            _srv_cfg._CONFIG = {"configurable": {}}
+                        _srv_cfg._CONFIG.setdefault("configurable", {})["approval_mode"] = new_mode
+                    except Exception:
+                        pass
                     print(f"[审批模式] {new_mode}")
                 if not allow:
                     # 被拒的操作也记入历史，便于审查"模型想做什么但被拒绝了"
@@ -271,10 +283,7 @@ def chatbot(state: State, config: RunnableConfig):
     ret = {"messages": [AIMessage(content=content)], "thread_id": thread_id}
     if state.get("pending_plan"):
         ret["pending_plan"] = state["pending_plan"]
-    # 审批模式也要写回 graph state：session_allow / always_allow 需跨轮持久化，
-    # 否则下一轮 chatbot 读到 per_ask 又要求审批（用户选"本次会话允许"就失效了）。
-    if state.get("approval_mode"):
-        ret["approval_mode"] = state["approval_mode"]
+    # approval_mode 存 _srv_cfg._CONFIG（不再写 state）
     # 自动 git 版本快照：Agent 本轮改动（代码/交付物）提交入库
     try:
         from app.server.git_ops import auto_snapshot
@@ -295,14 +304,24 @@ def route_after_chatbot(state: State) -> str:
     """
     chatbot 退出后判断下一步：
       - 如果有 pending_plan → 进入 planner
-      - 如果有未完成的 task_plan → 进入 executor 继续执行
+      - 如果 DB 里有未完成的任务计划 → 进入 executor 继续执行
       - 否则 END
     """
     if state.get("pending_plan"):
         return "planner"
-    plan = state.get("task_plan")
-    if plan and plan.status in ("planning", "executing"):
-        return "executor"
+    # DB 唯一真相源：按 thread 查进行中计划，看是否有未完成子任务
+    try:
+        from app.memory import MemoryManager
+        from app.config import DB_PATH
+        thread_id = state.get("thread_id") or "default"
+        mm = MemoryManager(db_path=DB_PATH, thread_id=thread_id)
+        plan = mm.get_task_plan_by_thread(thread_id)
+        if plan:
+            progress = mm.get_plan_progress(plan["id"])
+            if progress['pending'] > 0 or progress['running'] > 0:
+                return "executor"
+    except Exception as e:
+        print(f"[Router chatbot] 读 DB 失败: {e}")
     return END
 
 
@@ -311,53 +330,48 @@ def route_after_chatbot(state: State) -> str:
 # ============================================================
 
 def route_after_executor(state: State):
-    plan = state.get("task_plan")
-    if plan:
-        # 用 DB 权威子任务状态判断（state 可能因节点重放/审批中断而不同步，
-        # 曾导致"子任务全 done 却误判 failed → 无限重规划"）
-        db_subs = None
-        try:
-            from app.memory import MemoryManager
-            from app.config import DB_PATH
-            thread_id = state.get("thread_id") or "default"
-            mm = MemoryManager(db_path=DB_PATH, thread_id=thread_id)
-            tid = state.get("task_plan_id")
-            if not tid:
-                meta = mm.get_task_plan_by_thread(thread_id)
-                tid = meta["id"] if meta else None
-            if tid:
-                db_subs = mm.get_subtasks(tid)
-        except Exception:
-            db_subs = None
+    """Executor 退出后：所有决策走 DB（state 只传 thread_id/task_plan_id 标识）。
 
-        if db_subs is not None:
-            # running 视为"可恢复"（上次审批中断），仍需 executor 重入
-            pending = [s for s in db_subs if s["status"] in ("pending", "running")]
-            failed = [s for s in db_subs if s["status"] == "failed"]
-        else:
-            subtasks = plan.subtasks
-            pending = [s for s in subtasks if s.status == "pending"]
-            failed = [s for s in subtasks if s.status == "failed"]
-        # 1) 还有未执行的子任务 → 继续执行（单个失败不影响整体推进）
-        try:
-            add_log_entry("info", f"路由判定: pending={len(pending)} failed={len(failed)} replans={state.get('_total_replans', 0)}")
-        except Exception:
-            pass
-        if pending:
-            return "executor"
-        # 2) 全部成功 → 验证
-        if not failed:
-            print("✅ 进入验证")
-            return "validator"
-        # 3) 有失败且无 pending：部分失败。重规划未超限则重规划一次，否则带失败进验证收敛
-        #    （_total_replans 由 executor 节点递增并写回，路由函数只读判断）
+    决策树（每条都有明确原因写入日志，便于排错）：
+      1) 有 pending 子任务 + 无 failed → 继续 executor（线性推进）
+      2) 有 failed → 重规划（限 2 次），让 planner 重新拆子任务
+      3) 无 pending 也无 failed → 进验证
+      4) 重规划已达上限 → 带失败进验证收敛
+    """
+    thread_id = state.get("thread_id") or "default"
+    # DB 唯一真相源：按 thread 查当前进行中计划
+    try:
+        from app.memory import MemoryManager
+        from app.config import DB_PATH
+        mm = MemoryManager(db_path=DB_PATH, thread_id=thread_id)
+        plan = mm.get_task_plan_by_thread(thread_id)
+        if not plan:
+            add_log_entry("info", "路由→END: 无进行中任务计划")
+            return END
+        progress = mm.get_plan_progress(plan["id"])
+        # 重规划计数从 state 读（次数必须 state 缓存——同一 thread 跨轮递增）
         replans = state.get("_total_replans", 0)
+    except Exception as e:
+        print(f"[Router] 读 DB 失败: {e}")
+        return END
+
+    pending = progress['pending']
+    running = progress['running']
+    failed = progress['failed']
+    # 1) 有失败 → 重规划（无论 pending/running 状态）
+    if failed > 0:
         if replans >= 2:
-            print("⚠️ 重规划已达上限，带部分失败进入验证（避免死循环）")
+            add_log_entry("warning", f"路由→validator: 重规划已达上限（{replans}），带 {failed} 个失败进验证")
             return "validator"
-        print(f"↩️ 有 {len(failed)} 个子任务失败，重规划（第 {replans + 1} 次）")
+        add_log_entry("info", f"路由→planner: 有 {failed} 个失败子任务，重规划（第 {replans + 1} 次）")
         return "planner"
-    return "executor"
+    # 2) 有 pending（+ running 视为可恢复）→ 继续 executor
+    if pending > 0 or running > 0:
+        add_log_entry("info", f"路由→executor: pending={pending} running={running} 继续执行")
+        return "executor"
+    # 3) 全部成功 → 验证
+    add_log_entry("info", "路由→validator: 全部成功，进验证")
+    return "validator"
 
 
 def route_after_validator(state: State):

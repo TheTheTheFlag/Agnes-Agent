@@ -26,17 +26,12 @@ def create_validator_node():
             return state
 
         # 计划 id 与 route_after_executor / executor / summarizer 保持一致：优先用 state 里的
-        # task_plan_id（避免依赖"按状态查进行中计划"的查询路径，计划在验证阶段仍处于 executing）。
-        plan_meta = None
-        tid = state.get("task_plan_id")
-        if not tid:
-            meta = mm.get_task_plan_by_thread(thread_id)
-            tid = meta["id"] if meta else None
-        if not tid:
+        # DB 查 task_plan + 子任务（state 不缓存）
+        plan_meta = mm.get_task_plan_by_thread(thread_id)
+        if not plan_meta:
             return _fail("无任务计划")
-        plan_meta = {"id": tid}
-
-        subtasks = mm.get_subtasks(plan_meta["id"])
+        tid = plan_meta["id"]
+        subtasks = mm.get_subtasks(tid)
         all_artifacts = []
         for sub in subtasks:
             if sub.get("artifacts"):

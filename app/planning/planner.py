@@ -1,7 +1,7 @@
 import sys, os, json
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from langchain_core.messages import SystemMessage, HumanMessage
-from app.graph.state import State, Subtask, TaskPlan
+from app.graph.state import State
 from app.memory import MemoryManager
 from app.server import add_log_entry, add_event
 from app.config import DB_PATH
@@ -12,11 +12,10 @@ def create_planner_node(llm):
         thread_id = state.get("thread_id", "default")
         mm = MemoryManager(db_path=DB_PATH, thread_id=thread_id)
 
-        # 如果是重新规划，清空旧子任务
-        if state.get("task_plan_id"):
-            mm.delete_task_plan(thread_id, state["task_plan_id"])
-            state["task_plan"] = None
-            state["task_plan_id"] = None
+        # 如果是重新规划，清空旧的进行中计划（DB 查，不用 state）
+        old_plan = mm.get_task_plan_by_thread(thread_id)
+        if old_plan:
+            mm.delete_task_plan(thread_id, old_plan["id"])
 
         last_msg = state["messages"][-1]
         goal = last_msg.content
@@ -54,34 +53,21 @@ def create_planner_node(llm):
             print(f"[Planner] 解析失败: {e}，使用降级方案")
             subtasks_data = [{"id": "1", "description": f"执行目标：{goal}", "dependencies": []}]
 
-        # 创建任务计划
+        # 写入 DB（唯一真相源）
         task_plan_id = mm.create_task_plan(thread_id, goal)
         for item in subtasks_data:
             mm.add_subtask(task_plan_id, thread_id, item["id"], item["description"], item.get("dependencies", []))
 
-        # 构造 Subtask 对象（所有字段都已确保类型正确）
-        subtasks = [
-            Subtask(
-                id=item["id"],
-                description=item["description"],
-                dependencies=item.get("dependencies", [])
-            )
-            for item in subtasks_data
-        ]
-        task_plan = TaskPlan(goal=goal, subtasks=subtasks, status="planning")
-        state["task_plan"] = task_plan
-        state["task_plan_id"] = task_plan_id
-
-        print(f"[Planner] 生成 {len(subtasks)} 个子任务")
-        add_log_entry("info", f"规划: {len(subtasks)} 个子任务", {"goal": goal[:100]})
+        print(f"[Planner] 生成 {len(subtasks_data)} 个子任务")
+        add_log_entry("info", f"规划: {len(subtasks_data)} 个子任务", {"goal": goal[:100]})
         # 事件携带完整子任务清单（供前端执行树渲染；/api/chat 的 node 事件也走同一数据结构）
         add_event("planner", {
             "goal": goal[:80],
-            "subtask_count": len(subtasks),
-            "subtasks": [{"id": s.id, "desc": s.description[:40], "status": "pending"} for s in subtasks],
+            "subtask_count": len(subtasks_data),
+            "subtasks": [{"id": s["id"], "desc": s["description"][:40], "status": "pending"} for s in subtasks_data],
         }, thread_id)
         # 规划思考气泡：给用户看到"我打算怎么拆解"
-        descs = "\n".join([f"  {i+1}. {s.description}" for i, s in enumerate(subtasks)])
+        descs = "\n".join([f"  {i+1}. {s['description']}" for i, s in enumerate(subtasks_data)])
         add_event("node_thought", {
             "role": "planner",
             "title": f"📋 规划：{goal[:60]}",
