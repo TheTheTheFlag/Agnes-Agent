@@ -95,6 +95,15 @@
         .chat-messages { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 14px; }
         .chat-input-wrap { border-top: 1px solid var(--line); padding: 10px; position: relative; }
         .chat-status-line { display: flex; align-items: center; gap: 8px; padding: 4px 2px 8px; font-size: 12px; color: var(--ink-soft); min-height: 20px; }
+        /* 任务进度区：与状态栏样式一致，固定显示在执行消息上方 */
+        .chat-plan-progress { padding: 4px 12px 0; font-size: 12px; color: var(--ink-soft); max-height: 40%; overflow-y: auto; }
+        .chat-plan-progress .plan-progress-inner { background: rgba(255,255,255,0.6); border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; }
+        /* 审批模式快捷按钮条 */
+        .chat-approval-bar { display: flex; align-items: center; gap: 6px; margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--line); flex-wrap: wrap; }
+        .approval-label { font-size: 11px; color: var(--ink-soft); font-weight: 700; }
+        .approval-btn { background: rgba(255,255,255,0.7); border: 1px solid var(--line); color: var(--ink-soft); padding: 4px 12px; border-radius: 14px; cursor: pointer; font-size: 11px; transition: all 0.2s; }
+        .approval-btn:hover { border-color: var(--pink); color: var(--ink); }
+        .approval-btn.active { background: linear-gradient(135deg, var(--pink), var(--purple)); color: #fff; border-color: transparent; box-shadow: 0 2px 8px rgba(255,92,138,0.3); }
         .chat-input-wrap textarea { width: 100%; background: #fff; color: var(--ink); border: 1px solid var(--line); border-radius: 10px; padding: 10px; font-size: 14px; font-family: inherit; resize: vertical; }
         .chat-input-wrap textarea:focus { outline: none; border-color: var(--pink); box-shadow: 0 0 0 3px rgba(255,92,138,0.15); }
         .chat-actions { display: flex; gap: 8px; margin-top: 8px; justify-content: flex-end; }
@@ -262,6 +271,10 @@
                 <span id="chatThreadLabel" style="color:#8b949e;font-size:12px;">thread: -</span>
                 <span style="flex:1"></span>
             </div>
+            <!-- 任务进度区：执行树固定显示在状态栏上方，样式与状态栏一致 -->
+            <div class="chat-plan-progress" id="planProgress" style="display:none;">
+                <div class="plan-progress-inner" id="planProgressInner"></div>
+            </div>
             <div class="chat-messages" id="chatMessages">
                 <div class="empty-state">输入消息开始对话，或输入 /help 查看命令</div>
             </div>
@@ -275,6 +288,13 @@
                 <div class="chat-actions">
                     <button class="btn" onclick="stopChat()">⏹ 停止</button>
                     <button class="refresh-btn" onclick="sendChat()">📤 发送 (Enter)</button>
+                </div>
+                <!-- 审批模式快捷按钮：发送框下方 -->
+                <div class="chat-approval-bar">
+                    <span class="approval-label">审批模式</span>
+                    <button class="approval-btn active" data-mode="per_ask" onclick="setApprovalMode('per_ask')">🔔 每次询问</button>
+                    <button class="approval-btn" data-mode="session_allow" onclick="setApprovalMode('session_allow')">♻️ 本次会话允许</button>
+                    <button class="approval-btn" data-mode="always_allow" onclick="setApprovalMode('always_allow')">🔓 完全无限制</button>
                 </div>
             </div>
         </div>
@@ -841,6 +861,10 @@
         }
 
         async function _sendChatInner() {
+            // 新对话：重置任务进度区 + 执行树
+            const _pp = document.getElementById('planProgress');
+            if (_pp) { _pp.style.display = 'none'; _pp.innerHTML = ''; }
+            for (const k in planTree) delete planTree[k];
             const input = document.getElementById('chatInput');
             const text = input.value.trim();
             if (!text) return;
@@ -879,6 +903,30 @@
             const dot = document.getElementById('chatStatusDot');
             if (dot) dot.style.display = busy ? 'inline-block' : 'none';
         }
+
+        // 审批模式快捷按钮：切换当前会话审批模式（按钮高亮 + 通知后端）
+        function setApprovalMode(mode) {
+            document.querySelectorAll('.approval-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
+            fetch('/api/command', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({command: '/system ' + mode})
+            }).then(r => r.json()).then(d => {
+                if (d.result) setChatStatus('🛡️ ' + d.result, false);
+            });
+        }
+        // 初始化：从后端读当前审批模式
+        function initApprovalMode() {
+            fetch('/api/command', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({command: '/system'})
+            }).then(r => r.json()).then(d => {
+                const m = (d.result || '').match(/(per_ask|session_allow|always_allow)/);
+                if (m) {
+                    document.querySelectorAll('.approval-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === m[1]));
+                }
+            });
+        }
+        initApprovalMode();
 
         // 过滤流式拼接里混入的"内部 LLM"内容（如对话摘要生成），只保留真正对话回复
         const SUMMARY_MARKERS = ['更新后的摘要', '**用户目标**', '已完成步骤', '待办事项', '摘要生成助手', '[对话摘要]'];
@@ -1009,10 +1057,7 @@
         const planTree = {};
         const NODE_LABELS = { planner: '🗂 任务规划', executor: '⚙️ 任务执行', validator: '✅ 结果验证', summarizer: '📝 结果汇总' };
         function renderNodeBubble(node, icon, info) {
-            const c = document.getElementById('chatMessages');
-            const empty = c.querySelector('.empty-state');
-            if (empty) empty.remove();
-            // 记录节点信息
+            // 记录节点信息（渲染到顶部固定进度区）
             if (!planTree[node]) planTree[node] = { icon, info: info || {}, tools: [] };
             planTree[node].icon = icon;
             if (info && info.goal) planTree[node].goal = info.goal;
@@ -1065,21 +1110,14 @@
                 }
             }
             html += '</div>';
-            // 一个容器气泡承载整棵树
-            let container = document.getElementById('plan-tree-bubble');
-            if (!container) {
-                container = document.createElement('div');
-                container.className = 'chat-bubble tool';
-                container.id = 'plan-tree-bubble';
-                container.style.alignSelf = 'flex-start';
-                container.style.maxWidth = '72%';
-                container.style.background = 'rgba(255,255,255,0.75)';
-                container.style.borderLeft = '3px solid var(--purple)';
-                container.style.color = 'var(--ink)';
-                c.appendChild(container);
+            // 渲染到固定进度区（chat 顶部，状态栏上方），不再作为聊天气泡
+            const prog = document.getElementById('planProgress');
+            const inner = document.getElementById('planProgressInner');
+            if (prog && inner) {
+                prog.style.display = 'block';
+                inner.innerHTML = html;
+                prog.scrollTop = prog.scrollHeight;
             }
-            container.innerHTML = html;
-            c.scrollTop = c.scrollHeight;
         }
 
         // 工具调用卡片：对话过程中可视化"调了什么工具 + 输入/输出"

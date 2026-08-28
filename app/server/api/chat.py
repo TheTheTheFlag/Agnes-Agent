@@ -138,7 +138,10 @@ async def chat_endpoint(payload: dict):
                                                 if isinstance(content, list):
                                                     content = "".join(str(x.get("text", "")) if isinstance(x, dict) else str(x) for x in content)
                                             if content:
-                                                sync_q.put({"step": "final", "node": node, "text": content})
+                                                # 只把 chatbot/summarizer 的回复作为对话最终消息；
+                                                # executor/planner 的输出由执行树+事件表达，不污染对话气泡。
+                                                if node in ("chatbot", "summarizer"):
+                                                    sync_q.put({"step": "final", "node": node, "text": content})
                                             break
                                         # ToolMessage → 工具结果（供前端工具卡片展示）
                                         is_tool = (isinstance(m, dict) and m.get("type") == "tool") or \

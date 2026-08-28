@@ -49,7 +49,6 @@ def create_summarizer_node(llm):
             **state,
             "task_plan": None,
             "task_plan_id": None,
-            "_planning_triggered": False,
             "messages": state["messages"],
         }
     return summarizer_node

@@ -71,8 +71,6 @@ def create_planner_node(llm):
         task_plan = TaskPlan(goal=goal, subtasks=subtasks, status="planning")
         state["task_plan"] = task_plan
         state["task_plan_id"] = task_plan_id
-        state["_planning_triggered"] = True
-        state["_executor_fail_count"] = 0
 
         print(f"[Planner] 生成 {len(subtasks)} 个子任务")
         add_log_entry("info", f"规划: {len(subtasks)} 个子任务", {"goal": goal[:100]})

@@ -307,9 +307,30 @@ def route_after_chatbot(state: State) -> str:
 def route_after_executor(state: State):
     plan = state.get("task_plan")
     if plan:
-        subtasks = plan.subtasks
-        pending = [s for s in subtasks if s.status == "pending"]
-        failed = [s for s in subtasks if s.status == "failed"]
+        # 用 DB 权威子任务状态判断（state 可能因节点重放/审批中断而不同步，
+        # 曾导致"子任务全 done 却误判 failed → 无限重规划"）
+        db_subs = None
+        try:
+            from app.memory import MemoryManager
+            from app.config import DB_PATH
+            thread_id = state.get("thread_id") or "default"
+            mm = MemoryManager(db_path=DB_PATH, thread_id=thread_id)
+            tid = state.get("task_plan_id")
+            if not tid:
+                meta = mm.get_task_plan_by_thread(thread_id)
+                tid = meta["id"] if meta else None
+            if tid:
+                db_subs = mm.get_subtasks(tid)
+        except Exception:
+            db_subs = None
+
+        if db_subs is not None:
+            pending = [s for s in db_subs if s["status"] == "pending"]
+            failed = [s for s in db_subs if s["status"] == "failed"]
+        else:
+            subtasks = plan.subtasks
+            pending = [s for s in subtasks if s.status == "pending"]
+            failed = [s for s in subtasks if s.status == "failed"]
         # 1) 还有未执行的子任务 → 继续执行（单个失败不影响整体推进）
         if pending:
             return "executor"

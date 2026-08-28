@@ -25,22 +25,14 @@ class TaskPlan(BaseModel):
 
 class State(TypedDict):
     messages: Annotated[list, add_messages]
-    name: str
-    birthday: str
     profile: Dict[str, str]
     preferences: Dict[str, str]
-    recent_tasks: List[Dict]
-    current_task_id: Optional[int]
-    current_task_messages: List[Dict]
     _new_profile: Optional[Dict[str, str]]
     _new_preference: Optional[Dict[str, str]]
-    summary: str
-    summary_message_count: int
 
     # 任务规划字段
     task_plan: Optional[TaskPlan]
-    _planning_triggered: bool
-    _executor_fail_count: int
+    task_plan_id: Optional[int]
     _total_replans: int
     _validation_passed: bool
 

@@ -13,11 +13,18 @@ def create_validator_node():
         # 防御性：thread_id 在 LangGraph 条件边传递时可能丢失
         thread_id = state.get("thread_id") or state.get("_thread_id") or "default"
         mm = MemoryManager(db_path=DB_PATH, thread_id=thread_id)
+
+        # 校验失败时递增重规划计数（真正写回 state，防 validator 失败→重规划死循环）
+        def _fail(msg):
+            state["_validation_passed"] = False
+            state["_validation_message"] = msg
+            state["_total_replans"] = state.get("_total_replans", 0) + 1
+            print(f"[Validator] 失败（重规划计数 -> {state['_total_replans']}）: {msg}")
+            return state
+
         plan_meta = mm.get_task_plan_by_thread(thread_id)
         if not plan_meta:
-            state["_validation_passed"] = False
-            state["_validation_message"] = "无任务计划"
-            return state
+            return _fail("无任务计划")
 
         subtasks = mm.get_subtasks(plan_meta["id"])
         all_artifacts = []
@@ -27,15 +34,11 @@ def create_validator_node():
         all_artifacts = list(set(all_artifacts))
 
         if not all_artifacts:
-            state["_validation_passed"] = False
-            state["_validation_message"] = "无产出文件"
-            return state
+            return _fail("无产出文件")
 
         missing = [f for f in all_artifacts if not os.path.exists(f)]
         if missing:
-            state["_validation_passed"] = False
-            state["_validation_message"] = f"文件缺失: {', '.join(missing)}"
-            return state
+            return _fail(f"文件缺失: {', '.join(missing)}")
 
         errors, warnings = [], []
         for file in all_artifacts:
@@ -54,6 +57,11 @@ def create_validator_node():
         if state["_validation_passed"] and not warnings:
             msg.append("✅ 全部通过")
         state["_validation_message"] = "\n\n".join(msg)
+
+        # 校验失败（格式错误）也递增重规划计数
+        if not state["_validation_passed"]:
+            state["_total_replans"] = state.get("_total_replans", 0) + 1
+            print(f"[Validator] 格式校验失败（重规划计数 -> {state['_total_replans']}）")
 
         print(f"[Validator] {'通过' if state['_validation_passed'] else '失败'}")
         add_log_entry("info", f"验证: {'通过' if state['_validation_passed'] else '失败'}", {"passed": state["_validation_passed"]})
