@@ -312,11 +312,11 @@ def route_after_executor(state: State):
             print("✅ 进入验证")
             return "validator"
         # 3) 有失败且无 pending：部分失败。重规划未超限则重规划一次，否则带失败进验证收敛
+        #    （_total_replans 由 executor 节点递增并写回，路由函数只读判断）
         replans = state.get("_total_replans", 0)
         if replans >= 2:
             print("⚠️ 重规划已达上限，带部分失败进入验证（避免死循环）")
             return "validator"
-        state["_total_replans"] = replans + 1
         print(f"↩️ 有 {len(failed)} 个子任务失败，重规划（第 {replans + 1} 次）")
         return "planner"
     return "executor"
@@ -329,7 +329,6 @@ def route_after_validator(state: State):
     if replans >= 2:
         print("⚠️ 验证失败但重规划已达上限，进入汇总")
         return "summarizer"
-    state["_total_replans"] = replans + 1
     print("↩️ 验证失败，重规划")
     return "planner"
 

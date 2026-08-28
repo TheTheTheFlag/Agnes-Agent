@@ -21,6 +21,10 @@ def execute_command(command: str, timeout: int = 60) -> str:
     注意: 该工具需要人工审批；请避免使用危险命令（rm -rf / 等）。
     """
     result = {"command": command, "returncode": 0, "stdout": "", "stderr": ""}
+    # 命令可能绕过文件工具写核心路径（如 copy/del 到 static/data/.env 等）→ 拦截
+    from app.tools.path_guard import command_targets_protected
+    if command_targets_protected(command):
+        return json.dumps({"error": "命令涉及受保护路径（app/server/static、data/、.env、.git 等），已拒绝执行。产出请写入 deliverables/。", "command": command}, ensure_ascii=False)
     try:
         proc = subprocess.run(
             command, shell=True, capture_output=True, text=True,

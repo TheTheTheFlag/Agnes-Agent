@@ -107,7 +107,8 @@ def create_executor_node(llm, tools_list):
 2. 外部搜索（tavily）不可用时，基于你的既有知识直接撰写，不要反复重试搜索。
 3. 必须调用 write_file 产出文件到 deliverables 目录，文件大小 > 0 才算完成。
 4. 不要在没有产出文件的情况下结束；如果已完成撰写但文件没保存，立即补一次 write_file。
-5. 输出：FINAL_ANSWER: [结果] 并附上文件名。
+5. 如果 deliverables 中已存在本任务的产出文件（之前规划/执行生成过），直接在其基础上完善/覆盖，不要重新从零探索。
+6. 输出：FINAL_ANSWER: [结果] 并附上文件名。
 """
 
         initial_messages = [
@@ -223,6 +224,12 @@ def create_executor_node(llm, tools_list):
         # 重新加载子任务，检查是否全部完成
         updated_subtasks = mm.get_subtasks(task_plan_id)
         all_done = all(s["status"] in ("done", "failed") for s in updated_subtasks)
+        # 重规划计数：本轮所有子任务执行完且有失败 → 递增（真正写回 graph state，
+        # 注意路由函数里修改 state 无效，必须在节点 return 时带上）
+        any_failed = any(s["status"] == "failed" for s in updated_subtasks)
+        if any_failed and all_done:
+            state["_total_replans"] = state.get("_total_replans", 0) + 1
+            print(f"[Executor] 有失败子任务，重规划计数 -> {state['_total_replans']}")
         if all_done:
             print("[Executor] 所有子任务已完成，标记 plan 为 done")
             # 同步更新 DB 主任务状态（子任务全 done 后主任务不应停留在 planning/executing）

@@ -21,6 +21,13 @@ def _resolve_path(path: str) -> str:
     return p
 
 
+def _assert_writable(path: str):
+    """写/删前检查：命中保护路径则拒绝（读不受限）。"""
+    from app.tools.path_guard import is_protected
+    if is_protected(path):
+        raise ValueError(f"禁止修改受保护路径: {path}（核心文件不允许 Agent 写入，产出请放 deliverables/）")
+
+
 @tool
 def ls(directory: str = ".", recursive: bool = False) -> str:
     """列出目录中的文件与子目录（默认项目根目录）。
@@ -73,9 +80,10 @@ def read_file(path: str, offset: int = 0, limit: int = 2000) -> str:
 def write_file(path: str, content: str) -> str:
     """创建新文件或覆盖已有文件。
     参数:
-      path: 相对项目根的路径（父目录不存在会自动创建）
+      path: 相对项目根的路径（父目录不存在会自动创建；核心路径被保护）
       content: 文件内容（UTF-8）
     返回: 写入结果（文件路径 + 大小）"""
+    _assert_writable(path)
     p = _resolve_path(path)
     try:
         os.makedirs(os.path.dirname(p), exist_ok=True)
@@ -94,6 +102,7 @@ def edit_file(path: str, old_string: str, new_string: str) -> str:
       old_string: 要替换的原文（必须精确匹配，唯一）
       new_string: 替换后的内容
     返回: 替换结果"""
+    _assert_writable(path)
     p = _resolve_path(path)
     if not os.path.isfile(p):
         return json.dumps({"error": f"文件不存在: {path}"}, ensure_ascii=False)
@@ -117,8 +126,9 @@ def edit_file(path: str, old_string: str, new_string: str) -> str:
 def delete_file(path: str) -> str:
     """递归删除文件或目录。
     参数:
-      path: 相对项目根的路径（文件或目录）
+      path: 相对项目根的路径（文件或目录；核心路径被保护）
     返回: 删除结果"""
+    _assert_writable(path)
     p = _resolve_path(path)
     if not os.path.exists(p):
         return json.dumps({"error": f"路径不存在: {path}"}, ensure_ascii=False)

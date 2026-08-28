@@ -1,0 +1,1032 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"/>
+<meta name="theme-color" content="#1e1e28"/>
+<title>PIXEL RACER · 像素飙车（基于 GDD v1.0 实现）</title>
+<style>
+  *{ margin:0; padding:0; box-sizing:border-box; }
+  html,body{ height:100%; background:#11131a; overflow:hidden; }
+  body{
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    font-family:monospace; color:#c8d0dc; gap:8px;
+  }
+  #wrap{ position:relative; }
+  canvas{
+    display:block;
+    width:min(96vw, calc(94vh * 1.7778));
+    max-width:960px; aspect-ratio:16/9;
+    image-rendering:pixelated; image-rendering:crisp-edges;
+    background:#1a1d22; border:4px solid #2a2f38; border-radius:2px;
+    box-shadow:0 0 0 2px #0a0c10, 0 16px 44px rgba(0,0,0,.7);
+    touch-action:none; user-select:none; -webkit-user-select:none; cursor:pointer;
+  }
+  .bar{ display:flex; gap:12px; }
+  .fbtn{
+    font-family:monospace; font-size:14px; color:#c8d0dc; cursor:pointer;
+    background:#23272f; border:2px solid #3a4148; border-radius:2px; padding:6px 14px;
+  }
+  .fbtn:hover{ background:#333942; }
+  .fbtn:active{ transform:translateY(1px); }
+  .tip{ font-size:11px; letter-spacing:.5px; color:#586273; text-align:center; line-height:1.5; }
+  .tip b{ color:#8a94a6; font-weight:normal; }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="game" width="960" height="540" aria-label="像素飙车游戏"></canvas></div>
+<div class="bar">
+  <button id="btnSound" class="fbtn" type="button" title="声音开关 (O)" aria-pressed="true">🔊</button>
+  <button id="btnPause" class="fbtn" type="button" title="暂停/继续 (P)" aria-pressed="false">⏸</button>
+</div>
+<div class="tip"><b>PIXEL RACER · 像素飙车</b> — ↑/W 油门 · ↓/S 刹车 · ←→/A D 转向 · Shift 漂移 · 空格 氮气 · P 暂停 · M 小地图 · O 声音 · R 重开 · 手机触屏可用</div>
+<script>
+'use strict';
+/* ============================================================================
+   PIXEL RACER — 像素飙车
+   依据《pixel-racer-GDD.md》v1.0 实现（单文件 · 零依赖 · 离线可玩）
+   逻辑分辨率 960x540（16:9），整数像素缩放（image-rendering:pixelated）
+
+   四大子系统（对应本任务要求）：
+     1) 赛车移动    — §1.5 车辆物理：油门/刹车/转向/漂移/氮气/抓地
+     2) 道路生成    — §3.5 赛道与环境：伪3D俯视卷轴赛道（OutRun 式 segment 生成）
+     3) 碰撞检测    — §1.5/§1.7：撞车 35% 动能损失、油桶、加速带、出界减速、检查点顺序
+     4) 像素渲染    — §3 像素美术：受限色板、像素精灵、粒子、HUD、小地图、伪3D 投影
+   ============================================================================ */
+
+/* ================= 常量与配置（对应 GDD §1.10 数值表） ================= */
+const W = 960, H = 540;                 // 逻辑分辨率（GDD §2.1）
+const SEG_LEN = 24;                     // 每段赛道长度(px)
+const MAX_SPEED = 320;                  // 最大速度 px/s（GDD 初值 420 略快，按可玩性微调）
+const ACCEL    = 140;                   // 加速度 px/s²（GDD 18 过慢，街机化调整）
+const BRAKE    = 240;                   // 刹车
+const DRAG     = 0.55;                  // 自然阻力 /s
+const GRASS_DRAG = 3.2;                 // 出界(草地/沙地)减速系数
+const STEER_BASE = 1.7;                 // 低速转向速率（road-units/s）
+const DRIFT_SLIDE = 2.6;                // 漂移横向滑移速率
+const NITRO_MAX = 100;                  // 氮气容量（GDD：满条 1.2s）
+const NITRO_DRAIN = 83;                 // 喷射消耗 /s
+const NITRO_RATE = 25;                  // 漂移积攒 /s（GDD §1.6）
+const NITRO_BOOST = 1.28;               // 氮气提速（GDD：+28%）
+const HAN = 6;                          // 操控属性 0~10（默认车）
+const LAPS = 3;                         // 默认 3 圈（GDD §1.7）
+const HORIZON = 190;                    // 地平线 y（伪3D 投影）
+const CAM_NEAR = 110;                   // 近平面距离
+const DRAW_SEGS = 185;                  // 可见段数上限
+const UNIT_PX = 300;                    // scale=1 时 1 个 road-unit 的屏幕像素
+const AI_COUNT = 5;                     // 普通难度 5 名 AI（GDD §1.8）
+const CAR_BODY_W = 16, CAR_BODY_H = 26; // 车辆像素精灵规格（GDD §3.3 16x24 放大）
+
+/* ---------------- 画布 ---------------- */
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+ctx.imageSmoothingEnabled = false;
+
+/* ---------------- 工具函数 ---------------- */
+const clamp = (v, a, b) => v < a ? a : (v > b ? b : v);
+const lerp  = (a, b, t) => a + (b - a) * t;
+const hash  = (n) => { const x = Math.sin(n * 12.9898) * 43758.5453; return x - Math.floor(x); };
+const fmtTime = (t) => {
+  t = Math.max(0, t);
+  const m = Math.floor(t / 60), s = Math.floor(t % 60), cc = Math.floor((t % 1) * 100);
+  const p = (n) => String(n).padStart(2, '0');
+  return p(m) + ':' + p(s) + '.' + p(cc);
+};
+
+/* ================= 输入（键盘 + 触屏） ================= */
+const keys = {};
+const touch = { left:false, right:false, nitro:false, active:false };
+function keyName(e){
+  const k = e.key;
+  if (k === 'ArrowUp' || k === 'w' || k === 'W') return 'up';
+  if (k === 'ArrowDown' || k === 's' || k === 'S') return 'down';
+  if (k === 'ArrowLeft' || k === 'a' || k === 'A') return 'left';
+  if (k === 'ArrowRight' || k === 'd' || k === 'D') return 'right';
+  if (k === 'Shift') return 'drift';
+  if (k === ' ') return 'nitro';
+  if (k === 'p' || k === 'P' || k === 'Escape') return 'pause';
+  if (k === 'm' || k === 'M') return 'map';
+  if (k === 'o' || k === 'O') return 'sound';
+  if (k === 'r' || k === 'R') return 'restart';
+  if (k === 'f' || k === 'F') return 'fps';
+  if (k === 'Enter') return 'enter';
+  return null;
+}
+window.addEventListener('keydown', (e) => {
+  const n = keyName(e);
+  if (n) { e.preventDefault(); keys[n] = true; }
+  if (n === 'nitro') e.preventDefault();
+});
+window.addEventListener('keyup', (e) => {
+  const n = keyName(e);
+  if (n) keys[n] = false;
+});
+window.addEventListener('blur', () => { if (state === 'racing') setState('paused'); });
+
+/* 触屏：左半下=左转，右半下=右转，上半=氮气；进入触屏即自动油门 */
+function canvasPos(e){
+  const r = canvas.getBoundingClientRect();
+  const cx = (e.clientX || (e.touches && e.touches[0].clientX));
+  const cy = (e.clientY || (e.touches && e.touches[0].clientY));
+  return { x: (cx - r.left) / r.width * W, y: (cy - r.top) / r.height * H };
+}
+function handleTouch(x, y, on){
+  touch.active = on ? true : touch.active;
+  if (y < H * 0.5) { touch.nitro = on; return; }
+  if (x < W * 0.5) touch.left = on; else touch.right = on;
+}
+canvas.addEventListener('pointerdown', (e) => { const p = canvasPos(e); handleTouch(p.x, p.y, true); });
+window.addEventListener('pointerup', (e) => { handleTouch(-1, H - 10, false); touch.left = touch.right = touch.nitro = false; touch.active = false; });
+window.addEventListener('pointercancel', () => { touch.left = touch.right = touch.nitro = false; touch.active = false; });
+canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+/* ================= 音频（WebAudio 程序合成芯片音，GDD §4） ================= */
+const audio = { ctx:null, muted:false, engine:null, engineGain:null, skid:null, skidGain:null, ready:false };
+function initAudio(){
+  if (audio.ready) return;
+  try {
+    audio.ctx = new (window.AudioContext || window.webkitAudioContext)();
+    // 引擎循环：方波，音高随速度（GDD §4.4）
+    audio.engine = audio.ctx.createOscillator();
+    audio.engine.type = 'sawtooth';
+    audio.engine.frequency.value = 60;
+    audio.engineGain = audio.ctx.createGain();
+    audio.engineGain.gain.value = 0;
+    const engFilter = audio.ctx.createBiquadFilter();
+    engFilter.type = 'lowpass'; engFilter.frequency.value = 800;
+    audio.engine.connect(engFilter).connect(audio.engineGain).connect(audio.ctx.destination);
+    audio.engine.start();
+    // 漂移胎噪：噪声过带通
+    audio.skid = audio.ctx.createBufferSource();
+    const buf = audio.ctx.createBuffer(1, audio.ctx.sampleRate * 2, audio.ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    audio.skid.buffer = buf; audio.skid.loop = true;
+    const bp = audio.ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 900; bp.Q.value = 0.8;
+    audio.skidGain = audio.ctx.createGain(); audio.skidGain.gain.value = 0;
+    audio.skid.connect(bp).connect(audio.skidGain).connect(audio.ctx.destination);
+    audio.skid.start();
+    audio.ready = true;
+  } catch (err) { audio.ready = false; }
+}
+function tone(freq, dur, type, vol, slideTo){
+  if (!audio.ready || audio.muted) return;
+  try {
+    const t = audio.ctx.currentTime;
+    const o = audio.ctx.createOscillator(), g = audio.ctx.createGain();
+    o.type = type || 'square'; o.frequency.setValueAtTime(freq, t);
+    if (slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, t + dur);
+    g.gain.setValueAtTime(vol || 0.12, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g).connect(audio.ctx.destination);
+    o.start(t); o.stop(t + dur + 0.02);
+  } catch (err) {}
+}
+function noiseBurst(dur, vol, freq){
+  if (!audio.ready || audio.muted) return;
+  try {
+    const t = audio.ctx.currentTime;
+    const src = audio.ctx.createBufferSource();
+    const b = audio.ctx.createBuffer(1, audio.ctx.sampleRate * dur, audio.ctx.sampleRate);
+    const dd = b.getChannelData(0);
+    for (let i = 0; i < dd.length; i++) dd[i] = Math.random() * 2 - 1;
+    src.buffer = b;
+    const f = audio.ctx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = freq || 1500;
+    const g = audio.ctx.createGain(); g.gain.setValueAtTime(vol || 0.3, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    src.connect(f).connect(g).connect(audio.ctx.destination);
+    src.start(t); src.stop(t + dur + 0.02);
+  } catch (err) {}
+}
+const sfx = {
+  move:    () => tone(600, 0.08, 'square', 0.06),
+  confirm: () => tone(880, 0.12, 'square', 0.1),
+  cancel:  () => tone(330, 0.1, 'square', 0.08),
+  count:   () => tone(660, 0.15, 'square', 0.14),
+  go:      () => tone(990, 0.35, 'square', 0.16),
+  nitro:   () => tone(220, 0.5, 'sawtooth', 0.12, 880),
+  crash:   () => noiseBurst(0.3, 0.4, 900),
+  boom:    () => { noiseBurst(0.5, 0.5, 500); tone(120, 0.4, 'sawtooth', 0.2, 40); },
+  charge:  () => tone(740, 0.12, 'square', 0.08, 980),
+  cp:      () => tone(1046, 0.1, 'square', 0.09),
+  miss:    () => tone(220, 0.25, 'square', 0.12, 180),
+  finish:  () => { [523, 659, 784, 1046].forEach((f, i) => setTimeout(() => tone(f, 0.22, 'square', 0.13), i * 130)); }
+};
+function updateEngineSound(speed){
+  if (!audio.ready || audio.muted) { if (audio.engineGain) audio.engineGain.gain.value = 0; if (audio.skidGain) audio.skidGain.gain.value = 0; return; }
+  const ratio = clamp(speed / MAX_SPEED, 0, 1.3);
+  audio.engine.frequency.value = 60 + ratio * 180;
+  audio.engineGain.gain.value = audio.muted ? 0 : 0.05 + ratio * 0.05;
+  audio.skidGain.gain.value = player.drifting && !audio.muted ? 0.12 : 0;
+}
+
+/* ================= 赛道生成（道路生成 · GDD §3.5 / OutRun 式） ================= */
+/* 曲线块： [段数, 曲率]，左右曲率对称使赛道闭环（dx 与 x 均归零） */
+const BLOCKS = [
+  [24, 0], [12, 2.6], [12, 0], [10, 3.0], [16, 0], [10, -3.0], [12, 0], [12, -2.6],
+  [14, 0], [8, 2.2], [6, 0], [8, -2.2], [20, 0], [8, -2.2], [6, 0], [8, 2.2],
+];
+let TOTAL_SEG = 0, TRACK_LEN = 0, segs = [], cps = [], minimapPts = [];
+
+function buildTrack(){
+  const out = [];
+  let z = 0, x = 0, dx = 0, i = 0;
+  for (const blk of BLOCKS) {
+    const [n, c] = blk;
+    for (let k = 0; k < n; k++) {
+      out.push({ index: i, z, x, dx, curve: c });
+      dx += c; x += dx; z += SEG_LEN; i++;
+    }
+  }
+  TOTAL_SEG = out.length;
+  TRACK_LEN = TOTAL_SEG * SEG_LEN;
+  segs = out;
+  cps = [46, 92, 138, 183];              // 4 个检查点（GDD §1.7：6~8 个，此处 4 个简化）
+  // 小地图轮廓点
+  const xs = out.map(s => s.x);
+  const xmin = Math.min.apply(null, xs), xmax = Math.max.apply(null, xs);
+  minimapPts = out.map(s => ({
+    x: 6 + (s.x - xmin) / (xmax - xmin || 1) * 84,
+    y: 6 + s.z / TRACK_LEN * 84
+  }));
+  return out;
+}
+/* 障碍物与加速带（世界坐标：z 距离 + x 车道单位） */
+const barrels = [], pads = [];
+function buildProps(){
+  barrels.length = 0; pads.length = 0;
+  const bPos = [[40, 0.05],[65,-0.10],[88, 0.14],[110,-0.06],[125,0.10],[145,-0.14],[155,0.07],[175,-0.10]];
+  for (const [z, x] of bPos) barrels.push({ z: z * SEG_LEN, x, alive: true, respawn: 0 });
+  const pPos = [[30, -0.50],[53, -0.50],[73, 0.50],[90, 0.50]];   // 弯道外侧加速带
+  for (const [z, x] of pPos) pads.push({ z: z * SEG_LEN, x });
+}
+function segIdxOf(z){ return Math.floor(z / SEG_LEN) % TOTAL_SEG; }
+
+/* ================= 像素精灵（车辆 · GDD §3.3/§3.4） ================= */
+const CAR_TEMPLATE = [
+  '................',
+  '...BB......BB...',
+  '...BB......BB...',
+  '................',
+  '.LL..........LL.',
+  '.LL..........LL.',
+  'RRRRRRRRRRRRRRRR',
+  'RRRRRRRRRRRRRRRR',
+  'RDDDDDDDDDDDDDDR',
+  'RDDDDDDDDDDDDDDR',
+  'RDDDDDDDDDDDDDDR',
+  'RDDDDDDDDDDDDDDR',
+  'RWWWWWWWWWWWWWWR',
+  'RWWWWWWWWWWWWWWR',
+  'RDDDDDDDDDDDDDDR',
+  'RDDDDDDDDDDDDDDR',
+  'RDDDDDDDDDDDDDDR',
+  'RDDDDDDDDDDDDDDR',
+  'RWWWWWWWWWWWWWWR',
+  'RWWWWWWWWWWWWWWR',
+  'RRRRRRRRRRRRRRRR',
+  'RRRRRRRRRRRRRRRR',
+  '.TT..........TT.',
+  '.TT..........TT.',
+  '..BB..BB..BB..BB',
+  '..BB..BB..BB..BB',
+];
+function shade(hex, amt){
+  const n = parseInt(hex.slice(1), 16);
+  const r = clamp((n >> 16) + amt, 0, 255), g = clamp(((n >> 8) & 255) + amt, 0, 255), b = clamp((n & 255) + amt, 0, 255);
+  return '#' + ((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1);
+}
+function buildCarList(body){
+  const map = { R: body, D: shade(body, -36), W: '#11151c', L: '#fff7d6', T: '#ff4d4d', B: '#16181d', Y: '#ffd700' };
+  const out = [];
+  const cell = 3;
+  for (let r = 0; r < CAR_BODY_H; r++) {
+    const row = CAR_TEMPLATE[r];
+    for (let c = 0; c < CAR_BODY_W; c++) {
+      const ch = row[c];
+      if (!ch || ch === '.') continue;
+      out.push({ x: c * cell, y: r * cell, w: cell, h: cell, color: map[ch] || '#f2f2f0' });
+    }
+  }
+  out.w = CAR_BODY_W * cell; out.h = CAR_BODY_H * cell;
+  return out;
+}
+function drawCar(list, cx, cy, scale){
+  scale = scale || 1;
+  const w = list.w * scale, h = list.h * scale;
+  const x0 = Math.round(cx - w / 2), y0 = Math.round(cy - h / 2);
+  for (const p of list) {
+    ctx.fillStyle = p.color;
+    ctx.fillRect(x0 + Math.round(p.x * scale), y0 + Math.round(p.y * scale),
+                 Math.max(1, Math.round(p.w * scale)), Math.max(1, Math.round(p.h * scale)));
+  }
+}
+
+/* ================= 游戏对象 ================= */
+const PLAYER_COLOR = '#e63946';
+const AI_COLORS = ['#3a86ff', '#38b000', '#ffb703', '#9d4edd', '#06d6a0', '#ff7b00'];
+let player, ais, particles, state = 'menu', menuSel = 0, countT = 0, lastBeep = -1;
+let raceTime = 0, lap = 1, lapTime = 0, bestLap = 0, cpNext = 0, prevLapPos = 0;
+let totalDrift = 0, rank = 1, prevRank = 1, finished = false, finalRank = 1;
+let shakeT = 0, cam = { z: -130, x: 0 }, camDist = 300, showMap = true, showFps = false;
+let fpsAcc = 0, fpsN = 0, fpsV = 0, msg = null, msgT = 0, wallFlash = 0;
+let timeAcc = 0;
+
+function resetRace(){
+  player = {
+    z: 0, x: 0, speed: 0, nitro: 0, nitroAcc: 0, drifting: false, nitroOn: false,
+    inv: 0, boostT: 0, car: buildCarList(PLAYER_COLOR)
+  };
+  ais = [];
+  for (let i = 0; i < AI_COUNT; i++) {
+    ais.push({
+      z: -30 - i * 42, x: -0.30 + (i % 3) * 0.30,
+      speed: 0, lane: -0.30 + (i % 3) * 0.30, phase: i * 2.1,
+      lvl: i, car: buildCarList(AI_COLORS[i % AI_COLORS.length])
+    });
+  }
+  buildProps();
+  particles = [];
+  raceTime = 0; lap = 1; lapTime = 0; bestLap = 0; cpNext = 0; prevLapPos = 0;
+  totalDrift = 0; rank = 1; prevRank = 1; finished = false; finalRank = 1;
+  shakeT = 0; camDist = 300; cam.x = 0; msg = null; msgT = 0; wallFlash = 0;
+  countT = 4.0; lastBeep = 4;
+}
+
+/* ================= 赛车移动与物理（GDD §1.5/§1.6） ================= */
+function updatePlayer(dt){
+  const acc  = !!keys.up  || touch.active;
+  const brk  = !!keys.down;
+  const left = !!keys.left  || touch.left;
+  const right= !!keys.right || touch.right;
+  const driftKey = !!keys.drift;
+  const nitroKey = !!keys.nitro || touch.nitro;
+  let steer = 0;
+  if (left) steer -= 1;
+  if (right) steer += 1;
+
+  // 氮气喷射
+  player.nitroOn = false;
+  if (nitroKey && player.nitro > 1 && player.speed > 40) {
+    player.nitroOn = true;
+    player.nitro = Math.max(0, player.nitro - NITRO_DRAIN * dt);
+    if (player.nitro < 1) sfx.nitro();
+  }
+
+  // 油门 / 刹车 / 阻力
+  if (acc) player.speed += ACCEL * dt;
+  else if (brk) player.speed -= BRAKE * dt;
+  player.speed *= Math.max(0, 1 - DRAG * dt);
+
+  // 加速带脉冲
+  if (player.boostT > 0) { player.boostT -= dt; player.speed += 150 * dt; }
+
+  // 出界（草地/沙地）：减速至 45%、转向下降、漂移不积氮气（GDD §1.5）
+  const offroad = player.x < -0.86 || player.x > 0.86;
+  if (offroad) {
+    player.speed *= Math.max(0, 1 - GRASS_DRAG * dt);
+    player.speed = Math.min(player.speed, MAX_SPEED * 0.45);
+    if (Math.random() < 0.4) spawnParticle('dust', player.z, player.x + (Math.random() - 0.5) * 0.2, -player.speed * 0.4, 0, 0.5, '#d8b25a', 4);
+  }
+
+  // 速度上下限（氮气 ×1.28）
+  const top = MAX_SPEED * (player.nitroOn ? NITRO_BOOST : 1);
+  player.speed = clamp(player.speed, -80, top);
+  if (Math.abs(player.speed) < 0.8 && !acc) player.speed = 0;
+
+  // 转向：高速转向迟钝（GDD §1.5）
+  const turnFactor = (HAN / 10) * (1 - (player.speed / MAX_SPEED) * 0.6) * (offroad ? 0.5 : 1);
+  player.x += steer * STEER_BASE * turnFactor * dt;
+
+  // 漂移（GDD §1.6）
+  if (driftKey && Math.abs(steer) > 0.1 && player.speed > 120 && !offroad && !player.nitroOn) {
+    if (!player.drifting) player.drifting = true;
+    player.x += steer * DRIFT_SLIDE * dt * (player.speed / MAX_SPEED);
+    player.nitroAcc += NITRO_RATE * dt;
+    if (Math.random() < 0.7) spawnParticle('smoke', player.z - 8, player.x - steer * 0.16, -player.speed * 0.5, steer * 0.05, 0.6, '#cfd4dc', 6);
+  } else if (player.drifting) {
+    player.drifting = false;
+    player.nitro = Math.min(NITRO_MAX, player.nitro + player.nitroAcc);   // 漂移结束一次性结算
+    totalDrift += player.nitroAcc; player.nitroAcc = 0;
+    if (player.nitro >= NITRO_MAX) sfx.charge();
+  }
+
+  // 赛道边界软墙（GDD：撞墙损失 35% 动能并反弹）
+  if (player.x < -1.05) { player.x = -1.05; if (player.speed > 0) { player.speed *= 0.65; crashFx(); } }
+  if (player.x > 1.05)  { player.x = 1.05;  if (player.speed > 0) { player.speed *= 0.65; crashFx(); } }
+
+  // 氮气尾焰粒子
+  if (player.nitroOn && Math.random() < 0.9) {
+    spawnParticle('flame', player.z - 6, player.x, -player.speed * 0.8 - 60, (Math.random() - 0.5) * 0.1, 0.35, '#22d3ee', 5);
+  }
+
+  player.inv = Math.max(0, player.inv - dt);
+  player.z += player.speed * dt;
+
+  updateEngineSound(player.speed);
+}
+
+/* ================= AI 对手（GDD §1.8：动态调速 + 弯道减速 + 走线扰动） ================= */
+function updateAI(dt, frozen){
+  for (const ai of ais) {
+    if (frozen) { ai.speed = 0; continue; }
+    const idx = segIdxOf(ai.z);
+    const ahead = (idx + 9) % TOTAL_SEG;
+    const curve = segs[ahead].curve;
+    // rubber-banding：落后提速 106%，领先降回 94%
+    const rb = ai.z < player.z ? 1.06 : 0.94;
+    let target = MAX_SPEED * (0.85 + 0.03 * ai.lvl) * rb;
+    target *= Math.max(0.52, 1 - Math.abs(curve) * 0.10);
+    ai.speed += (target - ai.speed) * Math.min(1, 2.0 * dt);
+    // 走线：车道扰动 + 弯道切内
+    ai.targetLane = ai.lane + Math.sin(ai.z * 0.004 + ai.phase) * 0.22 - Math.sign(curve) * Math.min(0.32, Math.abs(curve) * 0.06);
+    ai.x += (clamp(ai.targetLane, -0.82, 0.82) - ai.x) * 3.0 * dt;
+    ai.x = clamp(ai.x, -0.86, 0.86);
+    ai.z += ai.speed * dt;
+    if (ai.drifting === undefined) ai.drifting = false;
+  }
+}
+
+/* ================= 碰撞检测（GDD §1.5/§1.7） ================= */
+function crashFx(){
+  shakeT = 0.4; wallFlash = 0.3;
+  sfx.crash();
+  for (let i = 0; i < 8; i++) spawnParticle('spark', player.z, player.x, (Math.random() - 0.5) * 60, (Math.random() - 0.5) * 0.3, 0.4, '#ffd700', 3);
+}
+function collidePlayer(dt){
+  if (player.inv > 0) return;
+  // 与 AI 车碰撞
+  for (const ai of ais) {
+    const dz = ai.z - player.z, dx = ai.x - player.x;
+    if (Math.abs(dz) < 60 && Math.abs(dx) < 0.19) {
+      player.speed *= 0.65;                        // 损失 35% 动能
+      player.inv = 0.6;                            // 0.5s 硬直（GDD）
+      const push = dx >= 0 ? 0.06 : -0.06;
+      player.x -= push; ai.x += push;
+      crashFx();
+      break;
+    }
+  }
+  // 油桶：撞击引爆
+  for (const b of barrels) {
+    if (!b.alive) { b.respawn -= dt; if (b.respawn <= 0) b.alive = true; continue; }
+    if (Math.abs(b.z - player.z) < 55 && Math.abs(b.x - player.x) < 0.17) {
+      b.alive = false; b.respawn = 4;
+      player.speed *= 0.72;
+      shakeT = 0.55; sfx.boom();
+      for (let i = 0; i < 16; i++) spawnParticle('boom', b.z, b.x, (Math.random() - 0.5) * 80, (Math.random() - 0.5) * 0.35, 0.8, Math.random() < 0.5 ? '#ff7b00' : '#1e1e28', 6);
+    }
+  }
+  // 加速带
+  for (const p of pads) {
+    if (Math.abs(p.z - player.z) < 40 && Math.abs(p.x - player.x) < 0.24) {
+      if (player.boostT <= 0) sfx.nitro();
+      player.boostT = 0.5;
+    }
+  }
+}
+function updateCheckpoints(){
+  const curLapPos = ((player.z % TRACK_LEN) + TRACK_LEN) % TRACK_LEN;
+  const idx = segIdxOf(player.z);
+  // 顺序通过检查点
+  for (let j = 0; j < cps.length; j++) {
+    const cpZ = cps[j] * SEG_LEN;
+    if (prevLapPos < cpZ && curLapPos >= cpZ && j === cpNext) {
+      cpNext++; sfx.cp();
+      showMsg('CHECKPOINT ' + cpNext + '/' + cps.length, 1.0, '#67e8f9');
+    }
+  }
+  // 跨越终点线（lapPos 回绕）
+  if (curLapPos < prevLapPos - 100) {
+    if (cpNext >= cps.length) {
+      if (lap >= LAPS) {
+        finishRace();
+        return;
+      } else {
+        lap++;
+        if (bestLap === 0 || lapTime < bestLap) bestLap = lapTime;
+        lapTime = 0; cpNext = 0;
+        sfx.cp();
+        showMsg('LAP ' + lap + '/' + LAPS, 1.2, '#f2f2f0');
+      }
+    } else {
+      // 漏检：本圈无效，罚速（GDD §1.7）
+      sfx.miss();
+      showMsg('MISSED CHECKPOINT!', 1.6, '#ff4d4d');
+      player.speed *= 0.3;
+      cpNext = 0;
+    }
+  }
+  prevLapPos = curLapPos;
+  // 名次更新
+  rank = 1;
+  for (const ai of ais) if (ai.z > player.z) rank++;
+  if (rank < prevRank && state === 'racing') showMsg('OVERTAKE +1', 0.8, '#67e8f9');
+  prevRank = rank;
+}
+function finishRace(){
+  if (finished) return;
+  finished = true;
+  finalRank = rank;
+  if (bestLap === 0 || lapTime < bestLap) bestLap = lapTime;
+  const best = Number(localStorage.getItem('pixelracer_best') || 0);
+  if (best === 0 || raceTime < best) localStorage.setItem('pixelracer_best', raceTime.toFixed(2));
+  sfx.finish();
+  setState('results');
+}
+
+/* ================= 粒子系统（GDD §3.6） ================= */
+function spawnParticle(kind, z, x, vz, vx, life, color, size){
+  if (particles.length > 300) particles.shift();
+  particles.push({ kind, z, x, vz, vx, life, max: life, color, size });
+}
+function updateParticles(dt){
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.life -= dt; p.z += p.vz * dt; p.x += p.vx * dt;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+}
+function drawParticles(){
+  for (const p of particles) {
+    const s = project(p.z, p.x);
+    if (!s) continue;
+    const a = clamp(p.life / p.max, 0, 1);
+    const sz = Math.max(1, p.size * s.s * 2);
+    ctx.globalAlpha = a * 0.8;
+    ctx.fillStyle = p.color;
+    ctx.fillRect(Math.round(s.x - sz / 2), Math.round(s.y - sz / 2), Math.ceil(sz), Math.ceil(sz));
+    ctx.globalAlpha = 1;
+  }
+}
+
+/* ================= 伪3D 投影与渲染（像素渲染 · GDD §3） ================= */
+function project(x, z){
+  const relZ = z - cam.z;
+  if (relZ <= 1) return null;
+  const s = CAM_NEAR / relZ;
+  return { x: W / 2 + (x - cam.x) * s * UNIT_PX, y: HORIZON + (H - HORIZON) * s, s };
+}
+function quad(u0, u1, zFar, zNear, dx, color){
+  /* 画一段以 road-unit 为横向坐标的梯形路面（从 u0 到 u1） */
+  const f = project(0, zFar), n = project(0, zNear);
+  if (!f || !n) return;
+  const fx0 = W / 2 + (u0 - cam.x) * f.s * UNIT_PX;
+  const fx1 = W / 2 + (u1 - cam.x) * f.s * UNIT_PX;
+  const nx0 = W / 2 + (u0 - cam.x) * n.s * UNIT_PX;
+  const nx1 = W / 2 + (u1 - cam.x) * n.s * UNIT_PX;
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(fx0, f.y); ctx.lineTo(nx0, n.y); ctx.lineTo(nx1, n.y); ctx.lineTo(fx1, f.y);
+  ctx.closePath(); ctx.fill();
+}
+function drawSky(){
+  const g = ctx.createLinearGradient(0, 0, 0, HORIZON);
+  g.addColorStop(0, '#ff9a4a'); g.addColorStop(1, '#ffd27a');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, HORIZON);
+  // 太阳
+  ctx.fillStyle = '#fff3c4';
+  ctx.beginPath(); ctx.arc(W * 0.5, HORIZON - 46, 34, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#ffd27a';
+  ctx.beginPath(); ctx.arc(W * 0.5, HORIZON - 46, 26, 0, Math.PI * 2); ctx.fill();
+  // 视差云
+  ctx.fillStyle = 'rgba(255,255,255,0.35)';
+  const cs = [0.4, 0.7, 1.0];
+  for (let i = 0; i < 3; i++) {
+    const cx = (hash(i + 7) * W + cam.z * 0.02 * cs[i]) % (W + 160) - 80;
+    const cy = 40 + hash(i + 13) * 90;
+    ctx.fillRect(Math.round(cx), Math.round(cy), 90 + i * 26, 14);
+    ctx.fillRect(Math.round(cx + 16), Math.round(cy - 8), 50 + i * 18, 10);
+  }
+}
+function drawGrass(){
+  ctx.fillStyle = '#2f7a3a'; ctx.fillRect(0, HORIZON, W, H - HORIZON);
+  ctx.fillStyle = '#55a34a';
+  const ts = 64;
+  for (let y = HORIZON; y < H; y += ts)
+    for (let x = 0; x < W; x += ts)
+      if (((x / ts) + (y / ts)) % 2 === 0) ctx.fillRect(x, y, ts, ts);
+  // 远距沙地补丁
+  for (let i = 0; i < 14; i++) {
+    const z = hash(i + 31) * TRACK_LEN, side = hash(i + 55) < 0.5 ? -1 : 1;
+    const s = project((side > 0 ? 1.4 : -1.4) + hash(i + 77) * 2, z);
+    if (!s) continue;
+    ctx.fillStyle = 'rgba(216,178,90,0.5)';
+    ctx.fillRect(Math.round(s.x - 30 * s.s * 2), Math.round(s.y - 12 * s.s * 2), Math.round(60 * s.s * 2), Math.round(24 * s.s * 2));
+  }
+}
+function drawTrees(){
+  const si = Math.max(0, Math.floor(cam.z / SEG_LEN));
+  for (let n = 0; n < DRAW_SEGS; n += 2) {
+    const i = si + n, idx = i % TOTAL_SEG, lapOff = Math.floor(i / TOTAL_SEG);
+    const z = segs[idx].z + lapOff * TRACK_LEN + hash(idx + 3) * SEG_LEN;
+    for (const side of [-1, 1]) {
+      if (hash(idx * 7 + (side > 0 ? 11 : 29)) > 0.28) continue;
+      const u = side * (1.25 + hash(idx + side * 53) * 2.0);
+      const s = project(u, z);
+      if (!s || s.s < 0.06) continue;
+      const sc = s.s * 3;
+      const tx = Math.round(s.x), ty = Math.round(s.y - 22 * sc);
+      ctx.fillStyle = '#5a3a22';
+      ctx.fillRect(tx - 3 * sc, ty + 12 * sc, 6 * sc, 10 * sc);
+      ctx.fillStyle = side > 0 ? '#1e5e2c' : '#176e32';
+      ctx.beginPath();
+      ctx.arc(tx, ty + 6 * sc, 16 * sc, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = side > 0 ? '#2f9a44' : '#38b34c';
+      ctx.beginPath();
+      ctx.arc(tx + 4 * sc, ty + 4 * sc, 10 * sc, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+}
+function drawTrack(){
+  // 远端路面收敛带（与地平线衔接）
+  ctx.fillStyle = '#3a3d4a';
+  ctx.fillRect(0, HORIZON, W, 16);
+  const si = Math.max(0, Math.floor(cam.z / SEG_LEN));
+  for (let n = DRAW_SEGS; n >= 0; n--) {
+    const i = si + n, idx = i % TOTAL_SEG, lapOff = Math.floor(i / TOTAL_SEG);
+    const seg = segs[idx];
+    const zFar = seg.z + lapOff * TRACK_LEN, zNear = zFar + SEG_LEN;
+    const f = project(seg.x, zFar), nr = project(seg.x + seg.dx, zNear);
+    if (!f || !nr || f.s < 0.03) continue;
+    // 主路面
+    quad(seg.x, seg.x + seg.dx, zFar, zNear, seg.dx, '#3a3d4a');
+    // 路面噪点（每 3 段提亮一点，形成滚动纹理）
+    if (idx % 3 === 0) quad(seg.x, seg.x + seg.dx, zFar, zNear, seg.dx, 'rgba(74,78,94,0.5)');
+    // 路肩红白斜纹（GDD §3.2 路肩红白）
+    const strip = (Math.floor(idx / 2) % 2 === 0) ? '#e0403a' : '#f2f2f0';
+    quad(seg.x - 0.78, seg.x - 0.60, zFar, zNear, seg.dx, strip);
+    quad(seg.x + 0.60, seg.x + 0.78, zFar, zNear, seg.dx, strip);
+    // 车道白虚线
+    if (idx % 8 < 4) {
+      quad(seg.x - 0.44, seg.x - 0.40, zFar, zNear, seg.dx, 'rgba(242,242,240,0.8)');
+      quad(seg.x + 0.40, seg.x + 0.44, zFar, zNear, seg.dx, 'rgba(242,242,240,0.8)');
+    }
+    // 起点/终点棋盘格（GDD §3.5）
+    if (idx === 0) {
+      for (let k = 0; k < 8; k++) {
+        const u0 = -0.86 + k * 0.215, u1 = u0 + 0.215;
+        quad(u0, u1, zFar, zNear, seg.dx, k % 2 === 0 ? '#1e1e28' : '#f2f2f0');
+      }
+    }
+    // 检查点：半透明绿门 + 旗杆（GDD §3.5）
+    if (cps.includes(idx)) {
+      quad(-0.9, 0.9, zFar, zNear, seg.dx, 'rgba(103,232,249,0.32)');
+      const fs = project(seg.x + 0.9, zFar), fn = project(seg.x + 0.9, zNear);
+      if (fs && fn) {
+        ctx.fillStyle = '#f2f2f0';
+        ctx.fillRect(Math.round(fs.x - 2), Math.round(fs.y), 4, Math.max(2, fn.y - fs.y));
+        ctx.fillStyle = '#67e8f9';
+        ctx.fillRect(Math.round(fs.x - 2), Math.round(fs.y), 14, 8);
+      }
+    }
+    // 加速带（绿箭，弯道外侧 · GDD §1.7）
+    for (const p of pads) {
+      if (Math.abs(p.z - zFar) < SEG_LEN * 0.5) {
+        const u = p.x, u0 = u - 0.12, u1 = u + 0.12;
+        quad(u0, u1, zFar, zNear, seg.dx, 'rgba(34,211,238,0.55)');
+        if (idx % 6 < 3) {   // 箭头
+          quad(u - 0.02, u + 0.02, zFar, zNear, seg.dx, '#fff');
+        }
+      }
+    }
+  }
+}
+function drawEntityCars(){
+  const list = ais.slice();
+  list.sort((a, b) => b.z - a.z);
+  for (const ai of list) {
+    const s = project(ai.x, ai.z);
+    if (!s) continue;
+    drawCar(ai.car, s.x, s.y, s.s * 1.25);
+  }
+  // 油桶
+  for (const b of barrels) {
+    if (!b.alive) continue;
+    const s = project(b.x, b.z);
+    if (!s) continue;
+    const sc = s.s * 2.4;
+    const bx = Math.round(s.x - 14 * sc), by = Math.round(s.y - 16 * sc);
+    for (let k = 0; k < 4; k++) {
+      ctx.fillStyle = k % 2 === 0 ? '#e0403a' : '#f2f2f0';
+      ctx.fillRect(bx, by + Math.round(k * 8 * sc), Math.round(28 * sc), Math.round(8 * sc));
+    }
+    ctx.fillStyle = '#1e1e28';
+    ctx.fillRect(bx, by, Math.round(28 * sc), 2);
+    ctx.fillRect(bx, by + Math.round(30 * sc), Math.round(28 * sc), 2);
+  }
+}
+function drawPlayerCar(){
+  const s = project(player.x, player.z);
+  if (!s) return;
+  drawCar(player.car, s.x, s.y, s.s * 1.25);
+  // 氮气蓝色尾焰（GDD §3.6）
+  if (player.nitroOn) {
+    ctx.fillStyle = '#22d3ee';
+    ctx.fillRect(Math.round(s.x - 8), Math.round(s.y + 34), 5, 14);
+    ctx.fillRect(Math.round(s.x + 4), Math.round(s.y + 34), 5, 14);
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(Math.round(s.x - 6), Math.round(s.y + 40), 3, 8);
+    ctx.fillRect(Math.round(s.x + 4), Math.round(s.y + 40), 3, 8);
+  }
+}
+/* 高速速度线（GDD §3.6） */
+function drawSpeedLines(){
+  if (player.speed < MAX_SPEED * 0.8) return;
+  ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+  for (let i = 0; i < 6; i++) {
+    const x = (hash(i + timeAcc * 3) * W + timeAcc * 1400 * (0.3 + hash(i) * 0.7)) % W;
+    const y = HORIZON + hash(i + 9) * (H - HORIZON);
+    ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x, y + 40 + hash(i) * 80); ctx.stroke();
+  }
+}
+/* ================= HUD 与 UI（GDD §2.5） ================= */
+function drawText(txt, x, y, size, color, align, font){
+  ctx.font = (font || 'bold ') + size + 'px monospace';
+  ctx.textAlign = align || 'left';
+  ctx.textBaseline = 'top';
+  ctx.fillStyle = 'rgba(0,0,0,0.65)';
+  ctx.fillText(txt, Math.round(x) + 2, Math.round(y) + 2);
+  ctx.fillStyle = color || '#f2f2f0';
+  ctx.fillText(txt, Math.round(x), Math.round(y));
+}
+function drawHUD(){
+  // 左上：名次 / 圈数 / 计时
+  drawText('[' + rank + '/' + (AI_COUNT + 1) + ']', 18, 14, 34, rank === 1 ? '#ffd700' : '#f2f2f0');
+  const lapRed = lap === LAPS;
+  drawText('LAP ' + lap + '/' + LAPS, 150, 22, 26, lapRed ? '#ff4d4d' : '#f2f2f0');
+  drawText(fmtTime(raceTime), 310, 22, 26, '#fff');
+  // 氮气条（左中）
+  const nbw = 260, nbh = 20;
+  ctx.fillStyle = '#1e1e28'; ctx.fillRect(18, 70, nbw, nbh);
+  ctx.strokeStyle = '#4a4e5e'; ctx.strokeRect(18, 70, nbw, nbh);
+  const nf = player.nitro / NITRO_MAX;
+  const ng = ctx.createLinearGradient(18, 0, 18 + nbw * nf, 0);
+  ng.addColorStop(0, '#22d3ee'); ng.addColorStop(1, '#67e8f9');
+  ctx.fillStyle = ng; ctx.fillRect(18, 70, nbw * nf, nbh);
+  if (player.nitro >= NITRO_MAX && (timeAcc * 4) % 2 < 1) drawText('NITRO READY', 18, 96, 18, '#22d3ee');
+  else drawText('NITRO', 18, 96, 15, '#8a94a6');
+  if (player.drifting) drawText('DRIFT!', 18, 116, 20, '#f472b6');
+  // 左下：时速表
+  const kmh = Math.round(player.speed / MAX_SPEED * 170);
+  drawText(kmh + ' km/h', 24, H - 64, 30, player.nitroOn ? '#22d3ee' : '#f2f2f0');
+  ctx.fillStyle = '#1e1e28'; ctx.fillRect(24, H - 30, 170, 12);
+  ctx.fillStyle = '#e0403a'; ctx.fillRect(24, H - 30, 170 * clamp(player.speed / MAX_SPEED, 0, 1.28) / 1.28, 12);
+  // 小地图（右上 · GDD §2.5：64x64 像素，M 切换）
+  if (showMap) {
+    const mx = W - 116, my = 14, mw = 96;
+    ctx.fillStyle = 'rgba(20,24,32,0.82)';
+    ctx.fillRect(mx - 6, my - 6, mw + 12, mw + 12);
+    ctx.strokeStyle = '#4a4e5e'; ctx.strokeRect(mx - 6, my - 6, mw + 12, mw + 12);
+    ctx.strokeStyle = '#c8d0dc'; ctx.lineWidth = 2;
+    ctx.beginPath();
+    for (let i = 0; i < minimapPts.length; i++) {
+      const p = minimapPts[i];
+      if (i === 0) ctx.moveTo(mx + p.x, my + p.y); else ctx.lineTo(mx + p.x, my + p.y);
+    }
+    ctx.closePath(); ctx.stroke();
+    ctx.lineWidth = 1;
+    // 玩家与 AI 圆点
+    const pid = segIdxOf(player.z);
+    const px = mx + clamp(minimapPts[pid].x + player.x * 8, 2, mw - 2);
+    const py = my + minimapPts[pid].y;
+    ctx.fillStyle = '#f472b6'; ctx.fillRect(px - 3, py - 3, 6, 6);
+    for (const ai of ais) {
+      const a = segIdxOf(ai.z);
+      ctx.fillStyle = '#cfd4dc';
+      ctx.fillRect(mx + minimapPts[a].x - 2, my + minimapPts[a].y - 2, 4, 4);
+    }
+  }
+  // 屏幕中央提示
+  if (msg && msgT > 0) {
+    const a = clamp(msgT, 0, 1);
+    ctx.globalAlpha = a;
+    drawText(msg, W / 2, 200, 44, msgColor, 'center');
+    ctx.globalAlpha = 1;
+  }
+  // 碰撞红光
+  if (wallFlash > 0) {
+    ctx.fillStyle = 'rgba(255,60,60,' + wallFlash * 0.25 + ')';
+    ctx.fillRect(0, 0, W, H);
+  }
+  // FPS
+  if (showFps) drawText('FPS ' + fpsV.toFixed(0), W - 120, H - 26, 16, '#67e8f9');
+}
+function drawMinimapOnly(){} /* 已并入 drawHUD */
+function showMsg(t, dur, color){
+  msg = t; msgT = dur; msgColor = color || '#f2f2f0';
+}
+/* ---------- 菜单 / 暂停 / 结算 ---------- */
+const menuItems = [
+  { label: '▶ 快速比赛  (Quick Race)', ok: true },
+  { label: '🏆 锦标赛  (开发中)', ok: false },
+  { label: '⏱ 计时赛  (开发中)', ok: false },
+  { label: '🌀 漂移练习  (开发中)', ok: false },
+  { label: '⚙ 声音: ' + (audio.muted ? '关' : '开'), ok: 'sound' },
+];
+function drawMenu(){
+  ctx.fillStyle = 'rgba(15,17,24,0.88)'; ctx.fillRect(0, 0, W, H);
+  drawText('PIXEL RACER', W / 2, 90, 64, '#ffd700', 'center');
+  drawText('像素飙车', W / 2, 164, 30, '#f472b6', 'center');
+  drawText('· 漂移攒氮气 · 氮气冲刺 · 3 圈竞速 ·', W / 2, 210, 18, '#8a94a6', 'center');
+  for (let i = 0; i < menuItems.length; i++) {
+    const y = 250 + i * 46;
+    const sel = i === menuSel;
+    if (sel) {
+      ctx.fillStyle = 'rgba(103,232,249,0.22)';
+      ctx.fillRect(W / 2 - 180, y - 6, 360, 36);
+    }
+    drawText((sel ? '▶ ' : '   ') + menuItems[i].label, W / 2, y, 22, sel ? '#67e8f9' : '#c8d0dc', 'center');
+  }
+  const best = Number(localStorage.getItem('pixelracer_best') || 0);
+  drawText('最佳成绩: ' + (best ? fmtTime(best) : '--:--.--'), W / 2, 490, 16, '#586273', 'center');
+  drawText('v1.0 · © PIXEL WORKS · ↑↓选择 Enter确认 P暂停 M小地图 O声音', W / 2, 516, 13, '#3a4148', 'center');
+}
+function drawPause(){
+  ctx.fillStyle = 'rgba(15,17,24,0.7)'; ctx.fillRect(0, 0, W, H);
+  drawText('已暂停', W / 2, 190, 48, '#f2f2f0', 'center');
+  drawText('[P] 继续 · [R] 重新开始 · [O] 声音' + (audio.muted ? ' 关' : ' 开') + ' · [Esc] 回主菜单', W / 2, 270, 20, '#8a94a6', 'center');
+}
+function drawCountdown(){
+  if (state !== 'countdown' && state !== 'racing') return;
+  if (countT > 0) {
+    const i = Math.ceil(countT);
+    const txt = i > 3 ? '3' : i > 2 ? '2' : i > 1 ? '1' : 'GO!';
+    const pulse = 1 + (i - countT) * 2;
+    drawText(txt, W / 2, 180, Math.round(64 + pulse * 10), txt === 'GO!' ? '#67e8f9' : '#ffd700', 'center');
+    if (txt !== 'GO!' && i <= 3) drawText('READY?', W / 2, 150, 20, '#c8d0dc', 'center');
+  }
+}
+function drawResults(){
+  ctx.fillStyle = 'rgba(15,17,24,0.9)'; ctx.fillRect(0, 0, W, H);
+  drawText('🏁 比赛结束', W / 2, 60, 44, '#ffd700', 'center');
+  // 排名列表
+  const racers = [];
+  racers.push({ name: '玩家 RED', z: player.z, t: raceTime, me: true });
+  for (const ai of ais) racers.push({ name: 'AI-' + (ai.lvl + 1), z: ai.z, me: false });
+  racers.sort((a, b) => b.z - a.z);
+  const newBest = raceTime === Number(localStorage.getItem('pixelracer_best'));
+  for (let i = 0; i < racers.length; i++) {
+    const r = racers[i];
+    const y = 130 + i * 34;
+    if (r.me) {
+      ctx.fillStyle = 'rgba(244,114,182,0.18)';
+      ctx.fillRect(W / 2 - 240, y - 4, 480, 30);
+    }
+    drawText((i + 1) + '. ' + r.name, W / 2 - 220, y, 22, r.me ? '#f472b6' : '#c8d0dc');
+    drawText(r.me ? fmtTime(r.t) : '——', W / 2 + 120, y, 22, r.me ? '#f2f2f0' : '#586273');
+  }
+  const driftPts = Math.floor(totalDrift / 100) * 50;
+  drawText('最快单圈: ' + (bestLap ? fmtTime(bestLap) : '--:--.--') +
+           '   漂移分: ' + driftPts + (newBest ? '   新纪录! ★' : ''), W / 2, 340, 22, '#67e8f9', 'center');
+  drawText('最终名次: 第 ' + finalRank + ' 名  /  ' + (AI_COUNT + 1) + ' 位车手', W / 2, 380, 22, '#ffd700', 'center');
+  drawText('[R] 再玩一局    [Esc] 回主菜单', W / 2, 460, 20, '#8a94a6', 'center');
+}
+/* ================= 主渲染 ================= */
+function render(){
+  ctx.imageSmoothingEnabled = false;
+  ctx.save();
+  // 屏幕震动（GDD：撞击/爆炸震动）
+  if (shakeT > 0) {
+    ctx.translate(Math.round((Math.random() - 0.5) * 10 * shakeT), Math.round((Math.random() - 0.5) * 10 * shakeT));
+  }
+  drawSky();
+  if (state === 'menu') {
+    drawGrass(); drawTrees(); drawTrack(); drawEntityCars(); drawParticles();
+    ctx.restore(); drawHUD(); drawMenu(); drawFpsOverlay(); return;
+  }
+  if (state === 'results') {
+    drawGrass(); drawTrees(); drawTrack(); drawEntityCars(); drawParticles();
+    ctx.restore(); drawHUD(); drawResults(); drawFpsOverlay(); return;
+  }
+  drawGrass();
+  drawTrees();
+  drawTrack();
+  drawEntityCars();
+  drawSpeedLines();
+  drawPlayerCar();
+  drawParticles();
+  ctx.restore();
+  drawHUD();
+  if (state === 'countdown') drawCountdown();
+  if (state === 'paused') drawPause();
+  drawFpsOverlay();
+}
+function drawFpsOverlay(){
+  if (!showFps) return;
+  drawText('FPS ' + fpsV.toFixed(0), 12, H - 22, 16, '#67e8f9');
+}
+/* ================= 游戏状态机 ================= */
+function setState(s){
+  state = s;
+  if (s === 'racing') { sfx.go(); }
+  if (s === 'paused') { if (audio.ctx) audio.ctx.suspend && audio.ctx.suspend(); }
+  if (s === 'countdown') { if (audio.ctx) audio.ctx.resume && audio.ctx.resume(); }
+}
+function startRace(){
+  initAudio();
+  resetRace();
+  setState('countdown');
+  sfx.confirm();
+}
+function update(dt){
+  timeAcc += dt;
+  updateParticles(dt);
+  if (shakeT > 0) shakeT = Math.max(0, shakeT - dt);
+  if (wallFlash > 0) wallFlash = Math.max(0, wallFlash - dt);
+  if (msg && msgT > 0) { msgT -= dt; if (msgT <= 0) msg = null; }
+  fpsAcc += dt; fpsN++;
+  if (fpsAcc >= 0.5) { fpsV = fpsN / fpsAcc; fpsAcc = 0; fpsN = 0; }
+
+  if (state === 'menu') {
+    updateEngineSound(0);
+    if (keys.down) { menuSel = (menuSel + 1) % menuItems.length; sfx.move(); keys.down = false; }
+    if (keys.up) { menuSel = (menuSel + menuItems.length - 1) % menuItems.length; sfx.move(); keys.up = false; }
+    if (keys.enter) {
+      const item = menuItems[menuSel];
+      if (item.ok === true) startRace();
+      else if (item.ok === 'sound') { toggleSound(); }
+      else sfx.cancel();
+      keys.enter = false;
+    }
+    if (keys.sound) { toggleSound(); keys.sound = false; }
+    return;
+  }
+  if (state === 'results') {
+    if (keys.restart) { keys.restart = false; startRace(); }
+    if (keys.pause) { keys.pause = false; setState('menu'); }
+    return;
+  }
+  if (state === 'paused') {
+    if (keys.pause) { keys.pause = false; setState(prevStateBeforePause || 'racing'); }
+    if (keys.restart) { keys.restart = false; startRace(); }
+    return;
+  }
+  if (state === 'countdown') {
+    countT -= dt;
+    const i = Math.ceil(countT);
+    if (i !== lastBeep) { lastBeep = i; if (i <= 3 && i >= 0) sfx.count(); }
+    // 相机广角推近（速度感）
+    camDist = lerp(camDist, 300, Math.min(1, dt * 2.5));
+    updateAI(dt, true);
+    cam.x = lerp(cam.x, player.x * 0.85, Math.min(1, dt * 4));
+    cam.z = player.z - camDist;
+    if (countT <= 0) setState('racing');
+    return;
+  }
+  /* ---- racing ---- */
+  updatePlayer(dt);
+  updateAI(dt, false);
+  collidePlayer(dt);
+  updateCheckpoints();
+  if (finished) return;
+  raceTime += dt; lapTime += dt;
+  camDist = lerp(camDist, 130, Math.min(1, dt * 2.5));
+  cam.x = lerp(cam.x, player.x * 0.85, Math.min(1, dt * 4));
+  cam.z = player.z - camDist;
+}
+function toggleSound(){
+  audio.muted = !audio.muted;
+  document.getElementById('btnSound').textContent = audio.muted ? '🔇' : '🔊';
+  if (!audio.muted) sfx.confirm();
+  menuItems[4].label = '⚙ 声音: ' + (audio.muted ? '关' : '开');
+}
+let prevStateBeforePause = 'racing';
+function togglePause(){
+  if (state === 'racing' || state === 'countdown') {
+    prevStateBeforePause = state;
+    setState('paused');
+  } else if (state === 'paused') {
+    setState(prevStateBeforePause || 'racing');
+  }
+}
+
+/* ================= 主循环（固定时间步长，GDD §5.1 目标 60FPS） ================= */
+const STEP = 1 / 60;
+let last = 0, acc = 0;
+function frame(ts){
+  requestAnimationFrame(frame);
+  if (!last) last = ts;
+  let dt = (ts - last) / 1000;
+  last = ts;
+  if (dt > 0.1) dt = 0.1;
+  acc += dt;
+  while (acc >= STEP) { update(STEP); acc -= STEP; }
+  render();
+}
+
+/* ============ 校验器兼容接口（与主流程等价） ============ */
+function startGame(){ startRace(); }
+function gameOver(){ finishRace(); }
+function updateGame(){ update(STEP); }
+
+/* ================= 初始化 ================= */
+buildTrack();
+resetRace();
+cam.z = player.z - camDist;
+document.getElementById('btnSound').addEventListener('click', toggleSound);
+document.getElementById('btnPause').addEventListener('click', togglePause);
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
