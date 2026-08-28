@@ -84,6 +84,19 @@ def create_executor_node(llm, tools_list):
 
         sub_id = executable["id"]
         description = executable["description"]
+        # 残留卡死检测：上一轮已标记 running 但实际从未完成（GraphInterrupt 后未恢复），
+        # 强制转为 failed 让本轮新执行接管，避免无限等 running 子任务。
+        exec_status = executable.get("status", "pending")
+        if exec_status == "running":
+            # 距上次更新超过 5 分钟视为卡死
+            try:
+                from datetime import datetime as _dt
+                last_upd = executable.get("updated_at")
+                if last_upd and (_dt.now() - _dt.fromisoformat(last_upd.replace(" ", "T"))).total_seconds() > 300:
+                    print(f"[Executor] {sub_id} 残留 running 超过 5 分钟，标记为 failed 让本轮接管")
+                    mm.update_subtask_status(task_plan_id, sub_id, "failed", result="残留 running 超时，自动清理")
+            except Exception:
+                pass
         print(f"  ▶️ 执行 {sub_id}: {description[:50]}...")
         mm.update_subtask_status(task_plan_id, sub_id, "running")
 

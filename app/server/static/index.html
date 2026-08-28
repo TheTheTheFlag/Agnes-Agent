@@ -1214,12 +1214,11 @@
             div.innerHTML = `<div style="color:var(--ink);font-weight:700;margin-bottom:6px;">🛡️ 需要人工确认</div>
                 <div style="color:var(--ink);font-size:12px;margin-bottom:8px;white-space:pre-wrap;">${escapeHtml(q)}</div>
                 <div style="color:var(--ink-soft);font-size:11px;margin-bottom:8px;">当前模式：每次询问</div>
-                <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                <div style="display:flex;gap:6px;">
                     <button class="refresh-btn" onclick="approvalResume(true, 'per_ask')">✅ 允许执行</button>
                     <button class="btn btn-danger" onclick="approvalResume(false, 'per_ask')">❌ 拒绝</button>
-                    <button class="btn" onclick="approvalResume(true, 'session_allow')">♻️ 本次会话自动允许</button>
-                    <button class="btn" style="border-color:var(--orange);color:var(--orange);" onclick="approvalResume(true, 'always_allow')">🔓 完全无限制</button>
-                </div>`;
+                </div>
+                <div style="font-size:11px;color:var(--ink-soft);margin-top:6px;">💡 长期模式（每次询问 / 本次会话允许 / 完全无限制）请在下方按钮设置</div>`;
             c.appendChild(div);
             c.scrollTop = c.scrollHeight;
         }
