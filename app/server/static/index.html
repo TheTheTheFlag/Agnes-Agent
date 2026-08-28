@@ -975,10 +975,13 @@
                                 renderNodeBubble(evt.name, evt.phase === 'start' ? '⏳' : '✅', evt.info || {});
                             }
                         } else if (evt.step === 'token') {
-                            fullReply += evt.text;
-                            thinking.classList.remove('thinking');
-                            // 摘要等内部 LLM 的 chunk 也会混入 messages 流，截断掉（对话回复才是展示内容）
-                            thinking.innerHTML = renderMarkdown(cleanReply(fullReply));
+                            // 只渲染 chatbot 节点的对话 token；executor/planner 的输出由执行树+事件表达，
+                            // 不污染对话气泡（避免 FINAL_ANSWER/JSON 显示）
+                            if (!evt.node || evt.node === 'chatbot') {
+                                fullReply += evt.text;
+                                thinking.classList.remove('thinking');
+                                thinking.innerHTML = renderMarkdown(cleanReply(fullReply));
+                            }
                             setChatStatus('✍️ 生成回复中...', true);
                         } else if (evt.step === 'tool') {
                             toolLogs.push(`${evt.name}:${evt.phase}`);
