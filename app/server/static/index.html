@@ -293,15 +293,12 @@
                     <button class="approval-btn" data-mode="session_allow" onclick="setApprovalMode('session_allow')">♻️ 本次会话允许</button>
                     <button class="approval-btn" data-mode="always_allow" onclick="setApprovalMode('always_allow')">🔓 完全无限制</button>
                     <span style="flex:1"></span>
-                    <button class="btn" onclick="stopChat()">⏹ 停止</button>
-                    <button class="refresh-btn" onclick="sendChat()">📤 发送 (Enter)</button>
-                </div>
-                <!-- 默认模型设置：审批模式后一行 -->
-                <div class="chat-model-bar">
-                    <span class="approval-label">模型</span>
                     <select id="chatModelProvider" style="background:#fff;color:var(--ink);border:1px solid var(--line);padding:4px 8px;border-radius:8px;font-size:12px;"></select>
                     <select id="chatModelName" style="background:#fff;color:var(--ink);border:1px solid var(--line);padding:4px 8px;border-radius:8px;font-size:12px;"></select>
                     <button class="btn" style="font-size:11px;padding:4px 10px;" onclick="setChatDefaultModel()">💾 设为默认</button>
+                    <span style="flex:1"></span>
+                    <button class="btn" onclick="stopChat()">⏹ 停止</button>
+                    <button class="refresh-btn" onclick="sendChat()">📤 发送 (Enter)</button>
                 </div>
             </div>
         </div>
