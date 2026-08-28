@@ -331,7 +331,8 @@ def route_after_executor(state: State):
             db_subs = None
 
         if db_subs is not None:
-            pending = [s for s in db_subs if s["status"] == "pending"]
+            # running 视为"可恢复"（上次审批中断），仍需 executor 重入
+            pending = [s for s in db_subs if s["status"] in ("pending", "running")]
             failed = [s for s in db_subs if s["status"] == "failed"]
         else:
             subtasks = plan.subtasks
