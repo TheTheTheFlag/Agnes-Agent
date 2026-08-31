@@ -71,12 +71,12 @@ def create_executor_node(llm, tools_list):
             "subtask": sub_id,
         }, thread_id)
 
-        # 收集依赖产出
+        # 收集依赖产出（直接从 DB 查，避免依赖已删除的 subtasks 局部变量）
         deps_artifacts = []
         for dep_id in executable.get("dependencies", []):
-            dep = next((s for s in subtasks if s["id"] == dep_id), None)
-            if dep and dep.get("artifacts"):
-                deps_artifacts.extend(dep["artifacts"])
+            dep_sub = next((s for s in mm.get_subtasks(task_plan_id) if s["id"] == dep_id), None)
+            if dep_sub and dep_sub.get("artifacts"):
+                deps_artifacts.extend(dep_sub["artifacts"])
         deps_artifacts = list(set(deps_artifacts))
 
         artifacts_context = f"\n【已有产出】\n" + "\n".join(deps_artifacts) if deps_artifacts else ""
