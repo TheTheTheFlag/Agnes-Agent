@@ -87,7 +87,7 @@ def create_planner_node(llm):
         add_event("node_thought", {
             "role": "planner",
             "title": f"📋 规划：{goal[:60]}",
-            "text": f"将目标拆解为 {len(subtasks)} 个子任务：\n{descs}",
+            "text": f"将目标拆解为 {len(subtasks_data)} 个子任务：\n{descs}",
             "subtask": "",
         }, thread_id)
         return state
