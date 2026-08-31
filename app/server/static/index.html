@@ -76,6 +76,17 @@
       </div>
     </header>
 
+    <!-- ==================== 任务待办面板 ==================== -->
+    <div id="todoPanel" class="todo-panel hidden">
+      <div class="todo-summary" id="todoSummary" onclick="toggleTodoPanel()">
+        <span class="todo-badge" id="todoBadge">待办 0/0</span>
+        <span class="todo-latest" id="todoLatest">暂无任务</span>
+        <span class="todo-toggle" id="todoToggle">▾</span>
+        <button class="todo-close" id="todoClose" onclick="event.stopPropagation();closeTodoPanel()" title="关闭">×</button>
+      </div>
+      <div class="todo-list" id="todoList"></div>
+    </div>
+
     <div id="messages" class="messages"></div>
 
     <!-- ==================== 输入区 ==================== -->

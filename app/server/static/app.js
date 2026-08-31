@@ -19,6 +19,9 @@ const State = {
   approvalCard: null,         // 当前审批卡片
   drawerTab: null,
   sse: null,
+  todos: [],                  // 当前会话的任务待办（planner 拆的子任务）
+  todosExpanded: false,       // 待办面板是否展开
+  todoPanelDismissed: false,  // 用户是否手动关闭了面板
 };
 
 /* ==================== 工具函数 ==================== */
@@ -358,6 +361,72 @@ function respondApproval(allow, mode) {
   sendMessage("", { resume: true, allow, mode });
 }
 
+/* ==================== 任务待办面板 ==================== */
+// 设置/刷新待办列表：items = [{id, text, status: 'todo'|'doing'|'done'}]，
+// 由后端 SSE 事件触发（node_thought 携带 subtask 状态）。
+function setTodos(items) {
+  State.todos = items || [];
+  renderTodoPanel();
+}
+
+function renderTodoPanel() {
+  const panel = $("#todoPanel");
+  if (!panel) return;
+  const items = State.todos;
+  if (!items.length) {
+    panel.classList.add("hidden");
+    return;
+  }
+  panel.classList.remove("hidden");
+  // 徽章：N/M（已完成/总数）
+  const done = items.filter((t) => t.status === "done").length;
+  const total = items.length;
+  const badge = $("#todoBadge");
+  if (badge) {
+    badge.textContent = `待办 ${done}/${total}`;
+    badge.classList.toggle("done", done === total);
+  }
+  // 摘要行：优先显示"未完成"中的最新一条，否则显示最后一条已完成
+  const latest = items.find((t) => t.status !== "done") || items[items.length - 1];
+  const latestEl = $("#todoLatest");
+  if (latestEl) {
+    const mark = latest.status === "done" ? "✓" : (latest.status === "doing" ? "⟳" : "•");
+    latestEl.textContent = `${mark} ${latest.text || latest.id}`;
+  }
+  // 展开图标
+  const toggle = $("#todoToggle");
+  if (toggle) toggle.textContent = State.todosExpanded ? "▴" : "▾";
+  // 列表
+  const list = $("#todoList");
+  if (list) {
+    list.innerHTML = items.map((t) => {
+      const mark = t.status === "done" ? "✓" : (t.status === "doing" ? "⟳" : "•");
+      return `<div class="todo-item ${t.status}"><span class="todo-status">${mark}</span><span class="todo-text">${escapeHtml(t.text || t.id || "")}</span></div>`;
+    }).join("");
+  }
+  // 展开状态
+  panel.classList.toggle("expanded", State.todosExpanded);
+}
+
+function toggleTodoPanel() {
+  if (!State.todos.length) return;
+  State.todosExpanded = !State.todosExpanded;
+  renderTodoPanel();
+}
+
+function closeTodoPanel() {
+  State.todoPanelDismissed = true;
+  const panel = $("#todoPanel");
+  if (panel) panel.classList.add("hidden");
+}
+
+function resetTodoPanel() {
+  State.todos = [];
+  State.todosExpanded = false;
+  State.todoPanelDismissed = false;
+  renderTodoPanel();
+}
+
 /* ==================== 审批模式（每次询问 / 本次会话允许 / 永久允许） ==================== */
 function setApprovalMode(mode) {
   $$(".approval-mode-btn").forEach((b) => b.classList.toggle("active", b.dataset.mode === mode));
@@ -575,6 +644,7 @@ function stopChat() {
 async function loadHistory(tid) {
   const inner = messagesInner();
   inner.innerHTML = "";
+  resetTodoPanel();
   try {
     const data = await apiGet(`/api/messages?thread_id=${encodeURIComponent(tid)}&limit=500`);
     const msgs = data.messages || [];
@@ -741,6 +811,7 @@ async function newThread() {
     const data = await apiPost("/api/command", { command: "/new" });
     State.threadId = data.thread_id || State.threadId;
     messagesInner().innerHTML = "";
+    resetTodoPanel();
     renderWelcome();
     updateChatTitle("新对话");
     refreshTopbar();
@@ -1578,6 +1649,16 @@ function handleLiveEvent(evt) {
     if (State.drawerTab === "logs") renderLogsTab(drawerBody);
   } else if (evt.type === "event") {
     if (State.drawerTab === "events") renderEventsTab(drawerBody);
+  } else if (evt.type === "planner" || evt.type === "executor") {
+    // 任务计划/子任务状态变化 → 刷新待办面板
+    if (evt.subtasks && Array.isArray(evt.subtasks)) {
+      const items = evt.subtasks.map((s) => ({
+        id: s.id,
+        text: s.desc || s.description || String(s.id),
+        status: s.status === "done" ? "done" : (s.status === "running" ? "doing" : "todo"),
+      }));
+      setTodos(items);
+    }
   }
 }
 
