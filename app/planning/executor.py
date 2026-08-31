@@ -242,7 +242,10 @@ def create_executor_node(llm, tools_list):
             return True, None
 
         executor_tools = list(tools_list) + [complete_subtask, fail_subtask]
-        loop = ReActLoop(llm_with_tools, max_iterations=5, node="executor",
+        # 关键：模型看到的工具 schema 来自 llm.bind_tools(...)，而不是 loop.run(tools=...)——
+        # 后者只用于工具执行匹配。必须用 executor_tools 重新 bind，否则模型看不到
+        # complete_subtask/fail_subtask（会误以为它们不存在）。
+        loop = ReActLoop(llm.bind_tools(executor_tools), max_iterations=5, node="executor",
                          require_final_marker=True, terminate_tools={"complete_subtask", "fail_subtask"})
         final_result = None
         artifacts = []

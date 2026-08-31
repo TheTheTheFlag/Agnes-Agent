@@ -5,6 +5,8 @@ llm_factory.py — 统一的 LLM 工厂（仅 OpenAI 兼容格式）
   1. 创建 OpenAI 兼容客户端（base_url + api_key + model）
   2. api_key 支持逗号分隔多 key → 自动包装为 RotatingKeyChatOpenAI（报错自动轮换 + 指数退避）
   3. 模型接入配置由 debug_server 的"设置"页管理（.model_config），本模块不读取
+  4. thinking 模型兼容（deepseek-v4-pro 等）：提取 reasoning_content 到 additional_kwargs，
+     并在多轮回传——不传网关会 400。
 """
 import os
 import time
@@ -20,6 +22,78 @@ except ImportError:
 
 # 所有需要触发 key 轮换的异常
 _ROTATABLE = (RateLimitError, APIConnectionError, APITimeoutError, AuthenticationError, OpenAIConnectionError)
+
+
+# ============================================================
+# thinking 模型兼容补丁（langchain-openai 不处理 reasoning_content）
+# 适用：deepseek-v4-pro、llm.chatops.fun 上的 thinking 模型等
+# 行为：
+#   - 响应侧：把 choices[0].message.reasoning_content 写入 AIMessage.additional_kwargs
+#   - 请求侧：把 AIMessage.additional_kwargs["reasoning_content"] 透传到 message dict
+#   - 流式 chunk：把 delta.reasoning_content 写入 AIMessageChunk.additional_kwargs
+# 仅在首次导入时 monkey-patch 一次（避免重复包装）
+# ============================================================
+def _patch_chatopenai_for_thinking():
+    if getattr(ChatOpenAI, "_thinking_patched", False):
+        return
+    ChatOpenAI._thinking_patched = True
+
+    import langchain_openai.chat_models.base as _chat_base
+    _orig_create = _chat_base.ChatOpenAI._create_chat_result
+    _orig_convert = _chat_base._convert_message_to_dict
+    _orig_chunk = _chat_base.ChatOpenAI._convert_chunk_to_generation_chunk
+    _orig_dict_to_msg = _chat_base._convert_dict_to_message
+
+    def _create_chat_result(self, response, generation_info=None):
+        rtn = _orig_create(self, response, generation_info)
+        try:
+            import openai as _openai
+            choices = getattr(response, "choices", None) if isinstance(response, _openai.BaseModel) else None
+            if choices and hasattr(choices[0].message, "reasoning_content"):
+                rc = choices[0].message.reasoning_content
+                if rc and rtn.generations:
+                    rtn.generations[0].message.additional_kwargs.setdefault("reasoning_content", rc)
+        except Exception:
+            pass
+        return rtn
+
+    def _convert_message_to_dict(message, api="chat/completions"):
+        d = _orig_convert(message, api=api)
+        # AIMessage 节点：多轮必须回传 reasoning_content（thinking 模型网关强制）
+        if getattr(message, "type", None) == "ai":
+            rc = (getattr(message, "additional_kwargs", None) or {}).get("reasoning_content")
+            if rc:
+                d["reasoning_content"] = rc
+        return d
+
+    def _convert_dict_to_message(_dict):
+        # 响应侧：把 dict 响应里的 reasoning_content 也提取到 additional_kwargs
+        msg = _orig_dict_to_msg(_dict)
+        rc = _dict.get("reasoning_content") if isinstance(_dict, dict) else None
+        if rc and getattr(msg, "type", None) == "ai":
+            msg.additional_kwargs.setdefault("reasoning_content", rc)
+        return msg
+
+    def _convert_chunk_to_generation_chunk(self, chunk, default_chunk_class, base_generation_info):
+        gen = _orig_chunk(self, chunk, default_chunk_class, base_generation_info)
+        try:
+            choices = chunk.get("choices") if isinstance(chunk, dict) else None
+            if choices and gen is not None and hasattr(gen, "message"):
+                delta = choices[0].get("delta", {}) or {}
+                rc = delta.get("reasoning_content")
+                if rc is not None and hasattr(gen.message, "additional_kwargs"):
+                    gen.message.additional_kwargs.setdefault("reasoning_content", rc)
+        except Exception:
+            pass
+        return gen
+
+    _chat_base.ChatOpenAI._create_chat_result = _create_chat_result
+    _chat_base._convert_message_to_dict = _convert_message_to_dict
+    _chat_base._convert_dict_to_message = _convert_dict_to_message
+    _chat_base.ChatOpenAI._convert_chunk_to_generation_chunk = _convert_chunk_to_generation_chunk
+
+
+_patch_chatopenai_for_thinking()
 
 
 def _split_keys(api_key: str) -> List[str]:
