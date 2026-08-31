@@ -15,6 +15,7 @@ data/*.db
 data/*.db-shm
 data/*.db-wal
 data/.model_config
+data/traces/   # 持久化 trace 文件（每会话一个 JSONL），不入仓
 
 # 本地状态与日志
 .thread_id
