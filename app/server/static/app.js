@@ -358,6 +358,27 @@ function respondApproval(allow, mode) {
   sendMessage("", { resume: true, allow, mode });
 }
 
+/* ==================== 审批模式（每次询问 / 本次会话允许 / 永久允许） ==================== */
+function setApprovalMode(mode) {
+  $$(".approval-mode-btn").forEach((b) => b.classList.toggle("active", b.dataset.mode === mode));
+  apiPost("/api/command", { command: "/system " + mode }).then((d) => {
+    if (d && d.result) toast("🛡️ " + d.result, "success");
+  }).catch((e) => toast(e.message, "error"));
+}
+
+function initApprovalMode() {
+  const bar = $("#approvalModeBar");
+  if (!bar) return;
+  $$(".approval-mode-btn", bar).forEach((b) => {
+    b.addEventListener("click", () => setApprovalMode(b.dataset.mode));
+  });
+  // 从后端读取当前审批模式并高亮
+  apiPost("/api/command", { command: "/system" }).then((d) => {
+    const m = (d && d.result || "").match(/(per_ask|session_allow|always_allow)/);
+    if (m) $$(".approval-mode-btn", bar).forEach((b) => b.classList.toggle("active", b.dataset.mode === m[1]));
+  }).catch(() => {});
+}
+
 /* ==================== 流式渲染调度 ==================== */
 function scheduleStreamRender() {
   if (State.renderTimer) return;
@@ -431,8 +452,12 @@ function handleChatEvent(evt) {
     // 节点流转：chatbot start 表示 LLM 开始生成
     if (evt.phase === "start" && evt.name === "chatbot" && !State.currentAssistantEl) {
       State.currentAssistantEl = addAssistantBubble("");
+    } else if (evt.phase === "end") {
+      // 节点结束：收尾当前气泡。否则 planner/executor 的 token 会持续堆进同一个气泡
+      // （表现为规划 JSON 与执行文本连成一大段乱码）
+      endStreaming();
     }
-    setLiveBadge(true);
+    setLiveBadge(evt.phase === "start");
   } else if (step === "token") {
     appendStreamToken(evt.text || "");
   } else if (step === "tool_chunk" || step === "tool") {
@@ -1621,6 +1646,7 @@ async function init() {
   initDrawer();
   bindEvents();
   startSSE();
+  initApprovalMode();
   chatInput.focus();
 }
 

@@ -4,6 +4,7 @@ import sys, os, json, re
 from typing import List
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from langchain_core.messages import HumanMessage, ToolMessage, SystemMessage
+from langchain_core.tools import tool
 from langgraph.types import interrupt
 from app.graph.state import State
 from app.graph.utils import _tool_params_summary
@@ -104,8 +105,8 @@ def create_executor_node(llm, tools_list):
 1. 【探索限制】探索类工具（ls/glob/read_file）最多调用 2 次，之后必须直接撰写并写入文件。
 2. 【唯一产出】调用 write_file 写入 deliverables 目录（或已存在的交付文件），文件内容完整、大小>0。
 3. 【禁止空转】不要重复写入同一文件、不要为"凑工具调用"而调用工具。一次写完整。
-4. 【收尾】写完文件后立即结束，输出 FINAL_ANSWER: [完成说明 + 文件路径]，不要继续探索。
-5. 【失败即返回】若无法产出文件（如依赖缺失、权限错误），直接输出 FINAL_ANSWER: 失败原因，不要重试多次。
+4. 【收尾】写完文件后调用 complete_subtask 工具声明完成（files 参数列出实际写入的文件路径），不要继续探索；只输出文字不算完成。
+5. 【失败即返回】若无法产出文件（如依赖缺失、权限错误），调用 fail_subtask 工具声明失败（reason 参数写原因），不要重试多次。
 """
 
         initial_messages = [
@@ -118,6 +119,33 @@ def create_executor_node(llm, tools_list):
 
         # 本子任务实际写入的文件路径（_on_tool_after 收集；比 extract_artifacts 从文本猜更可靠）
         _written_files: List[str] = []
+
+        # 结构化完成/失败声明（工业方案：替代 FINAL_ANSWER 文本约定）。
+        # 模型调用 complete_subtask/fail_subtask 工具来声明结果，系统校验后据此判定；
+        # 若模型不调用，则由"是否有真实写入文件"（系统观测）兜底判定。
+        _outcome: dict = {"status": None, "reason": "", "files": []}
+
+        @tool
+        def complete_subtask(description: str, files: List[str]) -> str:
+            """声明当前子任务完成。description: 完成说明（一句话即可）；files: 产出文件路径列表（相对项目根，如 deliverables/snake_game/index.html）。系统会校验这些文件是否真实存在。"""
+            existed, missing = [], []
+            for f in files or []:
+                p = str(f).replace("\\", "/")
+                if p and os.path.exists(p):
+                    existed.append(p)
+                else:
+                    missing.append(p)
+            _outcome["status"] = "done"
+            _outcome["description"] = description
+            _outcome["files"] = list(dict.fromkeys(existed + _written_files))
+            return f"已声明完成。文件校验通过: {existed or '无'}; 缺失: {missing or '无'}; 系统已记录写入: {_written_files or '无'}"
+
+        @tool
+        def fail_subtask(reason: str) -> str:
+            """声明当前子任务失败。reason: 失败原因（将作为子任务失败结果记录）。"""
+            _outcome["status"] = "failed"
+            _outcome["reason"] = reason or ""
+            return f"已声明失败: {reason}"
 
         # 工具调用硬约束（不依赖 LLM 自觉，ReActLoop 层强制）：
         #   - 探索类（ls/glob/read_file/execute_command）累计 ≤2 次，超限拒绝
@@ -213,7 +241,9 @@ def create_executor_node(llm, tools_list):
                     return allow, None
             return True, None
 
-        loop = ReActLoop(llm_with_tools, max_iterations=5, node="executor")
+        executor_tools = list(tools_list) + [complete_subtask, fail_subtask]
+        loop = ReActLoop(llm_with_tools, max_iterations=5, node="executor",
+                         require_final_marker=True, terminate_tools={"complete_subtask", "fail_subtask"})
         final_result = None
         artifacts = []
         status = "failed"
@@ -221,16 +251,26 @@ def create_executor_node(llm, tools_list):
         for attempt in range(3):
             try:
                 result = loop.run(
-                    messages=initial_messages, tools=tools_list, state=state,
+                    messages=initial_messages, tools=executor_tools, state=state,
                     on_tool_before=_on_tool_before, on_tool_after=_on_tool_after,
                     interrupt_handler=_interrupt_handler,
                 )
                 final_result = result["final_answer"]
-                # 产出文件优先用工具真实写入的路径（_written_files），再补充文本提取的文件名。
-                # 只靠 extract_artifacts 从 FINAL_ANSWER 文本猜会得到裸文件名（如 "game.js"），
-                # validator 用相对路径检查会误报"文件缺失"。
-                artifacts = list(dict.fromkeys(_written_files + extract_artifacts(final_result)))
-                status = "done"
+                # 工业方案：完成/失败由系统观测 + 结构化终止工具决定，不依赖 FINAL_ANSWER 文本。
+                #   - fail_subtask 被调用 → failed（工具写出的 reason）
+                #   - complete_subtask 被调用，或系统观测到真实写入文件（_written_files）→ done
+                #   - 两者都没有（轮次耗尽/纯文本）→ failed
+                if _outcome["status"] == "failed":
+                    status = "failed"
+                    final_result = f"子任务失败（fail_subtask）: {_outcome['reason'] or final_result}"
+                elif _outcome["status"] == "done" or _written_files:
+                    status = "done"
+                    # 产出以真实写入路径为准（系统观测），complete_subtask 校验通过的 files 与
+                    # 文本提取的文件名仅作补充记录
+                    artifacts = list(dict.fromkeys(_written_files + _outcome["files"] + extract_artifacts(final_result)))
+                else:
+                    status = "failed"
+                    final_result = (final_result or "") + "\n[自动判定] 未调用任何写入工具、也未声明完成/失败（结构化终止工具 complete_subtask/fail_subtask 均未调用）。"
                 break
             except Exception as e:
                 # 审批信号（GraphInterrupt）必须冒泡到 graph 层触发人工审批，不能当失败
@@ -242,10 +282,10 @@ def create_executor_node(llm, tools_list):
                 artifacts = []
                 status = "failed"
 
-        # 完成判定：声称 done 但无产出文件 → 降级为 failed（避免 validator 拿到空产出）
+        # 完成判定兜底：done 但无产出文件 → 降级为 failed（避免 validator 拿到空产出）
         if status == "done" and not artifacts:
             status = "failed"
-            final_result = (final_result or "") + "\n[自动判定] LLM 声称完成但未提取到产出文件，标记失败以触发反馈修复。"
+            final_result = (final_result or "") + "\n[自动判定] 标记完成但无产出文件，降级失败以触发反馈修复。"
             print(f"  ⚠️ {sub_id} done 但无产出文件 → 降级 failed")
         if status == "failed" and not final_result:
             final_result = "执行失败（无产出）"

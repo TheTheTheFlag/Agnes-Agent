@@ -325,6 +325,27 @@ input, textarea { font-family: inherit; }
   text-overflow: ellipsis;
 }
 .topbar-actions { display: flex; align-items: center; gap: 4px; }
+/* 审批模式按钮组（每次询问 / 本次会话允许 / 永久允许） */
+.approval-mode-bar { display: flex; align-items: center; gap: 4px; margin-right: 4px; }
+.approval-mode-btn {
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  color: var(--text-soft);
+  padding: 4px 8px;
+  border-radius: 12px;
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+}
+.approval-mode-btn:hover { border-color: var(--accent); color: var(--text); }
+.approval-mode-btn.active {
+  background: var(--accent-grad);
+  color: #fff;
+  border-color: transparent;
+  font-weight: 600;
+  box-shadow: 0 2px 8px rgba(124, 92, 255, 0.35);
+}
 .btn-ghost {
   display: inline-flex;
   align-items: center;

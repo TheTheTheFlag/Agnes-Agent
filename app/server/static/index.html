@@ -61,6 +61,11 @@
         <span id="liveBadge" class="live-badge hidden">
           <span class="live-dot"></span>运行中
         </span>
+        <div class="approval-mode-bar" id="approvalModeBar" title="命令审批模式">
+          <button class="approval-mode-btn" data-mode="per_ask">🔔 每次询问</button>
+          <button class="approval-mode-btn" data-mode="session_allow">♻️ 本次会话允许</button>
+          <button class="approval-mode-btn" data-mode="always_allow">🔓 永久允许</button>
+        </div>
         <button id="btnClearLogs" class="btn-ghost" title="清空日志/事件">
           <svg viewBox="0 0 16 16" width="14" height="14"><path d="M2 4h12M6.5 4V2.8h3V4M4 4l.7 9h6.6l.7-9" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>

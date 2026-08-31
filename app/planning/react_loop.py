@@ -7,9 +7,17 @@ from openai import RateLimitError
 from app.server import add_log_entry, add_event
 
 class ReActLoop:
-    def __init__(self, llm_with_tools, max_iterations: int = 15, node: str = "agent"):
+    def __init__(self, llm_with_tools, max_iterations: int = 15, node: str = "agent",
+                 require_final_marker: bool = False, terminate_tools: set = None):
         self.llm_with_tools = llm_with_tools
         self.max_iterations = max_iterations
+        # executor 等执行器节点（require_final_marker=True）：纯文本（无工具调用）永远不算完成，
+        # 会被引导继续直到有实际动作（调用 write_file / 终止工具）或轮次耗尽。
+        # 工业方案：不依赖模型输出 "FINAL_ANSWER:" 文本标记判定完成。
+        self._require_final_marker = require_final_marker
+        # 结构化终止工具（如 complete_subtask / fail_subtask）：调用后立即结束循环，
+        # 由 executor 读取工具写出的结构化结果（_outcome）判定子任务状态。
+        self._terminate_tools = terminate_tools or set()
         # 工具返回的 pending_plan（chatbot 节点用它判断是否要跳到 planner）
         self._captured_pending_plan = None
         # trace：LLM 调用归属的节点名 + 会话 id
@@ -67,6 +75,16 @@ class ReActLoop:
             tool_calls = self._extract_tool_calls(response)
 
             if not tool_calls:
+                if self._require_final_marker:
+                    # executor 等执行器节点：纯文本（无工具调用）不算完成——
+                    # 完成必须有实际动作：调用 write_file 写入产出，或调用
+                    # complete_subtask/fail_subtask 声明结果。引导后继续（受 max_iterations 约束）。
+                    messages.append(response)
+                    messages.append(SystemMessage(
+                        content="[引导] 你刚才只输出了文字，没有任何实际动作。请调用 write_file 工具把完整文件"
+                                "写入 deliverables 目录（一次写完整），或调用 complete_subtask 声明完成 / fail_subtask 声明失败。"
+                    ))
+                    continue
                 final_answer = self._extract_final_answer(response)
                 break
 
@@ -86,6 +104,7 @@ class ReActLoop:
             # 都有对应 ToolMessage。用一个标志保证 response 只 append 一次，
             # 被拦截/被取消/成功的工具都补 ToolMessage，避免"孤儿 tool_calls"导致 400。
             response_appended = False
+            _terminated = False
 
             for tc in tool_calls:
                 tool_name = tc.get("name")
@@ -120,6 +139,13 @@ class ReActLoop:
                 result = self._execute_tool(tool_name, params, tools, state, tool_id=tool_id)
                 if on_tool_after:
                     on_tool_after(tool_name, params, result)
+
+                # 结构化终止工具（complete_subtask / fail_subtask）：调用后立即结束 ReAct 循环，
+                # 子任务最终状态由 executor 读取工具写出的结构化结果决定（系统观测，非文本约定）。
+                if tool_name in self._terminate_tools:
+                    final_answer = f"[{tool_name}] " + (result if isinstance(result, str) else str(result))
+                    _terminated = True
+                    break
 
                 # 捕获工具返回的 pending_plan（如 request_planning），让 chatbot 节点 return 时
                 # 写入 ret["pending_plan"] → route_after_chatbot 据此跳到 planner。
@@ -177,6 +203,9 @@ class ReActLoop:
 
             # 纪律强制终止：连续被拒 ≥3 次 → 退出整个 ReAct 循环（保留纪律消息，不再覆盖）
             if getattr(self, "_reject_count", 0) >= 3:
+                break
+            # 结构化终止工具已调用 → 退出整个 ReAct 循环
+            if _terminated:
                 break
 
         if final_answer is None:
