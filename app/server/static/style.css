@@ -859,7 +859,7 @@ input, textarea { font-family: inherit; }
 .drawer {
   position: fixed;
   top: 0; right: 0; bottom: 0;
-  width: min(560px, 94vw);
+  width: 90vw;
   background: var(--bg-side);
   border-left: 1px solid var(--border);
   box-shadow: -8px 0 30px rgba(0, 0, 0, 0.25);
@@ -987,6 +987,36 @@ input, textarea { font-family: inherit; }
 .lv-error, .lv-danger { background: var(--danger-bg); color: var(--danger); }
 .lv-debug { background: var(--bg-hover); color: var(--text-faint); }
 .d-log .msg { color: var(--text-soft); }
+
+/* 追踪条目：默认折叠（摘要），点击展开完整 input/output */
+.d-log-item { padding: 5px 0; border-bottom: 1px dashed var(--border-soft); font-size: 12px; }
+.d-log-item:last-child { border-bottom: none; }
+.d-log-item summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  user-select: none;
+}
+.d-log-item summary::-webkit-details-marker { display: none; }
+.d-log-item summary::before {
+  content: "▶";
+  display: inline-block;
+  font-size: 9px;
+  color: var(--text-faint);
+  width: 10px;
+  flex: none;
+  transition: transform 0.15s ease;
+}
+.d-log-item[open] summary::before { transform: rotate(90deg); }
+.d-log-item summary:hover { color: var(--accent-2); }
+.d-log-item .ts { color: var(--text-faint); font-family: var(--mono); font-size: 10.5px; flex: none; }
+.d-log-item .lv { display: inline-block; padding: 0 6px; border-radius: 4px; font-size: 10px; font-weight: 700; flex: none; }
+.d-log-item .msg { color: var(--text-soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.d-log-detail { margin: 6px 0 2px 16px; }
+.d-log-sec { font-size: 11px; font-weight: 700; color: var(--text-faint); margin: 6px 0 2px; }
+.d-log-detail .d-pre { margin: 0 0 4px; }
 
 /* Memory DB 表格 */
 .d-table-wrap { overflow-x: auto; }
@@ -1129,6 +1159,5 @@ input, textarea { font-family: inherit; }
 @media (max-width: 720px) {
   #sidebar { position: fixed; left: 0; top: 0; bottom: 0; margin-left: -268px; }
   #app.side-collapsed #sidebar { margin-left: 0; }
-  .drawer { width: 94vw; }
   .msg-body { max-width: 94%; }
 }

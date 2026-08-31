@@ -1020,15 +1020,21 @@ async function renderTraceTab(el) {
     const data = await apiGet(`/api/trace?limit=300${tid}`);
     const events = data.events || [];
     if (!events.length) { el.innerHTML = `<div class="d-empty">暂无追踪记录</div>`; return; }
+    // 每条记录（最小消息单位）默认只显示摘要，点击可展开完整 input/output
     const rows = events.map((ev) => {
       const d = ev.data || {};
       const ts = (ev.timestamp || "").slice(11, 19);
       const kind = d.kind || d.type || "step";
       const badge = `<span class="lv lv-${kind === "tool" ? "warn" : kind === "llm" ? "info" : "debug"}">${escapeHtml(kind.toUpperCase())}</span>`;
       const detail = d.name ? `<b>${escapeHtml(d.name)}</b> ` : "";
-      const inPreview = truncate(d.input || "", 120);
-      const outPreview = truncate(d.result || "", 160);
-      return `<div class="d-log"><span class="ts">${escapeHtml(ts)}</span>${badge}<span class="msg">${detail}${escapeHtml(inPreview)}${outPreview ? " → " + escapeHtml(outPreview) : ""}</span></div>`;
+      const fullInput = d.input != null ? String(d.input) : "";
+      const fullResult = d.result != null ? String(d.result) : "";
+      const inPreview = truncate(fullInput, 120);
+      const outPreview = truncate(fullResult, 160);
+      const detailBody =
+        (fullInput ? `<div class="d-log-sec">输入</div><pre class="d-pre">${escapeHtml(fullInput)}</pre>` : "") +
+        (fullResult ? `<div class="d-log-sec">输出</div><pre class="d-pre">${escapeHtml(fullResult)}</pre>` : "");
+      return `<details class="d-log-item"><summary><span class="ts">${escapeHtml(ts)}</span>${badge}<span class="msg">${detail}${escapeHtml(inPreview)}${outPreview ? " → " + escapeHtml(outPreview) : ""}</span></summary>${detailBody ? `<div class="d-log-detail">${detailBody}</div>` : ""}</details>`;
     }).join("");
     el.innerHTML = drawerSection(`追踪（${events.length} 条）`, rows) +
       `<div class="d-row"><button class="d-btn danger" id="traceClear">清空追踪</button></div>`;
@@ -1082,6 +1088,7 @@ async function renderMemoryDBTab(el) {
       <div class="d-row">
         <button class="d-btn primary" id="mdbQuery">查询</button>
         <button class="d-btn" id="mdbInsertBtn">新增行</button>
+        <button class="d-btn danger" id="mdbClearTable">清除全表</button>
       </div>
     </div>
     <div id="mdbTableWrap"></div>`;
@@ -1093,13 +1100,29 @@ async function renderMemoryDBTab(el) {
     const where = whereInp.value.trim();
     loadMdbQuery(el, table, where);
   };
-  tableSel.addEventListener("change", runQuery);
+  // 仅消息表默认按当前会话过滤；用户画像/用户偏好/命令历史/知识缓存等业务记忆表
+  // 不自动加过滤条件（展示全量，避免误以为数据丢失；semantic_cache 无 thread_id 列，
+  // 自动过滤反而报错）
+  const AUTO_FILTER_TABLES = new Set(["messages"]);
+  const applyDefaultWhere = () => {
+    whereInp.value = AUTO_FILTER_TABLES.has(tableSel.value) && State.threadId
+      ? `thread_id='${State.threadId}'` : "";
+  };
+  tableSel.addEventListener("change", () => { applyDefaultWhere(); runQuery(); });
   $("#mdbQuery", el).addEventListener("click", runQuery);
   whereInp.addEventListener("keydown", (e) => { if (e.key === "Enter") runQuery(); });
   $("#mdbInsertBtn", el).addEventListener("click", () => showMdbInsert(el, tableSel.value));
+  $("#mdbClearTable", el).addEventListener("click", async () => {
+    const table = tableSel.value;
+    if (!confirm(`确定清空表「${table}」的全部数据？此操作不可恢复！`)) return;
+    try {
+      const r = await apiPost("/api/memorydb/clear", { table });
+      toast(`已清空 ${table}（${r.affected} 行）`, "success");
+      runQuery();
+    } catch (e) { toast(e.message, "error"); }
+  });
 
-  // 默认加载当前会话 messages
-  whereInp.value = State.threadId ? `thread_id='${State.threadId}'` : "";
+  applyDefaultWhere();
   loadMdbQuery(el, tableSel.value, whereInp.value);
 }
 
@@ -1433,8 +1456,6 @@ async function renderGitTab(el) {
 const DRAWER_LOADERS = {
   state: renderStateTab,
   prompt: renderPromptTab,
-  logs: renderLogsTab,
-  events: renderEventsTab,
   trace: renderTraceTab,
   memory: renderMemoryTab,
   memorydb: renderMemoryDBTab,
@@ -1442,14 +1463,11 @@ const DRAWER_LOADERS = {
   sched: renderSchedTab,
   models: renderModelsTab,
   deliv: renderDelivTab,
-  git: renderGitTab,
 };
 
 const DRAWER_TABS = [
   { id: "state", label: "State", icon: "📊" },
   { id: "prompt", label: "提示词", icon: "📄" },
-  { id: "logs", label: "日志", icon: "📝" },
-  { id: "events", label: "事件", icon: "📋" },
   { id: "trace", label: "追踪", icon: "🧭" },
   { id: "memory", label: "记忆", icon: "🧠" },
   { id: "memorydb", label: "Memory DB", icon: "🗄️" },
@@ -1457,7 +1475,6 @@ const DRAWER_TABS = [
   { id: "sched", label: "定时任务", icon: "🗓️" },
   { id: "models", label: "模型", icon: "⚙️" },
   { id: "deliv", label: "交付物", icon: "📦" },
-  { id: "git", label: "Git", icon: "🔀" },
 ];
 
 function initDrawer() {

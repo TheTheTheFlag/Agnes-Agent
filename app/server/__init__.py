@@ -490,6 +490,23 @@ async def mdb_delete(payload: dict):
     return {"ok": True, "affected": affected, "table": table}
 
 
+@app.post("/api/memorydb/clear")
+async def mdb_clear(payload: dict):
+    """清空某表全部数据。payload: {table}（危险操作，前端需二次确认）"""
+    import sqlite3 as _sqlite
+    p = payload or {}
+    table = p.get("table", "")
+    _mdb_check_table(table)
+    with _sqlite.connect(DB_PATH) as conn:
+        try:
+            cur = conn.execute(f"DELETE FROM {table}")
+            conn.commit()
+            affected = cur.rowcount
+        except _sqlite.OperationalError as e:
+            return JSONResponse({"error": f"SQL 错误: {e}"}, status_code=400)
+    return {"ok": True, "affected": affected, "table": table}
+
+
 @app.get("/api/scheduler")
 async def sched_list():
     return {"tasks": _sched_all()}
