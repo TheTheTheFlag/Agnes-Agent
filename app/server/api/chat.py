@@ -3,6 +3,7 @@ import json
 import asyncio
 import uuid as _uuid
 from langgraph.types import Command
+from langchain_core.messages import AIMessageChunk
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -104,9 +105,16 @@ async def chat_endpoint(payload: dict):
                         recursion_limit=40,
                     ):
                         if mode == "messages":
-                            # payload = (AIMessageChunk, metadata)
+                            # payload = (AIMessageChunk/AIMessage, metadata)
                             chunk, meta = payload
                             node = (meta or {}).get("langgraph_node", "")
+                            # 只处理流式 chunk：langgraph 的 messages 流对同一次 LLM 调用会先
+                            # emit 流式 chunk（AIMessageChunk，含非流式模型的模拟流式），随后在
+                            # on_llm_end 再 emit 一次完整消息（AIMessage）。二者内容相同，若都推给
+                            # 前端，回复会被流式显示两遍（表现为回复文本重复）。因此忽略
+                            # AIMessage（end 完整消息），完整文本由 updates 模式的 final 事件兜底。
+                            if not isinstance(chunk, AIMessageChunk):
+                                continue
                             text = ""
                             if hasattr(chunk, "content"):
                                 text = chunk.content or ""
