@@ -116,6 +116,9 @@ def create_executor_node(llm, tools_list):
         # 需审批的工具（与 chatbot 一致）：命令执行 + 文件写/改/删
         _APPROVAL_TOOLS = ("execute_command", "write_file", "edit_file", "delete_file")
 
+        # 本子任务实际写入的文件路径（_on_tool_after 收集；比 extract_artifacts 从文本猜更可靠）
+        _written_files: List[str] = []
+
         # 工具调用硬约束（不依赖 LLM 自觉，ReActLoop 层强制）：
         #   - 探索类（ls/glob/read_file/execute_command）累计 ≤2 次，超限拒绝
         #   - 写入类（write_file/edit_file/delete_file）累计 ≤8 次，超限拒绝
@@ -162,6 +165,10 @@ def create_executor_node(llm, tools_list):
                     op = {"write_file": "写入文件", "edit_file": "编辑文件", "delete_file": "删除文件"}.get(name, name)
                     mm.add_command_history(thread_id, f"{op}: {params.get('path', '')}", success=True,
                                            stdout_preview=str(result)[:2000])
+                    # 记录真实写入路径（成功才记），作为子任务产出文件的可靠来源
+                    path = str(params.get('path', '') or '')
+                    if name in ("write_file", "edit_file") and path and not str(result).startswith("工具执行错误"):
+                        _written_files.append(path)
                 else:
                     # 其余工具（ls/read/glob/grep/tavily/memory 等）补记审计
                     summary = _tool_params_summary(name, params)
@@ -219,7 +226,10 @@ def create_executor_node(llm, tools_list):
                     interrupt_handler=_interrupt_handler,
                 )
                 final_result = result["final_answer"]
-                artifacts = extract_artifacts(final_result)
+                # 产出文件优先用工具真实写入的路径（_written_files），再补充文本提取的文件名。
+                # 只靠 extract_artifacts 从 FINAL_ANSWER 文本猜会得到裸文件名（如 "game.js"），
+                # validator 用相对路径检查会误报"文件缺失"。
+                artifacts = list(dict.fromkeys(_written_files + extract_artifacts(final_result)))
                 status = "done"
                 break
             except Exception as e:

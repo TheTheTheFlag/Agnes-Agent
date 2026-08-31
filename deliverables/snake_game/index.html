@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>贪吃蛇游戏</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="game-container">
+        <h1 class="game-title">贪吃蛇游戏</h1>
+        
+        <div class="score-board">
+            <div class="score-item">
+                <span class="score-label">当前分数:</span>
+                <span id="current-score" class="score-value">0</span>
+            </div>
+            <div class="score-item">
+                <span class="score-label">最高纪录:</span>
+                <span id="high-score" class="score-value">0</span>
+            </div>
+        </div>
+        
+        <div class="game-area">
+            <canvas id="game-canvas" width="400" height="400"></canvas>
+            <div id="game-overlay" class="game-overlay">
+                <div class="overlay-content">
+                    <h2 id="overlay-title">准备开始</h2>
+                    <p id="overlay-message">按下方按钮开始游戏</p>
+                    <div id="final-score" class="final-score" style="display: none;">
+                        最终得分: <span id="final-score-value">0</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="controls">
+            <button id="start-btn" class="control-btn start">开始游戏</button>
+            <button id="pause-btn" class="control-btn pause" disabled>暂停</button>
+            <button id="reset-btn" class="control-btn reset">重置</button>
+        </div>
+        
+        <div class="instructions">
+            <h3>操作说明</h3>
+            <p>使用方向键或 WASD 控制蛇的移动方向</p>
+            <p>吃到红色食物得分，撞到墙壁或自身游戏结束</p>
+        </div>
+    </div>
+    
+    <script src="game.js"></script>
+</body>
+</html>

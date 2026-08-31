@@ -115,12 +115,6 @@ async def chat_endpoint(payload: dict):
                             # AIMessage（end 完整消息），完整文本由 updates 模式的 final 事件兜底。
                             if not isinstance(chunk, AIMessageChunk):
                                 continue
-                            # 只把 chatbot/summarizer 的 LLM token 作为对话流推送；planner/executor
-                            # 是内部节点，其输出（规划 JSON、执行过程文本）不进对话气泡，否则会刷屏
-                            # （尤其 planner 重规划时重复输出相同 JSON）。执行进展由 node/tool 事件
-                            # 和前端执行树展示。
-                            if node not in ("chatbot", "summarizer"):
-                                continue
                             text = ""
                             if hasattr(chunk, "content"):
                                 text = chunk.content or ""

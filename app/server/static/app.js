@@ -1013,6 +1013,11 @@ async function renderEventsTab(el) {
 }
 
 /* ---- 追踪 ---- */
+const TRACE_NODE_COLOR = {
+  chatbot: "var(--accent-2)", planner: "#f59e0b", executor: "#3b82f6",
+  validator: "#ef476f", summarizer: "#a663cc", agent: "var(--text-faint)",
+};
+
 async function renderTraceTab(el) {
   el.innerHTML = `<div class="d-empty">加载中…</div>`;
   try {
@@ -1020,29 +1025,67 @@ async function renderTraceTab(el) {
     const data = await apiGet(`/api/trace?limit=300${tid}`);
     const events = data.events || [];
     if (!events.length) { el.innerHTML = `<div class="d-empty">暂无追踪记录</div>`; return; }
-    // 每条记录（最小消息单位）默认只显示摘要，点击可展开完整 input/output
-    const rows = events.map((ev) => {
-      const d = ev.data || {};
-      const ts = (ev.timestamp || "").slice(11, 19);
-      const kind = d.kind || d.type || "step";
-      const badge = `<span class="lv lv-${kind === "tool" ? "warn" : kind === "llm" ? "info" : "debug"}">${escapeHtml(kind.toUpperCase())}</span>`;
-      const detail = d.name ? `<b>${escapeHtml(d.name)}</b> ` : "";
-      const fullInput = d.input != null ? String(d.input) : "";
-      const fullResult = d.result != null ? String(d.result) : "";
-      const inPreview = truncate(fullInput, 120);
-      const outPreview = truncate(fullResult, 160);
-      const detailBody =
-        (fullInput ? `<div class="d-log-sec">输入</div><pre class="d-pre">${escapeHtml(fullInput)}</pre>` : "") +
-        (fullResult ? `<div class="d-log-sec">输出</div><pre class="d-pre">${escapeHtml(fullResult)}</pre>` : "");
-      return `<details class="d-log-item"><summary><span class="ts">${escapeHtml(ts)}</span>${badge}<span class="msg">${detail}${escapeHtml(inPreview)}${outPreview ? " → " + escapeHtml(outPreview) : ""}</span></summary>${detailBody ? `<div class="d-log-detail">${detailBody}</div>` : ""}</details>`;
-    }).join("");
-    el.innerHTML = drawerSection(`追踪（${events.length} 条）`, rows) +
+    // 备份风格元素：按 node_start 分组时间线 + LLM 消息卡（markdown 输出 + 折叠输入）+ 折叠工具卡 + 错误卡
+    const ts = (t) => (t || "").slice(11, 19);
+    let html = "";
+    let groupOpen = false;
+    for (const evt of events) {
+      const d = evt.data || {};
+      const etype = evt.type || "";
+      const nodeColor = TRACE_NODE_COLOR[d.node] || "var(--text-faint)";
+      if (etype === "node_start") {
+        if (groupOpen) html += "</div>";
+        groupOpen = true;
+        html += `<div class="trace-group" style="--tnode:${nodeColor}">
+          <div class="trace-group-head"><span>🚀</span><b>${escapeHtml(d.node || "")}</b><span class="trace-ts">${escapeHtml(ts(evt.ts))}</span></div>`;
+      } else if (etype === "node_end") {
+        html += `<div class="trace-group-end"><span>🏁</span><span>${escapeHtml(String(d.result || "完成"))}</span></div>`;
+      } else if (etype === "llm_call") {
+        // ChatGPT 风格消息卡：模型标签 + 折叠输入 + markdown 输出
+        const inPreview = String(d.input || "").length > 300 ? String(d.input).slice(0, 300) + "…" : (d.input || "");
+        html += `<div class="trace-llm">
+          <div class="t-llm-head" onclick="toggleTraceCard(this)">
+            <span>🤖</span><b>${escapeHtml(d.model || "模型")}</b>
+            <span class="trace-ts">${d.duration_ms != null ? escapeHtml(d.duration_ms + "ms") : ""}</span>
+            <span class="t-llm-toggle">${d.input ? "▸ 输入" : "▾"}</span>
+          </div>
+          ${d.input ? `<div class="t-llm-input">${escapeHtml(inPreview)}</div>` : ""}
+          ${d.output ? `<div class="t-llm-output md-body">${renderMarkdown(String(d.output))}</div>` : ""}
+        </div>`;
+      } else if (etype === "tool_call") {
+        // 折叠工具卡：点击展开参数/结果
+        const isErr = /错误|error|fail|禁止|拒绝/i.test(String(d.result || ""));
+        html += `<div class="trace-tool ${isErr ? "err" : ""}" onclick="toggleTraceCard(this)">
+          <div class="trace-tool-head"><span>${isErr ? "❌" : "🔧"}</span><b>${escapeHtml(d.name || "")}</b><span class="trace-ts">▸</span></div>
+          <div class="trace-tool-body">
+            <div class="trace-tool-sec">参数: ${escapeHtml(String(d.params || ""))}</div>
+            <div class="trace-tool-sec">结果: ${escapeHtml(String(d.result || ""))}</div>
+          </div>
+        </div>`;
+      } else if (etype === "error") {
+        html += `<div class="trace-error">❌ ${escapeHtml(String(d.message || ""))}</div>`;
+      }
+    }
+    if (groupOpen) html += "</div>";
+    el.innerHTML = drawerSection(`追踪（${events.length} 条）`, html) +
       `<div class="d-row"><button class="d-btn danger" id="traceClear">清空追踪</button></div>`;
     $("#traceClear", el).addEventListener("click", async () => {
       await apiPost("/api/trace/clear", { thread_id: State.threadId });
       renderTraceTab(el);
     });
   } catch (e) { el.innerHTML = drawerErr(e); }
+}
+
+// 点击 trace 内部折叠元素（LLM 输入面板 / 工具参数结果）切换显示
+function toggleTraceCard(head) {
+  const card = head.closest ? head.closest(".trace-llm, .trace-tool") : null;
+  if (!card) return;
+  const body = card.querySelector(".t-llm-input, .trace-tool-body");
+  if (!body) return;
+  const visible = body.style.display !== "none";
+  body.style.display = visible ? "none" : "block";
+  const tg = head.querySelector(".t-llm-toggle");
+  if (tg) tg.textContent = visible ? "▸" : "▾";
 }
 
 /* ---- 5 层记忆 ---- */

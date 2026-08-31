@@ -7,6 +7,18 @@ from app.config import DB_PATH
 
 
 def create_validator_node():
+    def _find_artifact(path: str) -> str:
+        """相对文件名（如 game.js）可能在 deliverables 子目录（如 deliverables/snake_game/）下，
+        直接在 cwd 检查会误报缺失；按 basename 在 deliverables 树中查找真实路径。"""
+        if os.path.exists(path):
+            return path
+        base = os.path.basename(path)
+        if base and os.path.isdir("deliverables"):
+            for root, _, files in os.walk("deliverables"):
+                if base in files:
+                    return os.path.join(root, base)
+        return path
+
     def validator_node(state: State):
         print("[Validator] 进入")
         from app.memory import MemoryManager
@@ -41,13 +53,15 @@ def create_validator_node():
         if not all_artifacts:
             return _fail("无产出文件")
 
-        missing = [f for f in all_artifacts if not os.path.exists(f)]
+        # 相对文件名 → deliverables 树内真实路径（避免裸文件名误报缺失）
+        resolved = [_find_artifact(f) for f in all_artifacts]
+        missing = [f for f, r in zip(all_artifacts, resolved) if not os.path.exists(r)]
         if missing:
             return _fail(f"文件缺失: {', '.join(missing)}")
 
         errors, warnings = [], []
-        for file in all_artifacts:
-            result = validate_file(file)
+        for file, real in zip(all_artifacts, resolved):
+            result = validate_file(real)
             if result["level"] == "error":
                 errors.append(result["message"])
             elif result["level"] == "warning":
