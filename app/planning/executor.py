@@ -270,12 +270,14 @@ def create_executor_node(llm, tools_list):
         }, thread_id)
 
         # ===== 阶段 6: 写回结果（DB 唯一来源）=====
-        # 重规划计数：全部完成 + 有失败 → 计数（路由函数从 state 读，所以必须 return）
+        # 重规划计数：只要 DB 里仍存在失败子任务就计数（route_after_executor 依据 failed>0
+        # 决定是否重规划，计数必须与之对应，否则"子任务中途失败但未全部完成"时 replans 永不
+        # 递增，重规划上限 2 次失效 → planner→executor→planner 无限循环）。
         progress = mm.get_plan_progress(task_plan_id)
         replans = state.get("_total_replans", 0)
-        if progress['all_done'] and progress['any_failed']:
+        if progress['any_failed']:
             replans = replans + 1
-            print(f"[Executor] 全部完成但有失败，_total_replans++ -> {replans}")
+            print(f"[Executor] 存在失败子任务，_total_replans++ -> {replans}")
         # 修复模式：执行完成后清除修复信号，让 validator 重新验证
         ret_extra = {}
         if sub_id == "fix":
