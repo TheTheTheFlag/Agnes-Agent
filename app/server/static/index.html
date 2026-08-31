@@ -136,6 +136,11 @@
         .chat-bubble.tool { background: rgba(166,99,204,0.1); align-self: stretch; border: 1px solid rgba(166,99,204,0.35); font-family: monospace; font-size: 12px; max-width: 95%; color: var(--ink); }
         .chat-bubble .meta { font-size: 11px; color: rgba(255,255,255,0.75); margin-top: 6px; padding-top: 6px; border-top: 1px solid rgba(255,255,255,0.2); }
         .chat-bubble.thinking { opacity: 0.75; font-style: italic; }
+        /* 思考/工具过程：独立折叠气泡（区别于最终回复气泡），点开可看 LLM 思考文本+工具调用 */
+        .chat-bubble.thinking-bubble { background: rgba(255,255,255,0.55); border: 1px dashed var(--line); border-radius: 10px; padding: 6px 12px; margin: 4px 0; font-size: 12px; color: var(--ink-soft); align-self: stretch; cursor: pointer; user-select: none; max-width: 95%; }
+        .chat-bubble.thinking-bubble .tb-body { display: none; margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--line); white-space: pre-wrap; color: var(--ink); font-family: monospace; font-size: 12px; }
+        .chat-bubble.thinking-bubble.open .tb-body { display: block; }
+        .chat-bubble.thinking-bubble .tb-toggle { float: right; color: var(--ink-soft); font-size: 11px; }
         /* 状态栏 spinner */
         .chat-status-dot { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--pink); border-top-color: transparent; display: inline-block; animation: status-spin 0.8s linear infinite; vertical-align: middle; }
         @keyframes status-spin { to { transform: rotate(360deg); } }
@@ -848,7 +853,12 @@
             const empty = c.querySelector('.empty-state');
             if (empty) empty.remove();
             const div = document.createElement('div');
-            div.className = 'chat-bubble ' + role + (role === 'assistant' ? ' md-body' : '');
+            // thinking 角色：独立折叠气泡（不污染 assistant 回复区）
+            if (role === 'thinking') {
+                div.className = 'chat-bubble thinking-bubble collapsed';
+            } else {
+                div.className = 'chat-bubble ' + role + (role === 'assistant' ? ' md-body' : '');
+            }
             if (useMarkdown) {
                 div.innerHTML = renderMarkdown(content);
             } else {
@@ -910,10 +920,13 @@
                 return;
             }
 
+            // 用户消息气泡 + 思考气泡（独立）+ 助手气泡（最终回复）
             appendBubble('user', text, null, false);
-            const thinking = appendBubble('assistant', '', null, true);
+            const thinking = appendBubble('thinking', '', null, false);  // 思考/工具过程：独立折叠气泡
+            const thinkingBody = { text: '', tools: [] };
+            const reply = appendBubble('assistant', '', null, true);  // 最终回复
             setChatStatus('🤔 思考中...', true);
-            await streamChat({message: text, thread_id: currentThreadId}, thinking);
+            await streamChat({message: text, thread_id: currentThreadId}, thinking, thinkingBody, reply);
         }
 
         // ===== 通用流式处理：发 /api/chat 请求、接收 SSE、渲染回复；遇 approval 显示审批气泡 =====
@@ -999,12 +1012,29 @@
             return text.trim();
         }
 
-        async function streamChat(body, thinking) {
-            let fullReply = '';
-            let finalText = '';
+        async function streamChat(body, thinking, thinkingBody, reply) {
+            let chatbotText = '';       // 思考气泡中 LLM 实际输出的文本（实时追加）
+            let finalText = '';          // 最终回复（来自 final 事件）
+            let finalShown = false;      // 思考气泡是否已收为最终回复
             let stepLogs = [];
             let toolLogs = [];
             let sawApproval = false;
+
+            // 渲染思考气泡：标题 + 折叠的正文
+            function renderThinking() {
+                const toolLines = thinkingBody.tools.map(t => `🔧 ${t.name}(${t.args || ''})`).join('\n');
+                const text = (chatbotText + (toolLines ? '\n\n' + toolLines : '')).trim();
+                if (!text) {
+                    thinking.innerHTML = `<span>🤔 思考中…</span><span class="tb-toggle">▸ 展开</span>`;
+                    return;
+                }
+                const cls = thinking.classList.contains('collapsed') ? '' : ' open';
+                thinking.className = 'chat-bubble thinking-bubble' + cls;
+                thinking.innerHTML = `<div class="tb-head" onclick="this.parentElement.classList.toggle('open'); this.querySelector('.tb-toggle').textContent = this.parentElement.classList.contains('open') ? '▾ 收起' : '▸ 展开';">
+                    <span>🤔 思考过程（${thinkingBody.tools.length} 次工具调用）</span>
+                    <span class="tb-toggle">${thinking.classList.contains('open') ? '▾ 收起' : '▸ 展开'}</span>
+                </div><div class="tb-body">${escapeHtml(text)}</div>`;
+            }
 
             chatAbort = new AbortController();
             try {
@@ -1029,38 +1059,51 @@
                         if (evt.step === 'node') {
                             if (evt.phase === 'start' && !stepLogs.includes(evt.name)) stepLogs.push(evt.name);
                             setChatStatus('⏳ 执行节点: ' + stepLogs.join(' → '), true);
-                            if (evt.phase === 'start' && evt.name === 'chatbot') fullReply = '';
+                            if (evt.phase === 'start' && evt.name === 'chatbot') chatbotText = '';
                             // 规划/执行等节点 → 任务块更新（applyTaskEvent 幂等）
                             if (evt.name !== 'chatbot' && (evt.name === 'planner' || evt.name === 'executor')) {
                                 applyTaskEvent(evt.name, { data: evt.info || {} });
                             }
                         } else if (evt.step === 'token') {
-                            // 只渲染 chatbot 节点的对话 token；executor/planner 的输出由执行树+事件表达，
-                            // 不污染对话气泡（避免 FINAL_ANSWER/JSON 显示）
+                            // chatbot 节点的 token → 进思考气泡（与最终回复分离）
                             if (!evt.node || evt.node === 'chatbot') {
-                                fullReply += evt.text;
-                                thinking.classList.remove('thinking');
-                                thinking.innerHTML = renderMarkdown(cleanReply(fullReply));
+                                chatbotText += evt.text;
+                                renderThinking();
                             }
                             setChatStatus('✍️ 生成回复中...', true);
                         } else if (evt.step === 'tool') {
                             toolLogs.push(`${evt.name}:${evt.phase}`);
                             setChatStatus('🔧 工具: ' + toolLogs.slice(-3).join(' | '), true);
-                            renderToolCard(evt);
-                            // 工具树由 SSE 的 tool_call 事件驱动（带 subtask 归属）；此处不重复写入
+                            // 工具调用也进思考气泡（不污染最终回复区）
+                            thinkingBody.tools.push({ name: evt.name, args: '', output: evt.output_preview || '' });
+                            renderToolCard(evt);  // 工具卡片仍渲染（用户可看详情）
+                            renderThinking();
                         } else if (evt.step === 'tool_chunk') {
                             // 显示正在调用的工具名与参数（后端已提取 name/args）
                             const tname = evt.name || '';
                             const targs = evt.args || '';
                             setChatStatus(tname ? `🔧 调用工具中: ${tname}` : '🔧 调用工具中...', true);
+                            // 累积到思考气泡
+                            if (tname) {
+                                const last = thinkingBody.tools[thinkingBody.tools.length - 1];
+                                if (last && last.name === tname) {
+                                    last.args = (last.args || '') + targs;
+                                } else {
+                                    thinkingBody.tools.push({ name: tname, args: targs, output: '' });
+                                }
+                                renderThinking();
+                            }
                         } else if (evt.step === 'error') {
-                            thinking.classList.remove('thinking');
-                            thinking.classList.add('error');
-                            thinking.textContent = '❌ ' + (evt.message || JSON.stringify(evt));
+                            reply.classList.remove('thinking');
+                            reply.classList.add('error');
+                            reply.textContent = '❌ ' + (evt.message || JSON.stringify(evt));
                             setChatStatus('❌ 出错', false);
                         } else if (evt.step === 'final') {
                             if (evt.text) finalText = evt.text;
                             setChatStatus('✅ 完成', false);
+                            // final 事件：把最终回复写到 reply 气泡
+                            reply.classList.remove('thinking');
+                            if (finalText) reply.innerHTML = renderMarkdown(cleanReply(finalText));
                         } else if (evt.step === 'approval') {
                             // 需要审批：停止流式，显示审批气泡
                             sawApproval = true;
@@ -1076,44 +1119,47 @@
                     if (sawApproval) break;  // 等待用户审批，不再读
                 }
                 if (sawApproval) {
-                    // 等用户点按钮走 resumeChat；先用已知回复填充气泡，
-                    // 避免"用户目标：..."等内部摘要污染停留在聊天框（原逻辑直接 return 跳过了最终渲染）
-                    const pendingReply = finalText || cleanReply(fullReply);
-                    if (pendingReply) {
-                        thinking.classList.remove('thinking');
-                        thinking.innerHTML = renderMarkdown(pendingReply);
+                    // 等用户点按钮走 resumeChat；先把已知最终回复填到 reply 气泡
+                    // （原逻辑：直接 return 跳过渲染，导致内部摘要污染停留在 thinking 框）
+                    if (finalText) {
+                        reply.classList.remove('thinking');
+                        reply.innerHTML = renderMarkdown(cleanReply(finalText));
                     }
                     setChatStatus('⏸ 等待审批', false);
                     return;
                 }
-                // 渲染优先级：final > token 流式拼接 > state 兜底
-                thinking.classList.remove('thinking');
-                const reply = finalText || cleanReply(fullReply) || '';
-                if (reply) {
-                    thinking.innerHTML = renderMarkdown(reply);
-                } else {
+                // 流结束：reply 气泡由 final 事件已填好（若有）；无 final 时回退到 chatbotText
+                if (!finalText && chatbotText) {
+                    const cleaned = cleanReply(chatbotText);
+                    if (cleaned) {
+                        reply.classList.remove('thinking');
+                        reply.innerHTML = renderMarkdown(cleaned);
+                    }
+                }
+                if (!reply.innerHTML.trim() || reply.innerHTML === '') {
+                    // 最终兜底：从 DB 读最后一条 ai 消息
                     try {
                         const stR = await fetch('/api/state');
                         const st = await stR.json();
                         const msgs = st.messages || [];
                         const lastAI = [...msgs].reverse().find(m => (m.type === 'ai' || m.role === 'assistant') && (m.content || m.text));
                         const txt = lastAI ? (lastAI.content || lastAI.text || '') : '';
-                        if (txt) thinking.innerHTML = renderMarkdown(txt);
-                        else thinking.textContent = '（无回复）';
-                    } catch (e2) { thinking.textContent = '（无回复）'; }
+                        if (txt) reply.innerHTML = renderMarkdown(txt);
+                        else reply.textContent = '（无回复）';
+                    } catch (e2) { reply.textContent = '（无回复）'; }
                 }
                 if (stepLogs.length) {
                     const meta = document.createElement('div');
                     meta.className = 'meta';
                     meta.textContent = '节点: ' + stepLogs.join(' → ');
-                    thinking.appendChild(meta);
+                    reply.appendChild(meta);
                 }
                 setChatStatus('就绪', false);
             } catch (e) {
                 if (e.name === 'AbortError') return;
-                thinking.classList.remove('thinking');
-                thinking.classList.add('error');
-                thinking.textContent = '❌ ' + e.message;
+                reply.classList.remove('thinking');
+                reply.classList.add('error');
+                reply.textContent = '❌ ' + e.message;
                 document.getElementById('chatStatus').textContent = '错误';
             }
         }

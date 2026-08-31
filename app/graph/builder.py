@@ -244,6 +244,9 @@ def chatbot(state: State, config: RunnableConfig):
             on_before_llm=on_before_llm,
         )
         content = result["final_answer"]
+        # 透传 ReActLoop 捕获的 pending_plan（来自 request_planning 工具的 Command.update）
+        # → 让 route_after_chatbot 跳到 planner
+        react_pending_plan = result.get("pending_plan")
     except Exception as e:
         # langgraph 的 GraphInterrupt 必须冒泡，让 main.py 的审批循环能处理
         from langgraph.errors import GraphInterrupt
@@ -257,17 +260,18 @@ def chatbot(state: State, config: RunnableConfig):
     if not content:
         content = "已处理完毕。"
 
-    # 检测是否刚触发了规划：查找 request_planning 工具的 ToolMessage（消息里提取 goal）。
-    # 不用 state.pending_plan 是因为 LangGraph 的 Command(update=...) 不会回写到本节点局部 state。
-    triggered_goal = None
-    for m in reversed(state.get("messages", [])[-5:]):
-        if hasattr(m, 'type') and m.type == 'tool' and '已接收规划请求' in (m.content or ''):
-            try:
-                # content 形如："已接收规划请求，目标：<goal>..."
-                triggered_goal = m.content.split('目标：', 1)[1].strip()
-            except Exception:
-                pass
-            break
+    # 检测规划触发（两种来源，结果等价）：
+    # 1) ReActLoop 从工具返回的 Command 中捕获的 pending_plan（最可靠，工具直接告诉 state）
+    # 2) 消息流检测：找 ToolMessage("已接收规划请求，目标：...") 提取 goal（兜底）
+    triggered_goal = react_pending_plan
+    if not triggered_goal:
+        for m in reversed(state.get("messages", [])[-5:]):
+            if hasattr(m, 'type') and m.type == 'tool' and '已接收规划请求' in (m.content or ''):
+                try:
+                    triggered_goal = m.content.split('目标：', 1)[1].strip()
+                except Exception:
+                    pass
+                break
     if triggered_goal:
         content = f"🚀 正在为你规划并执行：{triggered_goal[:80]}"
 

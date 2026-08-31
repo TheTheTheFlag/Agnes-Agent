@@ -10,6 +10,8 @@ class ReActLoop:
     def __init__(self, llm_with_tools, max_iterations: int = 15):
         self.llm_with_tools = llm_with_tools
         self.max_iterations = max_iterations
+        # 工具返回的 pending_plan（chatbot 节点用它判断是否要跳到 planner）
+        self._captured_pending_plan = None
 
     def run(self, messages, tools, on_tool_before=None, on_tool_after=None,
             interrupt_handler=None, state=None, on_before_llm=None, verbose=True):
@@ -103,6 +105,17 @@ class ReActLoop:
                 if on_tool_after:
                     on_tool_after(tool_name, params, result)
 
+                # 捕获工具返回的 pending_plan（如 request_planning），让 chatbot 节点 return 时
+                # 写入 ret["pending_plan"] → route_after_chatbot 据此跳到 planner。
+                # 原因：chatbot 节点不用 LangGraph 的 ToolNode，工具的 Command(update=...) 不会
+                # 自动合并到 state，必须手动提取。
+                if isinstance(result, Command) and getattr(result, "update", None):
+                    _pp = result.update.get("pending_plan")
+                    if _pp:
+                        # 用实例属性累积（ReActLoop 局部 state）
+                        if not hasattr(self, "_captured_pending_plan") or not self._captured_pending_plan:
+                            self._captured_pending_plan = _pp
+
                 if isinstance(result, Command):
                     # 序列要求：AIMessage(tool_calls) 必须先于 ToolMessage。
                     # Command 通常自带 ToolMessage（带 tool_call_id），不再重复 append success，
@@ -123,9 +136,15 @@ class ReActLoop:
                     if not has_tool_msg:
                         messages.append(ToolMessage(content=json.dumps({"status": "success"}), tool_call_id=tool_id))
                     # 关键：工具返回 pending_plan（如 request_planning）后，规划请求已提交，
-                    # 应立即终止 ReAct 循环，避免模型继续调工具/重复规划（任务重复执行的根因）。
-                    if state is not None and state.get("pending_plan"):
-                        return {"final_answer": "已提交规划请求，进入规划流程。", "iteration_count": iteration}
+                    # 应立即终止 ReAct 循环，避免模型继续调工具/重复规划。
+                    # 不读 state["pending_plan"]（chatbot 节点不用 ToolNode，Command.update 不会
+                    # 合并到 state）；改读 self._captured_pending_plan（在 _execute_tool 后捕获）。
+                    if self._captured_pending_plan:
+                        return {
+                            "final_answer": "已提交规划请求，进入规划流程。",
+                            "iteration_count": iteration,
+                            "pending_plan": self._captured_pending_plan,
+                        }
                 else:
                     # 优先用 str()，因为 tavily 等工具可能返回 Document / dict 等非 JSON 可序列化对象
                     if isinstance(result, str):
@@ -142,7 +161,11 @@ class ReActLoop:
 
         if final_answer is None:
             final_answer = self._force_answer(messages)
-        return {"final_answer": final_answer, "iteration_count": iteration}
+        return {
+            "final_answer": final_answer,
+            "iteration_count": iteration,
+            "pending_plan": getattr(self, "_captured_pending_plan", None),
+        }
 
     def _invoke_llm(self, messages):
         # 检测 langgraph GraphInterrupt：不要让 retry 吞掉它，必须冒泡到 graph 层
