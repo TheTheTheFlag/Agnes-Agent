@@ -7,3 +7,6 @@
 {"type": "node_start", "ts": "2026-08-31T12:44:05.759", "ts_ms": 1788151445759.5752, "data": {"node": "chatbot"}}
 {"type": "llm_call", "ts": "2026-08-31T12:44:06.634", "ts_ms": 1788151446634.8047, "data": {"node": "chatbot", "model": "deepseek-v4-pro", "duration_ms": 789.8, "input": "[ai] 任务完成\n[human] 你在干嘛\n[ai] 任务完成\n[human] 怎么说", "output": ""}}
 {"type": "node_end", "ts": "2026-08-31T12:44:19.654", "ts_ms": 1788151459654.7393, "data": {"node": "chatbot", "result": "任务完成"}}
+{"type": "node_start", "ts": "2026-08-31T12:45:08.456", "ts_ms": 1788151508456.908, "data": {"node": "chatbot"}}
+{"type": "llm_call", "ts": "2026-08-31T12:45:10.561", "ts_ms": 1788151510561.5496, "data": {"node": "chatbot", "model": "", "duration_ms": 2040.7, "input": "[ai] 任务完成\n[human] 怎么说\n[ai] 任务完成\n[human] 你好", "output": "任务完成"}}
+{"type": "node_end", "ts": "2026-08-31T12:45:46.238", "ts_ms": 1788151546238.3586, "data": {"node": "chatbot", "result": "任务完成"}}
