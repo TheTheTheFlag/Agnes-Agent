@@ -37,6 +37,14 @@ def _filter_internal_tokens(node: str, run_id, text: str, state: dict) -> str:
     if state.get("internal"):
         return ""
     state["text"] = (state.get("text", "") + text)[-60:]
+    # 前缀命中：内部摘要段（update_summary 等）以这些结构 marker 开头，token 逐字到达时，
+    # 若只累积到 marker 前缀（如 "**用户"）就会因"完整 marker 未出现"被误放行，
+    # 导致摘要开头（如 "**用户"）泄漏到聊天框。改为：累积文本是任一 marker 的前缀时，
+    # 立即判定为内部摘要并丢弃（含当前 token）。段开头若被误判（如正常回复以 "**" 开头），
+    # 前端会用 updates 模式推送的 final 文本兜底，回复内容不受影响。
+    if state["text"] and any(mk.startswith(state["text"]) for mk in _SUMMARY_MARKERS):
+        state["internal"] = True
+        return ""
     if any(mk in state["text"] for mk in _SUMMARY_MARKERS):
         state["internal"] = True
         return ""
