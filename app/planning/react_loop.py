@@ -250,7 +250,21 @@ class ReActLoop:
             content = str(raw or "").strip()
         if "FINAL_ANSWER:" in content:
             return content.split("FINAL_ANSWER:", 1)[1].strip()
-        return content if content else "任务完成"
+        if not content:
+            # 空回复：不再静默兜底为"任务完成"（会误导用户，掩盖网关额度耗尽/模型配置错误等真实原因），
+            # 改为明确提示并在 trace 记录 error，便于排查。
+            print("[LLM] 模型返回空内容（无 tool_calls），请检查模型配置/API 额度", flush=True)
+            try:
+                from app.trace import record_error
+                record_error(
+                    getattr(self, "_trace_thread_id", None) or "default",
+                    getattr(self, "_trace_node", "llm"),
+                    ValueError("模型返回空内容（无 tool_calls）"),
+                )
+            except Exception:
+                pass
+            return "[模型未返回内容] 请检查模型配置或 API 额度（网关可能已耗尽配额或返回空响应）。"
+        return content
 
     def _execute_tool(self, tool_name, params, tools, state, tool_id=None):
         for tool in tools:
@@ -275,6 +289,6 @@ class ReActLoop:
         messages.append(SystemMessage(content="请基于已有信息直接回答"))
         try:
             response = self._invoke_llm(messages)
-            return re.sub(r'<tool_call>.*?</tool_call>', '', response.content, flags=re.DOTALL).strip() or "已处理"
+            return re.sub(r'<tool_call>.*?</tool_call>', '', response.content, flags=re.DOTALL).strip() or "[模型未返回内容] 请检查模型配置或 API 额度。"
         except Exception as e:
             return f"强制回答失败: {e}"
