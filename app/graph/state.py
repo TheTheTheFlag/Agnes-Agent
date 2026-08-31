@@ -19,3 +19,9 @@ class State(TypedDict):
 
     # ===== 触发器：chatbot 调 request_planning 后注入，planner 节点消费后清空 =====
     pending_plan: Optional[str]
+
+    # ===== 验证反馈闭环（validator → executor 修复）：跨节点传递失败原因 + 修复计数 =====
+    _validation_passed: Optional[bool]   # 上次验证结果（validator 设置）
+    _validation_message: Optional[str]   # 验证失败原因（结构化文本，executor 修复时读取）
+    _fix_attempts: Optional[int]         # 反馈修复尝试次数（validator 递增，executor 重置）
+    _total_replans: Optional[int]        # 重规划次数（executor/validator 递增，路由读取）

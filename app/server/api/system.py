@@ -49,6 +49,26 @@ async def get_events(limit: int = Query(50, ge=1, le=200), thread_id: str = ""):
     return JSONResponse({"events": events, "total": len(events)})
 
 
+@router.get("/api/trace")
+async def get_trace(limit: int = Query(300, ge=1, le=500), thread_id: str = ""):
+    """当前对话全量追踪：节点流转 / LLM 输入输出 / 工具调用 / 错误（按时间正序）。"""
+    from app.trace import get as _trace_get
+    # 未指定 thread_id 时用当前会话
+    tid = thread_id
+    if not tid and _srv_cfg._CONFIG:
+        tid = (_srv_cfg._CONFIG.get("configurable") or {}).get("thread_id", "")
+    events = _trace_get(tid, limit) if tid else []
+    return JSONResponse({"thread_id": tid, "events": events, "total": len(events)})
+
+
+@router.post("/api/trace/clear")
+async def clear_trace(thread_id: str = ""):
+    """清空 trace（指定 thread 或全部）。"""
+    from app.trace import clear as _trace_clear
+    n = _trace_clear(thread_id or None)
+    return {"status": "ok", "cleared": n}
+
+
 @router.post("/api/clear-logs")
 async def clear_logs():
     _store._log_entries = []

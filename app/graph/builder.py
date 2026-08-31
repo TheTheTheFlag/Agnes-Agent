@@ -55,6 +55,12 @@ print(f"LLM 类型: {type(llm)} | provider={_LLM_PROVIDER} model={_LLM_MODEL or 
 def chatbot(state: State, config: RunnableConfig):
     thread_id = config["configurable"]["thread_id"]
     state["thread_id"] = thread_id
+    # trace：chatbot 节点进入
+    try:
+        from app.trace import record_node_start
+        record_node_start(thread_id, "chatbot")
+    except Exception:
+        pass
 
     if not state.get("messages"):
         return {"messages": []}
@@ -185,6 +191,12 @@ def chatbot(state: State, config: RunnableConfig):
             pass
         add_log_entry("info", f"工具: {name}", {"params": params, "result_preview": str(result)[:200]})
         add_event("tool_call", {"name": name, "params": params}, thread_id)
+        # trace：chatbot 节点工具调用
+        try:
+            from app.trace import record_tool
+            record_tool(thread_id, "chatbot", name, params, result)
+        except Exception:
+            pass
 
     # 审批 hook：命令执行 + 文件写/改/删走人工审批；其余工具直接放行
     def interrupt_handler(name, params):
@@ -232,7 +244,7 @@ def chatbot(state: State, config: RunnableConfig):
     initial_messages = ensure_token_limit([SystemMessage(content=system_text)] + history_messages, system_text, thread_id)
 
     print(f"[Chatbot] 自决模式（无 L1/L2/L3 硬切）")
-    loop = ReActLoop(llm_with_tools, max_iterations=MAX_TOOL_CALL_ROUNDS)
+    loop = ReActLoop(llm_with_tools, max_iterations=MAX_TOOL_CALL_ROUNDS, node="chatbot")
     try:
         result = loop.run(
             messages=initial_messages,
@@ -293,6 +305,12 @@ def chatbot(state: State, config: RunnableConfig):
     # 必须随 return 传回 graph state，route_after_chatbot 才能据此跳转 planner。
     # 同时 thread_id 也要传回（planner/executor 需要真实 thread_id 而非 "default"）。
     ret = {"messages": [AIMessage(content=content)], "thread_id": thread_id}
+    # trace：chatbot 节点退出
+    try:
+        from app.trace import record_node_end
+        record_node_end(thread_id, "chatbot", content[:200])
+    except Exception:
+        pass
     # 触发了规划 → 让 route_after_chatbot 跳到 planner（基于消息检测判断，与上面 content 替换同一来源）
     if triggered_goal:
         ret["pending_plan"] = triggered_goal
@@ -388,14 +406,24 @@ def route_after_executor(state: State):
 
 
 def route_after_validator(state: State):
+    """验证反馈闭环：
+      1) 通过 → summarizer
+      2) 失败且修复次数 ≤2 → executor（把失败原因回喂，让 LLM 修复产出文件）
+      3) 修复耗尽 → 重规划（≤1 次）
+      4) 重规划也耗尽 → 带当前产出进 summarizer 收敛
+    """
     if state.get("_validation_passed", False):
         return "summarizer"
+    fix_attempts = state.get("_fix_attempts", 0)
+    if fix_attempts <= 2:
+        add_log_entry("info", f"路由→executor: 验证失败，反馈修复（第 {fix_attempts} 次）")
+        return "executor"
     replans = state.get("_total_replans", 0)
-    if replans >= 2:
-        print("⚠️ 验证失败但重规划已达上限，进入汇总")
-        return "summarizer"
-    print("↩️ 验证失败，重规划")
-    return "planner"
+    if replans < 1:
+        add_log_entry("info", "路由→planner: 修复耗尽，重规划")
+        return "planner"
+    add_log_entry("warning", "路由→summarizer: 修复+重规划均耗尽，收敛")
+    return "summarizer"
 
 
 def route_after_summarizer(state: State):

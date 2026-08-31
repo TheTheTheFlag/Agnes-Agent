@@ -332,6 +332,16 @@
         </div>
     </div>
 
+    <div class="tab-content" id="tab-trace">
+        <div class="panel">
+            <div class="flex-between">
+                <div class="panel-title" style="margin-bottom:0;"><span>🔍 Trace 追踪（当前对话全量输入输出）</span><span class="badge" id="traceBadge">-</span></div>
+                <button class="btn" style="font-size:11px;" onclick="clearTrace()">🗑 清空</button>
+            </div>
+            <div class="log-container" id="traceContainer" style="margin-top:8px;"><div class="empty-state">暂无追踪数据</div></div>
+        </div>
+    </div>
+
     <div class="tab-content" id="tab-memory">
         <div class="panel">
             <div class="flex-between">
@@ -479,6 +489,7 @@
             { id: 'state',     label: '📊 会话状态' },
             { id: 'prompt',    label: '📄 系统提示词' },
             { id: 'events',    label: '📋 执行事件' },
+            { id: 'trace',     label: '🔍 Trace 追踪' },
             { id: 'memory',    label: '🧠 记忆中心' },
             { id: 'memorydb',  label: '🗄 数据库' },
             { id: 'tools',     label: '🔧 工具注册' },
@@ -494,6 +505,7 @@
             state: () => refreshAll(),
             prompt: () => refreshAll(),
             events: () => refreshAll(),
+            trace: () => loadTrace(),
         };
         let drawerActiveTab = 'state';
         const drawerEl = document.getElementById('drawer');
@@ -647,6 +659,73 @@
             container.innerHTML = html;
             document.getElementById('eventBadge').textContent = data.events.length;
             document.getElementById('statEvents').textContent = data.events.length;
+        }
+
+        // ===== Trace 追踪 tab：当前对话全量输入输出（节点流转/LLM 调用/工具调用/错误）=====
+        const TRACE_ICONS = {
+            node_start: '🚀', node_end: '🏁', llm_call: '🤖',
+            tool_call: '🔧', error: '❌',
+        };
+        const TRACE_NODE_COLOR = {
+            chatbot: 'var(--green)', planner: '#f59e0b', executor: '#3b82f6',
+            validator: '#ef476f', summarizer: '#a663cc', agent: 'var(--ink-soft)',
+        };
+        async function loadTrace() {
+            const c = document.getElementById('traceContainer');
+            if (!c) return;
+            try {
+                const tid = currentThreadId ? encodeURIComponent(currentThreadId) : '';
+                const url = tid ? '/api/trace?limit=300&thread_id=' + tid : '/api/trace?limit=300';
+                const r = await fetch(url);
+                const data = await r.json();
+                const events = data.events || [];
+                document.getElementById('traceBadge').textContent = events.length;
+                if (!events.length) {
+                    c.innerHTML = '<div class="empty-state">暂无追踪数据（对话执行时自动记录）</div>';
+                    return;
+                }
+                c.innerHTML = events.map(evt => {
+                    const d = evt.data || {};
+                    const icon = TRACE_ICONS[evt.type] || '•';
+                    const ts = (evt.ts || '').slice(11, 23);
+                    let color = 'var(--ink-soft)';
+                    if (d.node) color = TRACE_NODE_COLOR[d.node] || color;
+                    const nodeTag = d.node ? `<span style="background:${color}22;color:${color};border:1px solid ${color}55;border-radius:4px;padding:0 5px;font-size:11px;font-family:monospace;">${escapeHtml(d.node)}</span>` : '';
+                    let body = '';
+                    if (evt.type === 'llm_call') {
+                        body = `<div style="margin-top:4px;font-family:monospace;font-size:11px;white-space:pre-wrap;word-break:break-all;">
+                            <span style="color:var(--ink-soft);">模型:</span> ${escapeHtml(d.model || '-')} · <span style="color:var(--ink-soft);">耗时:</span> ${d.duration_ms != null ? d.duration_ms + 'ms' : '-'}
+                            ${d.input ? `<div style="margin-top:3px;color:var(--ink-soft);">↓ 输入:\n${escapeHtml(d.input)}</div>` : ''}
+                            ${d.output ? `<div style="margin-top:3px;">↑ 输出:\n${escapeHtml(d.output)}</div>` : ''}
+                        </div>`;
+                    } else if (evt.type === 'tool_call') {
+                        body = `<div style="margin-top:4px;font-family:monospace;font-size:11px;white-space:pre-wrap;word-break:break-all;">
+                            <b>${escapeHtml(d.name || '')}</b>${d.duration_ms != null ? ` <span style="color:var(--ink-soft);">${d.duration_ms}ms</span>` : ''}
+                            ${d.params ? `<div style="color:var(--ink-soft);">参数: ${escapeHtml(String(d.params))}</div>` : ''}
+                            ${d.result ? `<div>结果: ${escapeHtml(String(d.result))}</div>` : ''}
+                        </div>`;
+                    } else if (evt.type === 'node_end') {
+                        body = d.result ? `<div style="margin-top:3px;color:var(--ink-soft);font-size:11px;">${escapeHtml(String(d.result))}</div>` : '';
+                    } else if (evt.type === 'error') {
+                        body = `<div style="margin-top:3px;color:var(--red);font-size:11px;font-family:monospace;">${escapeHtml(d.message || '')}</div>`;
+                    }
+                    return `<div class="log-entry" style="flex-direction:column;align-items:stretch;">
+                        <div style="display:flex;align-items:center;gap:6px;">
+                            <span class="time" style="min-width:52px;">${ts}</span>
+                            <span style="color:${color};">${icon} ${escapeHtml(evt.type)}</span>
+                            ${nodeTag}
+                        </div>
+                        ${body}
+                    </div>`;
+                }).join('');
+                c.scrollTop = c.scrollHeight;
+            } catch (e) {
+                c.innerHTML = '<div class="empty-state">⚠️ 加载失败: ' + escapeHtml(e.message) + '</div>';
+            }
+        }
+        async function clearTrace() {
+            await fetch('/api/trace/clear' + (currentThreadId ? '?thread_id=' + encodeURIComponent(currentThreadId) : ''), { method: 'POST' });
+            loadTrace();
         }
 
 
@@ -1521,7 +1600,11 @@
                 eventSource.onmessage = function(event) {
                     try {
                         const data = JSON.parse(event.data);
-                        if (data.type === 'log') refreshAll();
+                        if (data.type === 'log') {
+                            refreshAll();
+                            // trace tab 打开时实时刷新
+                            if (drawerActiveTab === 'trace') loadTrace();
+                        }
                         // 任务块事件：planner/executor 累积到 planTree.tasks；tool_call 不再需要（事件 tab 可见）
                         else if (data.type === 'planner' || data.type === 'executor') {
                             if (data.thread_id && currentThreadId && data.thread_id !== currentThreadId) return;

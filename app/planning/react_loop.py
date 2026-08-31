@@ -7,14 +7,23 @@ from openai import RateLimitError
 from app.server import add_log_entry, add_event
 
 class ReActLoop:
-    def __init__(self, llm_with_tools, max_iterations: int = 15):
+    def __init__(self, llm_with_tools, max_iterations: int = 15, node: str = "agent"):
         self.llm_with_tools = llm_with_tools
         self.max_iterations = max_iterations
         # 工具返回的 pending_plan（chatbot 节点用它判断是否要跳到 planner）
         self._captured_pending_plan = None
+        # trace：LLM 调用归属的节点名 + 会话 id
+        self._trace_node = node
+        self._trace_thread_id = None
 
     def run(self, messages, tools, on_tool_before=None, on_tool_after=None,
             interrupt_handler=None, state=None, on_before_llm=None, verbose=True):
+        # trace 上下文：thread_id + 当前节点名（chatbot/executor）
+        if state:
+            tid = state.get("thread_id") or state.get("_thread_id")
+            if tid:
+                self._trace_thread_id = tid
+        self._trace_node = getattr(self, "_trace_node", None) or "agent"
         final_answer = None
         iteration = 0
         last_tool_calls = None
@@ -171,11 +180,24 @@ class ReActLoop:
         # 检测 langgraph GraphInterrupt：不要让 retry 吞掉它，必须冒泡到 graph 层
         # 让 main.py 的审批循环能看到 interrupt
         from langgraph.errors import GraphInterrupt
+        # trace：记录本次 LLM 调用的输入输出（thread_id 从调用方 state 传入，这里用 on_before 的兜底）
+        thread_id = getattr(self, "_trace_thread_id", None) or "default"
+        _t0 = time.time()
         @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=10),
                retry=retry_if_exception(lambda e: not isinstance(e, (RateLimitError, GraphInterrupt))))
         def _wrapper():
             return self.llm_with_tools.invoke(messages)
-        return _wrapper()
+        try:
+            resp = _wrapper()
+            from app.trace import record_llm
+            record_llm(thread_id, getattr(self, "_trace_node", "llm"),
+                       messages, resp, duration_ms=(time.time() - _t0) * 1000,
+                       model=getattr(getattr(self, "llm_with_tools", None), "model_name", "") or "")
+            return resp
+        except Exception as e:
+            from app.trace import record_error
+            record_error(thread_id, getattr(self, "_trace_node", "llm"), e)
+            raise
 
     def _extract_tool_calls(self, response):
         if hasattr(response, 'tool_calls') and response.tool_calls:

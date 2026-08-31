@@ -14,12 +14,12 @@ def create_validator_node():
         thread_id = state.get("thread_id") or state.get("_thread_id") or "default"
         mm = MemoryManager(db_path=DB_PATH, thread_id=thread_id)
 
-        # 校验失败时递增重规划计数（真正写回 state，防 validator 失败→重规划死循环）
+        # 校验失败时递增修复计数（不是重规划计数——先让 executor 反馈修复）
         def _fail(msg):
             state["_validation_passed"] = False
             state["_validation_message"] = msg
-            state["_total_replans"] = state.get("_total_replans", 0) + 1
-            print(f"[Validator] 失败（重规划计数 -> {state['_total_replans']}）: {msg}")
+            state["_fix_attempts"] = state.get("_fix_attempts", 0) + 1
+            print(f"[Validator] 失败（修复计数 -> {state['_fix_attempts']}）: {msg}")
             # 失败也要进日志/事件，否则页面只看到"执行完又规划"却不知道为什么
             add_log_entry("error", f"验证失败: {msg}", {"passed": False})
             add_event("validator", {"passed": False, "message": msg}, thread_id)
@@ -63,10 +63,14 @@ def create_validator_node():
             msg.append("✅ 全部通过")
         state["_validation_message"] = "\n\n".join(msg)
 
-        # 校验失败（格式错误）也递增重规划计数
+        # 校验失败（格式错误）：递增修复计数（先反馈修复，不是直接重规划）
         if not state["_validation_passed"]:
-            state["_total_replans"] = state.get("_total_replans", 0) + 1
-            print(f"[Validator] 格式校验失败（重规划计数 -> {state['_total_replans']}）")
+            state["_fix_attempts"] = state.get("_fix_attempts", 0) + 1
+            print(f"[Validator] 格式校验失败（修复计数 -> {state['_fix_attempts']}）")
+        else:
+            # 通过：清除修复信号（executor 下一轮正常执行）
+            state["_validation_message"] = ""
+            state["_fix_attempts"] = 0
 
         print(f"[Validator] {'通过' if state['_validation_passed'] else '失败'}")
         add_log_entry("info", f"验证: {'通过' if state['_validation_passed'] else '失败'}", {"passed": state["_validation_passed"]})

@@ -21,6 +21,8 @@ def create_executor_node(llm, tools_list):
     def executor_node(state: State):
         print("[Executor] 进入")
         thread_id = state.get("thread_id", "default")
+        from app.trace import record_node_start, record_node_end, record_tool
+        record_node_start(thread_id, "executor")
         from app.memory import MemoryManager
         mm = MemoryManager(db_path=DB_PATH, thread_id=thread_id)
 
@@ -36,26 +38,31 @@ def create_executor_node(llm, tools_list):
         if stale:
             print(f"[Executor] 恢复 {stale} 个卡死 running 子任务为 failed")
 
-        # ===== 阶段 3: 检查是否全部完成（DB 查）=====
-        progress = mm.get_plan_progress(task_plan_id)
-        print(f"[Executor] 进度: {progress}")
-        if progress['all_done']:
-            print("[Executor] 所有子任务已完成，进验证/汇总")
-            return {"thread_id": thread_id}
+        # ===== 阶段 3.5: 反馈修复模式（validator 失败原因回喂）=====
+        # 有 _validation_message 时：不选新子任务，直接进入"修复轮"——LLM 读取失败文件并修正，
+        # 修复完成后回到 validator 再验证。修复目标从失败信息中提取（或修复最后产出文件）。
+        nxt = None
+        fix_msg = state.get("_validation_message") or ""
+        if fix_msg:
+            sub_id = "fix"
+            description = f"修复验证失败的问题（读取失败文件并修正后重新写入 deliverables）"
+            print(f"  🔧 修复模式: {fix_msg[:100]}")
+            # 进入修复分支
+        else:
+            # ===== 阶段 4: 选下一个子任务（DB 决策，避开 running）=====
+            nxt = mm.get_next_executable_subtask(task_plan_id)
+            if nxt is None:
+                # DB 找不到 pending 但还有 running（应被 recover 清理了）；兜底返回
+                print("[Executor] 找不到可执行子任务，退出")
+                return {"thread_id": thread_id}
 
-        # ===== 阶段 4: 选下一个子任务（DB 决策，避开 running）=====
-        nxt = mm.get_next_executable_subtask(task_plan_id)
-        if nxt is None:
-            # DB 找不到 pending 但还有 running（应被 recover 清理了）；兜底返回
-            print("[Executor] 找不到可执行子任务，退出")
-            return {"thread_id": thread_id}
-
-        sub_id = nxt['id']
-        description = nxt['description']
-        print(f"  ▶️ 执行 {sub_id}: {description[:50]}...")
+            sub_id = nxt['id']
+            description = nxt['description']
+            print(f"  ▶️ 执行 {sub_id}: {description[:50]}...")
 
         # ===== 阶段 5: 标 running + 推送事件（DB 写一次）=====
-        mm.update_subtask_status(task_plan_id, sub_id, "running")
+        if sub_id != "fix":
+            mm.update_subtask_status(task_plan_id, sub_id, "running")
         # executor 事件（前端执行树用）：子任务序号 + 全量子任务状态（DB 当前快照）
         add_event("executor", {
             "goal": (mm.get_task_plan_by_thread(thread_id) or {}).get("goal", "")[:80],
@@ -73,7 +80,8 @@ def create_executor_node(llm, tools_list):
 
         # 收集依赖产出（直接从 DB 查，避免依赖已删除的 subtasks/executable 局部变量）
         deps_artifacts = []
-        for dep_id in nxt.get("dependencies", []):
+        _dep_ids = nxt.get("dependencies", []) if nxt else []
+        for dep_id in _dep_ids:
             dep_sub = next((s for s in mm.get_subtasks(task_plan_id) if s["id"] == dep_id), None)
             if dep_sub and dep_sub.get("artifacts"):
                 deps_artifacts.extend(dep_sub["artifacts"])
@@ -84,18 +92,20 @@ def create_executor_node(llm, tools_list):
         # 目标从 DB 读（state 不缓存）
         goal = (mm.get_task_plan_by_thread(thread_id) or {}).get("goal", "")
 
-        system_prompt = f"""执行子任务：{description}
-目标：{goal}
+        system_prompt = f"""你是执行子任务 {sub_id} 的执行器。目标：{goal}
 {artifacts_context}
-完成标准：文件创建且大小>0。
+{f'''【上次验证失败，需要修复】
+验证器反馈的问题：
+{fix_msg}
 
-执行纪律（必须遵守）：
-1. 探索（ls/read/grep/搜索）最多 3 次工具调用，之后必须直接撰写内容。
-2. 外部搜索（tavily）不可用时，基于你的既有知识直接撰写，不要反复重试搜索。
-3. 必须调用 write_file 产出文件到 deliverables 目录，文件大小 > 0 才算完成。
-4. 不要在没有产出文件的情况下结束；如果已完成撰写但文件没保存，立即补一次 write_file。
-5. 如果 deliverables 中已存在本任务的产出文件（之前规划/执行生成过），直接在其基础上完善/覆盖，不要重新从零探索。
-6. 输出：FINAL_ANSWER: [结果] 并附上文件名。
+修复要求：读取失败/相关的文件，修正问题后重新写入 deliverables。只修验证器指出的问题，不要重写整个项目。
+''' if fix_msg else ''}
+执行纪律（必须严格遵守）：
+1. 【探索限制】探索类工具（ls/glob/read_file）最多调用 2 次，之后必须直接撰写并写入文件。
+2. 【唯一产出】调用 write_file 写入 deliverables 目录（或已存在的交付文件），文件内容完整、大小>0。
+3. 【禁止空转】不要重复写入同一文件、不要为"凑工具调用"而调用工具。一次写完整。
+4. 【收尾】写完文件后立即结束，输出 FINAL_ANSWER: [完成说明 + 文件路径]，不要继续探索。
+5. 【失败即返回】若无法产出文件（如依赖缺失、权限错误），直接输出 FINAL_ANSWER: 失败原因，不要重试多次。
 """
 
         initial_messages = [
@@ -135,6 +145,8 @@ def create_executor_node(llm, tools_list):
             add_log_entry("info", f"工具: {name}", {"params": params, "result_preview": str(result)[:200]})
             # subtask 字段：标记工具归属的当前子任务，前端执行树据此把工具挂到对应子任务下
             add_event("tool_call", {"name": name, "params": params, "subtask": sub_id}, thread_id)
+            # trace：工具调用（含参数/结果摘要）
+            record_tool(thread_id, "executor", name, params, result)
 
         def _interrupt_handler(name, params):
             if name in _APPROVAL_TOOLS:
@@ -167,7 +179,7 @@ def create_executor_node(llm, tools_list):
                     return allow, None
             return True, None
 
-        loop = ReActLoop(llm_with_tools, max_iterations=5)
+        loop = ReActLoop(llm_with_tools, max_iterations=5, node="executor")
         final_result = None
         artifacts = []
         status = "failed"
@@ -193,7 +205,16 @@ def create_executor_node(llm, tools_list):
                 artifacts = []
                 status = "failed"
 
-        mm.update_subtask_status(task_plan_id, sub_id, status, result=final_result, artifacts=artifacts)
+        # 完成判定：声称 done 但无产出文件 → 降级为 failed（避免 validator 拿到空产出）
+        if status == "done" and not artifacts:
+            status = "failed"
+            final_result = (final_result or "") + "\n[自动判定] LLM 声称完成但未提取到产出文件，标记失败以触发反馈修复。"
+            print(f"  ⚠️ {sub_id} done 但无产出文件 → 降级 failed")
+        if status == "failed" and not final_result:
+            final_result = "执行失败（无产出）"
+        # 修复模式不写真实子任务（sub_id="fix"）；正常执行才更新 DB
+        if sub_id != "fix":
+            mm.update_subtask_status(task_plan_id, sub_id, status, result=final_result, artifacts=artifacts)
 
         if status == "done":
             print(f"  ✅ 完成，产出: {artifacts}")
@@ -228,8 +249,12 @@ def create_executor_node(llm, tools_list):
         if progress['all_done'] and progress['any_failed']:
             replans = replans + 1
             print(f"[Executor] 全部完成但有失败，_total_replans++ -> {replans}")
-        # 不再重建 state.task_plan（state 不缓存子任务列表）；路由/validator 都从 DB 读
-        return {"task_plan_id": task_plan_id, "_total_replans": replans}
+        # 修复模式：执行完成后清除修复信号，让 validator 重新验证
+        ret_extra = {}
+        if sub_id == "fix":
+            ret_extra = {"_validation_message": "", "_fix_attempts": 0}
+        record_node_end(thread_id, "executor", f"{'修复' if sub_id == 'fix' else '子任务' + str(sub_id)} {status}")
+        return {"task_plan_id": task_plan_id, "_total_replans": replans, **ret_extra}
     return executor_node
 
 def extract_artifacts(text: str) -> List[str]:

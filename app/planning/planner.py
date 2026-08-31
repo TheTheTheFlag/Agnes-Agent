@@ -37,7 +37,19 @@ def create_planner_node(llm):
             goal = "执行当前请求"
 
         system_prompt = """你是一个任务规划专家。将用户目标拆解为 2-4 个子任务。每个子任务包含 id, description, dependencies。输出 JSON 数组。"""
-        response = llm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=f"目标：{goal}")])
+        # trace：记录 LLM 输入输出
+        import time as _t
+        from app.trace import record_llm, record_node_start, record_node_end
+        record_node_start(thread_id, "planner")
+        _t0 = _t.time()
+        _prompt_msgs = [SystemMessage(content=system_prompt), HumanMessage(content=f"目标：{goal}")]
+        try:
+            response = llm.invoke(_prompt_msgs)
+        except Exception as _e:
+            from app.trace import record_error
+            record_error(thread_id, "planner", _e)
+            raise
+        record_llm(thread_id, "planner", _prompt_msgs, response, duration_ms=(_t.time() - _t0) * 1000)
         raw = response.content.strip()
         try:
             if raw.startswith("```json"):
@@ -57,9 +69,9 @@ def create_planner_node(llm):
                     item["dependencies"] = [str(dep) for dep in item["dependencies"]]
                 else:
                     item["dependencies"] = []
-            # 限制子任务数量不超过 4
-            if len(subtasks_data) > 4:
-                print(f"[Planner] 子任务数 {len(subtasks_data)} > 4，强制合并")
+            # 限制子任务数量 2-3 个（业界倾向小计划：子任务越少，上下文越干净、越不容易空转）
+            if len(subtasks_data) > 3:
+                print(f"[Planner] 子任务数 {len(subtasks_data)} > 3，强制合并")
                 combined_desc = "; ".join([item["description"] for item in subtasks_data[1:]])
                 subtasks_data = [
                     subtasks_data[0],
@@ -90,5 +102,7 @@ def create_planner_node(llm):
             "text": f"将目标拆解为 {len(subtasks_data)} 个子任务：\n{descs}",
             "subtask": "",
         }, thread_id)
+        from app.trace import record_node_end
+        record_node_end(thread_id, "planner", f"{len(subtasks_data)} 个子任务")
         return state
     return planner_node
