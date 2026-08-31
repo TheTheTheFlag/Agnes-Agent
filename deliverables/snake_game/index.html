@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🐍 贪吃蛇 Snake Game</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="app">
+        <header class="header">
+            <h1 class="title">🐍 贪吃蛇</h1>
+            <p class="subtitle">经典小游戏 · HTML5 Canvas · 本地运行</p>
+        </header>
+
+        <section class="scoreboard" aria-label="得分面板">
+            <div class="score-card">
+                <span class="score-label">当前得分</span>
+                <span class="score-value" id="currentScore">0</span>
+            </div>
+            <div class="score-card">
+                <span class="score-label">最高分</span>
+                <span class="score-value" id="highScore">0</span>
+            </div>
+            <div class="score-card">
+                <span class="score-label">长度</span>
+                <span class="score-value" id="snakeLength">3</span>
+            </div>
+        </section>
+
+        <main class="game-area">
+            <canvas id="gameCanvas" width="480" height="480" aria-label="游戏画布">
+                您的浏览器不支持 HTML5 Canvas，请升级浏览器后再试。
+            </canvas>
+
+            <!-- 开始界面 -->
+            <div class="overlay" id="startScreen">
+                <div class="overlay-card">
+                    <h2 class="overlay-title">准备好了吗？</h2>
+                    <p class="overlay-desc">
+                        使用 <kbd>↑</kbd> <kbd>↓</kbd> <kbd>←</kbd> <kbd>→</kbd> 或
+                        <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> 控制方向
+                        <br>按 <kbd>Space</kbd> 开始 / 暂停
+                    </p>
+                    <button class="btn btn-primary" id="startBtn" type="button">开始游戏</button>
+                </div>
+            </div>
+
+            <!-- 暂停界面 -->
+            <div class="overlay overlay-paused hidden" id="pauseScreen">
+                <div class="overlay-card">
+                    <h2 class="overlay-title">⏸ 暂停中</h2>
+                    <p class="overlay-desc">按 <kbd>Space</kbd> 或点击按钮继续</p>
+                    <button class="btn btn-primary" id="resumeBtn" type="button">继续游戏</button>
+                </div>
+            </div>
+
+            <!-- 结束界面 -->
+            <div class="overlay overlay-gameover hidden" id="gameOverScreen">
+                <div class="overlay-card">
+                    <h2 class="overlay-title">💀 游戏结束</h2>
+                    <p class="overlay-desc" id="gameOverReason"></p>
+                    <p class="overlay-desc">
+                        本次得分：<strong id="finalScore">0</strong>
+                    </p>
+                    <p class="overlay-desc new-record hidden" id="newRecordMsg">🏆 新纪录！恭喜你！</p>
+                    <button class="btn btn-primary" id="restartBtn" type="button">再来一局</button>
+                </div>
+            </div>
+        </main>
+
+        <section class="controls" aria-label="移动控制">
+            <p class="controls-hint">触屏 / 鼠标控制：</p>
+            <div class="dpad">
+                <button class="dpad-btn dpad-up" data-dir="up" type="button" aria-label="向上">▲</button>
+                <button class="dpad-btn dpad-left" data-dir="left" type="button" aria-label="向左">◀</button>
+                <button class="dpad-btn dpad-right" data-dir="right" type="button" aria-label="向右">▶</button>
+                <button class="dpad-btn dpad-down" data-dir="down" type="button" aria-label="向下">▼</button>
+            </div>
+        </section>
+
+        <footer class="footer">
+            <p>每吃一个食物 <strong>+10</strong> 分 · 撞墙或撞自己即结束 · 方向键 / WASD / 滑动均可控制</p>
+        </footer>
+    </div>
+
+    <script src="game.js" defer></script>
+</body>
+</html>

@@ -1,4 +1,4 @@
-import sys, os, json, subprocess, re
+import sys, os, json, subprocess, re, html.parser
 from typing import Dict, Any
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app.graph.state import State
@@ -116,26 +116,33 @@ def validate_file(file_path: str) -> Dict[str, str]:
     # HTML
     if ext == '.html':
         try:
-            result = subprocess.run(["python", "-c", f"import html.parser; html.parser.HTMLParser().feed(open('{file_path}').read())"],
-                                   capture_output=True, text=True, timeout=10)
-            return {"level": "pass" if result.returncode == 0 else "error",
-                    "message": f"{file_path}: {'通过' if result.returncode == 0 else '语法错误 - ' + result.stderr[:200]}"}
+            # 直接用内置 html.parser（避免 subprocess 在 Windows 上 GBK 解码 UTF-8 文件失败）
+            with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+                html.parser.HTMLParser().feed(f.read())
+            return {"level": "pass", "message": f"{file_path}: HTML 语法正确"}
         except Exception as e:
-            return {"level": "warning", "message": f"{file_path}: 验证异常 - {e}"}
+            return {"level": "error", "message": f"{file_path}: 语法错误 - {str(e)[:200]}"}
 
     # JavaScript
     if ext == '.js':
         try:
-            result = subprocess.run(["node", "--check", file_path], capture_output=True, text=True, timeout=10)
+            # 优先 node --check（要求系统安装 Node）；用 UTF-8 显式读 stderr，
+            # 避免 Windows GBK 解码失败。如失败再回退到括号匹配（粗略校验）
+            result = subprocess.run(["node", "--check", file_path], capture_output=True, encoding='utf-8', errors='replace', timeout=10)
             if result.returncode == 0:
                 return {"level": "pass", "message": f"{file_path}: JS 语法正确"}
             return {"level": "error", "message": f"{file_path}: JS 语法错误 - {result.stderr[:200]}"}
         except FileNotFoundError:
-            with open(file_path, 'r') as f:
-                content = f.read()
-            if content.count('{') == content.count('}') and content.count('[') == content.count(']'):
-                return {"level": "warning", "message": f"{file_path}: 括号匹配（Node.js 未安装）"}
-            return {"level": "error", "message": f"{file_path}: 括号不匹配"}
+            try:
+                with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+                    content = f.read()
+                if content.count('{') == content.count('}') and content.count('[') == content.count(']'):
+                    return {"level": "warning", "message": f"{file_path}: 括号匹配（Node.js 未安装）"}
+                return {"level": "error", "message": f"{file_path}: 括号不匹配"}
+            except Exception as e:
+                return {"level": "warning", "message": f"{file_path}: 读取异常 - {e}"}
+        except Exception as e:
+            return {"level": "warning", "message": f"{file_path}: 验证异常 - {e}"}
 
     # Python
     if ext == '.py':
@@ -149,7 +156,7 @@ def validate_file(file_path: str) -> Dict[str, str]:
     # JSON
     if ext == '.json':
         try:
-            with open(file_path, 'r') as f:
+            with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
                 json.load(f)
             return {"level": "pass", "message": f"{file_path}: JSON 格式正确"}
         except json.JSONDecodeError as e:
@@ -158,7 +165,7 @@ def validate_file(file_path: str) -> Dict[str, str]:
     # Shell
     if ext in ['.sh', '.bash']:
         try:
-            result = subprocess.run(["bash", "-n", file_path], capture_output=True, text=True, timeout=10)
+            result = subprocess.run(["bash", "-n", file_path], capture_output=True, encoding='utf-8', errors='replace', timeout=10)
             if result.returncode == 0:
                 return {"level": "pass", "message": f"{file_path}: Shell 语法正确"}
             return {"level": "warning", "message": f"{file_path}: Shell 警告 - {result.stderr[:200]}"}
@@ -167,21 +174,21 @@ def validate_file(file_path: str) -> Dict[str, str]:
 
     # CSS
     if ext == '.css':
-        with open(file_path, 'r') as f:
+        with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
             content = f.read()
         return {"level": "pass" if content.count('{') == content.count('}') else "warning",
                 "message": f"{file_path}: {'括号匹配' if content.count('{') == content.count('}') else '括号不匹配'}"}
 
     # 文档
     if ext in ['.md', '.rst', '.txt']:
-        with open(file_path, 'r') as f:
+        with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
             content = f.read()
         return {"level": "pass" if len(content.split('\n')) >= 3 else "warning",
                 "message": f"{file_path}: {'通过' if len(content.split('\n')) >= 3 else '内容过短'}"}
 
     # 未知类型
     try:
-        with open(file_path, 'r') as f:
+        with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
             content = f.read()
         return {"level": "pass" if content.strip() else "warning",
                 "message": f"{file_path}: {'通过' if content.strip() else '文件为空'}"}
