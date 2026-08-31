@@ -1,3 +1,0 @@
-{"type": "node_start", "ts": "2026-08-31T13:13:13.370", "ts_ms": 1788153193370.385, "data": {"node": "chatbot"}}
-{"type": "error", "ts": "2026-08-31T13:13:16.763", "ts_ms": 1788153196763.491, "data": {"node": "chatbot", "message": "RetryError[<Future at 0x272c04e6ea0 state=finished raised TypeError>]"}}
-{"type": "node_end", "ts": "2026-08-31T13:13:20.697", "ts_ms": 1788153200697.5642, "data": {"node": "chatbot", "result": "LLM 调用失败: TypeError: chat_invoke() takes 2 positional arguments but 3 were given | 当前消息约 2414 tokens"}}

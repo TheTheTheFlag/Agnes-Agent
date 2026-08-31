@@ -4,9 +4,15 @@
 捕获并推给前端。其文本以摘要结构 marker（如 "**用户目标"）开头，若只按"完整 marker 包含"
 检测，marker 前缀 token（如 "**用户"）会先泄漏到聊天框。
 修复：累积文本是任一 marker 的前缀时，立即判定为内部摘要并丢弃该段。
+另外：langgraph messages 流对同一次 LLM 调用会先 emit 流式 chunk（AIMessageChunk），
+再在 on_llm_end emit 完整消息（AIMessage），chat.py 只推送 AIMessageChunk 避免回复
+被流式显示两遍——test_end_message_excluded 验证该类型判断的前提。
+
 运行：uv run python -m unittest tests.test_chat_filter -v
 """
 import unittest
+
+from langchain_core.messages import AIMessage, AIMessageChunk
 
 from app.server.api.chat import _filter_internal_tokens
 
@@ -50,6 +56,14 @@ class ChatFilterTest(unittest.TestCase):
     def test_non_chatbot_node_passthrough(self):
         """非 chatbot 节点的 token 不做过滤。"""
         self.assertEqual(_filter_internal_tokens("executor", "E", "**用户", {}), "**用户")
+
+    def test_end_message_excluded(self):
+        """messages 流双 emit 去重前提：on_llm_end 的完整消息（AIMessage）与流式
+        chunk（AIMessageChunk）类型不同，chat.py 只处理 AIMessageChunk 即可去掉重复。"""
+        chunk = AIMessageChunk(content="你好，我是 Agnes，由 Sapiens AI 开发。有什么可以帮你的？")
+        end_msg = AIMessage(content="你好，我是 Agnes，由 Sapiens AI 开发。有什么可以帮你的？")
+        self.assertIsInstance(chunk, AIMessageChunk)
+        self.assertNotIsInstance(end_msg, AIMessageChunk)
 
     def test_page_shown_text_matches_reply(self):
         """模拟真实轮次（主回复 run A → 内部摘要 run B），前端显示文本 == 主回复。"""
