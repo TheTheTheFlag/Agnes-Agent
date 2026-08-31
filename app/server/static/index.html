@@ -92,7 +92,7 @@
         /* 主对话窗口 */
         .chat-wrap { display: flex; flex-direction: column; height: calc(100vh - 220px); min-height: 500px; background: rgba(255,255,255,0.85); border: 1px solid var(--line); border-radius: 16px; box-shadow: 0 4px 16px rgba(166,99,204,0.08); }
         .chat-toolbar { padding: 10px 16px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--ink-soft); }
-        .chat-messages { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 14px; }
+        .chat-messages { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 14px; background: #f9fafb; }
         .chat-input-wrap { border-top: 1px solid var(--line); padding: 10px; position: relative; }
         .chat-status-line { display: flex; align-items: center; gap: 8px; padding: 4px 2px 8px; font-size: 12px; color: var(--ink-soft); min-height: 20px; }
 
@@ -137,6 +137,12 @@
         .chat-bubble.tool { background: rgba(166,99,204,0.1); align-self: stretch; border: 1px solid rgba(166,99,204,0.35); font-family: monospace; font-size: 12px; max-width: 95%; color: var(--ink); }
         .chat-bubble .meta { font-size: 11px; color: #6b7280; margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--line); }
         .chat-bubble.thinking { opacity: 0.75; font-style: italic; }
+        /* ChatGPT 风格：AI 气泡顶部的模型标签 */
+        .chat-bubble.assistant .chat-model-tag { font-size: 11px; color: #9ca3af; margin-bottom: 4px; font-weight: 600; }
+        /* ChatGPT 风格：气泡底部时间戳 */
+        .chat-bubble-time { font-size: 10px; color: #9ca3af; margin-top: 4px; text-align: right; }
+        .chat-bubble.user .chat-bubble-time { text-align: right; }
+        .chat-bubble.assistant .chat-bubble-time { text-align: left; }
         /* 思考/工具过程：独立折叠气泡（区别于最终回复气泡），点开可看 LLM 思考文本+工具调用 */
         .chat-bubble.thinking-bubble { background: rgba(255,255,255,0.55); border: 1px dashed var(--line); border-radius: 10px; padding: 6px 12px; margin: 4px 0; font-size: 12px; color: var(--ink-soft); align-self: stretch; cursor: pointer; user-select: none; max-width: 95%; }
         .chat-bubble.thinking-bubble .tb-body { display: none; margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--line); white-space: pre-wrap; color: var(--ink); font-family: monospace; font-size: 12px; }
@@ -906,6 +912,7 @@
         ];
         let chatAbort = null;
         let currentThreadId = null;
+        let currentModelName = '';  // AI 气泡顶部标签用（initChatModelBar 异步拉取后填）
 
         function updateChatThreadLabel() {
             // 仅在页面初始（currentThreadId 未设置）时从列表取最新会话；
@@ -967,11 +974,28 @@
                 div.className = 'chat-bubble thinking-bubble collapsed';
             } else {
                 div.className = 'chat-bubble ' + role + (role === 'assistant' ? ' md-body' : '');
+                // ChatGPT 风格：每条消息记录时间戳
+                div.dataset.ts = new Date().toISOString();
+            }
+            // ChatGPT 风格：assistant 气泡顶部加模型名小标签
+            if (role === 'assistant' && !div.querySelector('.chat-model-tag')) {
+                const tag = document.createElement('div');
+                tag.className = 'chat-model-tag';
+                tag.textContent = (currentModelName || 'AI') + ' · 助手';
+                div.insertBefore(tag, div.firstChild);
             }
             if (useMarkdown) {
                 div.innerHTML = renderMarkdown(content);
             } else {
                 div.textContent = content;
+            }
+            // 底部时间戳（ChatGPT 风格：灰色小字）
+            if (role === 'user' || role === 'assistant') {
+                const ts = document.createElement('div');
+                ts.className = 'chat-bubble-time';
+                const d = new Date();
+                ts.textContent = d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+                div.appendChild(ts);
             }
             if (meta) {
                 const m = document.createElement('div');
@@ -982,6 +1006,15 @@
             c.appendChild(div);
             c.scrollTop = c.scrollHeight;
             return div;
+        }
+
+        // ChatGPT 风格：更新 assistant 气泡内容时保留顶部模型标签
+        function setAssistantContent(el, html) {
+            if (!el) return;
+            const tag = el.querySelector('.chat-model-tag');
+            const tagHtml = tag ? tag.outerHTML : '';
+            el.innerHTML = html;
+            if (tagHtml) el.insertAdjacentHTML('afterbegin', tagHtml);
         }
 
         // 防重入：一次只允许一个发送（IME Enter、双击等重复触发直接忽略）
@@ -1090,6 +1123,9 @@
                 if (!info) { m.innerHTML = '<option value="">（无）</option>'; return; }
                 m.innerHTML = (info.models || []).map(x => `<option value="${x}">${x}</option>`).join('');
                 if (selected && (info.models || []).includes(selected)) m.value = selected;
+                // 记录当前模型名（AI 气泡标签用）
+                currentModelName = selected || m.value || '';
+                if (currentModelName) document.getElementById('currentModelLabel').textContent = '模型: ' + currentModelName;
             });
         }
         async function setChatDefaultModel() {
@@ -1212,7 +1248,7 @@
                             setChatStatus('✅ 完成', false);
                             // final 事件：把最终回复写到 reply 气泡
                             reply.classList.remove('thinking');
-                            if (finalText) reply.innerHTML = renderMarkdown(cleanReply(finalText));
+                            if (finalText) setAssistantContent(reply, renderMarkdown(cleanReply(finalText)));
                         } else if (evt.step === 'approval') {
                             // 需要审批：停止流式，显示审批气泡
                             sawApproval = true;
@@ -1232,7 +1268,7 @@
                     // （原逻辑：直接 return 跳过渲染，导致内部摘要污染停留在 thinking 框）
                     if (finalText) {
                         reply.classList.remove('thinking');
-                        reply.innerHTML = renderMarkdown(cleanReply(finalText));
+                        setAssistantContent(reply, renderMarkdown(cleanReply(finalText)));
                     }
                     setChatStatus('⏸ 等待审批', false);
                     return;
@@ -1242,7 +1278,7 @@
                     const cleaned = cleanReply(chatbotText);
                     if (cleaned) {
                         reply.classList.remove('thinking');
-                        reply.innerHTML = renderMarkdown(cleaned);
+                        setAssistantContent(reply, renderMarkdown(cleaned));
                     }
                 }
                 if (!reply.innerHTML.trim() || reply.innerHTML === '') {
@@ -1253,7 +1289,7 @@
                         const msgs = st.messages || [];
                         const lastAI = [...msgs].reverse().find(m => (m.type === 'ai' || m.role === 'assistant') && (m.content || m.text));
                         const txt = lastAI ? (lastAI.content || lastAI.text || '') : '';
-                        if (txt) reply.innerHTML = renderMarkdown(txt);
+                        if (txt) setAssistantContent(reply, renderMarkdown(txt));
                         else reply.textContent = '（无回复）';
                     } catch (e2) { reply.textContent = '（无回复）'; }
                 }
