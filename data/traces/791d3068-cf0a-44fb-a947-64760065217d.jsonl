@@ -21,3 +21,6 @@
 {"type": "node_start", "ts": "2026-08-31T15:41:55.193", "ts_ms": 1788162115193.8066, "data": {"node": "chatbot"}}
 {"type": "llm_call", "ts": "2026-08-31T15:42:00.295", "ts_ms": 1788162120295.5598, "data": {"node": "chatbot", "model": "deepseek-v4-pro", "duration_ms": 5027.3, "input": "[system] 当前操作系统是 Windows。\n当前时间：2026-08-31 15:41:55。\n当前工作目录：C:\\Users\\17625\\Agnes-Agent。\n所有生成的文件必须保存到交付物目录：`C:\\Users\\17625\\Agnes-Agent\\deliverables`。\n【禁止】严禁向以下核心目录/文件写入或修改：app/server/static（前端面板）、data/（数据库与配置）、.env、.model_config、.git/、pyproject.toml、uv.lock、checkpoints.db、memory.db。所有产出（代码、文档、资源）只能写入 `C:\\Users…(+4290)\n[human] 你好", "output": "你好呀，旅行者！今天有什么想让我帮忙的吗？"}}
 {"type": "node_end", "ts": "2026-08-31T15:42:02.883", "ts_ms": 1788162122883.4082, "data": {"node": "chatbot", "result": "你好呀，旅行者！今天有什么想让我帮忙的吗？"}}
+{"type": "error", "ts": "2026-08-31T15:42:44.807", "ts_ms": 1788162164807.5884, "data": {"node": "chatbot", "message": "RetryError[<Future at 0x2163b8cc470 state=finished raised TypeError>]"}}
+{"type": "node_start", "ts": "2026-08-31T15:42:54.877", "ts_ms": 1788162174877.69, "data": {"node": "chatbot"}}
+{"type": "node_end", "ts": "2026-08-31T15:42:58.001", "ts_ms": 1788162178001.3704, "data": {"node": "chatbot", "result": "LLM 调用失败: TypeError: APIStatusError.__init__() missing 2 required keyword-only arguments: 'response' and 'body' | 当前消息约 2628 tokens"}}
