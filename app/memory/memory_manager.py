@@ -3,6 +3,18 @@ import json
 from datetime import datetime
 from typing import Optional, Dict, List, Any
 from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.callbacks import CallbackManager
+
+
+def _silent_invoke(llm, messages):
+    """内部 LLM 调用（摘要生成/重要性评估等，非对话主回复）。
+
+    用空的 CallbackManager 隔离回调：这些调用发生在 chatbot 节点内部，若不加隔离，
+    其 token 会经 langchain 回调冒泡到 langgraph 的 messages 流（stream_mode="messages"），
+    被 chat.py 的 SSE 推给前端，污染聊天框（表现为回复末尾多出 "**用户" 等摘要前缀）。
+    隔离后 token 只发给空管理器，前端只收到主回复的 token。
+    """
+    return llm.invoke(messages, config={"callbacks": CallbackManager([])})
 
 class MemoryManager:
     """精简版记忆管理器：存储用户画像、偏好、任务计划、智能摘要，以及消息记录（用于分析）"""
@@ -394,7 +406,7 @@ class MemoryManager:
             )
         )
         human_msg = HumanMessage(content=conversation_text)
-        response = llm.invoke([prompt, human_msg])
+        response = _silent_invoke(llm, [prompt, human_msg])
         return response.content
 
     def save_summary(self, thread_id: str, summary_text: str, start_time: datetime = None, end_time: datetime = None):
@@ -439,7 +451,7 @@ class MemoryManager:
             SystemMessage(content="你是一个摘要生成助手，根据对话内容生成结构化摘要。"),
             HumanMessage(content=user_content)
         ]
-        response = llm.invoke(messages)
+        response = _silent_invoke(llm, messages)
         return response.content
 
     # -------------------- LLM 重要性评估 --------------------
@@ -469,7 +481,7 @@ class MemoryManager:
                 f"消息列表：\n{text}"
             )
         )
-        response = llm.invoke([prompt])
+        response = _silent_invoke(llm, [prompt])
         try:
             data = json.loads(response.content)
             keep_indices = [item['index'] for item in data if item.get('label') == 'keep']
