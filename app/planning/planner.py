@@ -69,13 +69,15 @@ def create_planner_node(llm):
                     item["dependencies"] = [str(dep) for dep in item["dependencies"]]
                 else:
                     item["dependencies"] = []
-            # 限制子任务数量 2-3 个（业界倾向小计划：子任务越少，上下文越干净、越不容易空转）
+            # 限制子任务数量 2-3 个（业界倾向小计划：子任务越少，上下文越干净、越不容易空转）。
+            # >3 时合并到第 3 个（保留前 2 个 + 剩余并成一个），避免"完成剩余工作"这种巨型任务让 LLM 迷失。
             if len(subtasks_data) > 3:
-                print(f"[Planner] 子任务数 {len(subtasks_data)} > 3，强制合并")
-                combined_desc = "; ".join([item["description"] for item in subtasks_data[1:]])
-                subtasks_data = [
-                    subtasks_data[0],
-                    {"id": "2", "description": f"完成剩余工作：{combined_desc}", "dependencies": [str(subtasks_data[0]["id"])]}
+                print(f"[Planner] 子任务数 {len(subtasks_data)} > 3，合并到 3 个")
+                tail_desc = "; ".join([item["description"] for item in subtasks_data[2:]])
+                # 第 3 个子任务依赖前 2 个都完成
+                deps3 = [str(subtasks_data[0]["id"]), str(subtasks_data[1]["id"])]
+                subtasks_data = subtasks_data[:2] + [
+                    {"id": "3", "description": tail_desc, "dependencies": deps3}
                 ]
         except Exception as e:
             print(f"[Planner] 解析失败: {e}，使用降级方案")

@@ -48,17 +48,12 @@ def validate_html(file_path: str) -> str:
     else:
         checks.append("✗ 缺少 <script>")
 
-    # 检查关键函数（游戏相关）
-    key_functions = ["function startGame", "function gameOver", "function updateGame", "function initGame",
-                     "function drawGame", "function spawnFood", "function checkCollision"]
-    found_functions = []
-    for func in key_functions:
-        if func in content:
-            found_functions.append(func)
-    if found_functions:
-        checks.append(f"✓ 发现关键函数: {', '.join(found_functions)}")
+    # 标签配对粗查（通用 HTML 校验，不再针对游戏函数）
+    opens = len(re.findall(r'<([a-zA-Z][a-zA-Z0-9]*)[^>]*>(?!.*</\1>)', content))
+    if opens > 0:
+        checks.append("⚠️ 有疑似未闭合标签（建议人工检查）")
     else:
-        checks.append("✗ 未发现任何游戏关键函数 (建议至少包含 startGame, gameOver, updateGame)")
+        checks.append("✓ 标签结构基本完整")
 
     # 尝试使用 htmlhint（如果安装）
     htmlhint_result = ""

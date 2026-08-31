@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}{{ config.BLOG_TITLE }}{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <header class="site-header">
+        <div class="container">
+            <h1><a href="{{ url_for('blog.index') }}">{{ config.BLOG_TITLE }}</a></h1>
+            <p class="subtitle">{{ config.BLOG_SUBTITLE }}</p>
+            <nav>
+                <a href="{{ url_for('blog.index') }}">首页</a>
+                <a href="{{ url_for('blog.new') }}">写文章</a>
+                <a href="{{ url_for('blog.about') }}">关于</a>
+            </nav>
+        </div>
+    </header>
+
+    <main class="container">
+        {% block content %}{% endblock %}
+    </main>
+
+    <footer class="site-footer">
+        <div class="container">
+            <p>&copy; 2024 {{ config.BLOG_AUTHOR }}. All rights reserved.</p>
+        </div>
+    </footer>
+
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>

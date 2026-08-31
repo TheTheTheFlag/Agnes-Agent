@@ -116,6 +116,14 @@ def create_executor_node(llm, tools_list):
         # 需审批的工具（与 chatbot 一致）：命令执行 + 文件写/改/删
         _APPROVAL_TOOLS = ("execute_command", "write_file", "edit_file", "delete_file")
 
+        # 工具调用硬约束（不依赖 LLM 自觉，ReActLoop 层强制）：
+        #   - 探索类（ls/glob/read_file/execute_command）累计 ≤2 次，超限拒绝
+        #   - 写入类（write_file/edit_file/delete_file）累计 ≤8 次，超限拒绝
+        #   - write_file 路径必须 deliverables 开头（禁止写根目录/其他位置）
+        _tool_usage = {"explore": 0, "write": 0}
+        _EXPLORE_TOOLS = ("ls", "glob_files", "read_file", "execute_command")
+        _WRITE_TOOLS = ("write_file", "edit_file", "delete_file")
+
         def _on_tool_before(name, params):
             if name in ("execute_command",):
                 cmd = params.get('command', '')
@@ -123,6 +131,25 @@ def create_executor_node(llm, tools_list):
                     if d in cmd:
                         print(f"⚠️ [安全] 阻止: {cmd}")
                         return False
+            # 探索上限
+            if name in _EXPLORE_TOOLS:
+                if _tool_usage["explore"] >= 2:
+                    print(f"⛔ 探索次数已达上限（2），拒绝 {name}，请直接撰写并写入文件")
+                    return False
+                _tool_usage["explore"] += 1
+            # 写入上限
+            if name in _WRITE_TOOLS:
+                if _tool_usage["write"] >= 8:
+                    print(f"⛔ 写入次数已达上限（8），拒绝 {name}，请结束")
+                    return False
+                _tool_usage["write"] += 1
+            # write_file 强制 deliverables 前缀
+            if name in ("write_file", "edit_file", "delete_file"):
+                path = str(params.get('path', '') or '')
+                norm = path.replace('\\', '/')
+                if not norm.startswith('deliverables/'):
+                    print(f"⛔ 路径必须写入 deliverables/：{path}")
+                    return False
             return True
 
         def _on_tool_after(name, params, result):

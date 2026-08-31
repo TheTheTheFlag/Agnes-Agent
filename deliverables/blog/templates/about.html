@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+
+{% block title %}关于 - {{ config.BLOG_TITLE }}{% endblock %}
+
+{% block content %}
+<div class="about-page">
+    <h1>关于</h1>
+    
+    <div class="about-content">
+        <p>这是一个使用 Flask + HTML/CSS/JavaScript 构建的简单博客系统。</p>
+        
+        <h2>技术栈</h2>
+        <ul>
+            <li><strong>后端</strong>：Python + Flask</li>
+            <li><strong>前端</strong>：HTML5 + CSS3 + 原生JavaScript</li>
+            <li><strong>存储</strong>：JSON文件</li>
+            <li><strong>渲染</strong>：Markdown</li>
+        </ul>
+        
+        <h2>功能</h2>
+        <ul>
+            <li>✍️ 创建和编辑文章</li>
+            <li>📄 Markdown 支持</li>
+            <li>🏷️ 标签分类</li>
+            <li>📱 响应式设计</li>
+        </ul>
+        
+        <h2>开始使用</h2>
+        <pre><code># 安装依赖
+pip install -r requirements.txt
+
+# 启动服务
+python run.py
+
+# 访问
+http://localhost:5000</code></pre>
+    </div>
+</div>
+{% endblock %}

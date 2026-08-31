@@ -15,6 +15,8 @@ class ReActLoop:
         # trace：LLM 调用归属的节点名 + 会话 id
         self._trace_node = node
         self._trace_thread_id = None
+        # 纪律：连续被拒工具计数（ReActLoop 层强制终止）
+        self._reject_count = 0
 
     def run(self, messages, tools, on_tool_before=None, on_tool_after=None,
             interrupt_handler=None, state=None, on_before_llm=None, verbose=True):
@@ -96,6 +98,11 @@ class ReActLoop:
                         messages.append(response)
                         response_appended = True
                     messages.append(ToolMessage(content="[安全策略] 该工具调用被拒绝执行", tool_call_id=tool_id))
+                    # 连续被拒 3 次 → 强制终止（LLM 反复尝试违规工具 = 纪律失控）
+                    self._reject_count = getattr(self, "_reject_count", 0) + 1
+                    if self._reject_count >= 3:
+                        final_answer = "[纪律] 连续 3 次工具调用被拒绝（探索/写入超限或路径违规），终止本轮。"
+                        break
                     continue
 
                 # 2) 审批：interrupt 由 langgraph 挂起（GraphInterrupt 冒泡），
@@ -167,6 +174,10 @@ class ReActLoop:
                         messages.append(response)
                         response_appended = True
                     messages.append(ToolMessage(content=result_str, tool_call_id=tool_id))
+
+            # 纪律强制终止：连续被拒 ≥3 次 → 退出整个 ReAct 循环（保留纪律消息，不再覆盖）
+            if getattr(self, "_reject_count", 0) >= 3:
+                break
 
         if final_answer is None:
             final_answer = self._force_answer(messages)
