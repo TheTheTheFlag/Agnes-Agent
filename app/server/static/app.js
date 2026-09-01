@@ -599,7 +599,12 @@ async function readSSE(response, onEvent) {
         const line = chunk.split("\n").find((l) => l.startsWith("data: "));
         if (!line) continue;
         try {
-          onEvent(JSON.parse(line.slice(6)));
+          const parsed = JSON.parse(line.slice(6));
+          // 临时诊断：打印每个 SSE 事件，确认 tool/tool_chunk 是否真的到达前端
+          if (window.__diagSSE) {
+            console.log("[SSE]", parsed.step, parsed.name || "", parsed.phase || "", parsed.node || "");
+          }
+          onEvent(parsed);
         } catch (e) { /* 忽略坏帧 */ }
       }
     }

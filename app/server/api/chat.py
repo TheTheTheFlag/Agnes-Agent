@@ -125,6 +125,17 @@ async def chat_endpoint(payload: dict):
                                 if text:
                                     sync_q.put({"step": "token", "text": text, "node": node})
                             # 工具调用参数增量也透传（便于前端展示意图）
+                            # 关键：AIMessageChunk.tool_calls（非 _chunks 后缀）是完整字段，
+                            # 在第一个非空 chunk 就有 name+id+args；tool_call_chunks 早期可能为 null
+                            tc_full = getattr(chunk, "tool_calls", None)
+                            if tc_full:
+                                for tc in tc_full:
+                                    tc_name = getattr(tc, "name", None)
+                                    tc_args = getattr(tc, "args", {}) or {}
+                                    if isinstance(tc_args, dict):
+                                        tc_args = json.dumps(tc_args, ensure_ascii=False)
+                                    sync_q.put({"step": "tool_chunk", "name": tc_name, "args": str(tc_args)[:200], "node": node})
+                            # 兼容老路径：tool_call_chunks
                             tool_calls = getattr(chunk, "tool_call_chunks", None)
                             if tool_calls:
                                 for tc in tool_calls:
