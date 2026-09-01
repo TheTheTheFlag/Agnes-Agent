@@ -508,7 +508,8 @@ function endStreaming(finalText) {
     const hasCards = $(".tool-card, .approval-card", host);
     if (!State.streamBuffer && !hasCards) host.remove();
   }
-  State.currentAssistantEl = null;
+  // 不在这里清 State.currentAssistantEl —— 后续 token/final 仍要往这个气泡里写
+  // 只在 done/error 事件里显式清（避免重复创建气泡的 bug）
   State.streamBuffer = "";
   State.pendingToolCard = null;
   scrollToBottom();
@@ -573,11 +574,14 @@ function handleChatEvent(evt) {
     endStreaming();
     setLiveBadge(false);
     setLiveStatusIdle();
+    // 真正的流结束：清空 currentAssistantEl，下次新消息时建新气泡
+    State.currentAssistantEl = null;
   } else if (step === "error") {
     endStreaming();
     setLiveBadge(false);
     setLiveStatusIdle();
     addErrorBubble(evt.message || "未知错误");
+    State.currentAssistantEl = null;
   } else if (step === "heartbeat" || step === "__close__") {
     // 忽略
   }
