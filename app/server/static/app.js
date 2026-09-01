@@ -16,6 +16,8 @@ const State = {
   streamBuffer: "",           // token 累积缓冲
   renderTimer: null,
   pendingToolCard: null,      // tool_chunk 阶段的目标卡片
+  liveToolName: "",           // LiveStatus 当前工具名（chunk 增量累积用）
+  liveArgs: "",               // LiveStatus 参数累积缓冲
   approvalCard: null,         // 当前审批卡片
   drawerTab: null,
   sse: null,
@@ -513,6 +515,8 @@ function setLiveStatusIdle() {
   if (!root || !text) return;
   root.classList.remove("running");
   text.textContent = "空闲";
+  State.liveToolName = "";
+  State.liveArgs = "";
 }
 
 function endStreaming(finalText) {
@@ -565,7 +569,17 @@ function handleChatEvent(evt) {
       State.pendingToolCard = attachToolCard(evt.name);
     }
     updateToolCard(evt);
-    // 极简 LiveStatus: 只在 tool 结束时更新一次（不做 chunk 累积 / 不做去重）
+    // 极简 LiveStatus：显示当前工具 name + args。
+    // 网关把工具调用增量按 chunk 投递：首个 chunk 带 name，后续 chunk 只有 args 片段
+    //（JSON 片段如 '{'、'limit'、': 5'…），这里按序拼接，实时刷新状态行。
+    if (evt.name) {
+      State.liveToolName = evt.name;
+      State.liveArgs = evt.args || "";
+      setLiveStatus(State.liveToolName, State.liveArgs);
+    } else if (step === "tool_chunk" && State.liveToolName) {
+      State.liveArgs = (State.liveArgs || "") + (evt.args || "");
+      setLiveStatus(State.liveToolName, State.liveArgs);
+    }
     if (step === "tool" && evt.phase === "end" && evt.name) {
       setLiveStatus(evt.name, evt.args || "");
     }
