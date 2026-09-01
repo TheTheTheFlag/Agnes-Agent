@@ -91,6 +91,11 @@
 
     <!-- ==================== 输入区 ==================== -->
     <footer id="composer">
+      <!-- 实时状态行：显示当前轮次 / node / 正在执行的工具（永远可见，空闲时显示"空闲"） -->
+      <div id="liveStatus" class="live-status" aria-live="polite">
+        <span class="live-status-dot"></span>
+        <span class="live-status-text">空闲</span>
+      </div>
       <div id="cmdMenu" class="cmd-menu hidden"></div>
       <div class="composer-box">
         <textarea id="chatInput" rows="1" placeholder="给 Agnes 发送消息…（Enter 发送 / Shift+Enter 换行）" autocomplete="off"></textarea>
