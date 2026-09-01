@@ -164,12 +164,18 @@ async def chat_endpoint(payload: dict):
                                 _tcs = getattr(chunk, "tool_calls", None)
                                 _tccs = getattr(chunk, "tool_call_chunks", None)
                                 _diag_logger.info(f"chunk tool_calls={_tcs}  tool_call_chunks={_tccs}")
+                            # langchain 在 chunk 流里 tool_calls 元素可能是 dict 也可能是对象（langgraph v1+ 用 dict）
+                            # 必须两种情况都支持
+                            def _gf(tc, key, default=None):
+                                if isinstance(tc, dict):
+                                    return tc.get(key, default)
+                                return getattr(tc, key, default)
                             tc_full = getattr(chunk, "tool_calls", None)
                             if tc_full:
                                 for tc in tc_full:
-                                    tc_name = getattr(tc, "name", None)
-                                    tc_args = getattr(tc, "args", {}) or {}
-                                    tc_id = getattr(tc, "id", None)
+                                    tc_name = _gf(tc, "name")
+                                    tc_args = _gf(tc, "args", {}) or {}
+                                    tc_id = _gf(tc, "id")
                                     # 只推带 name 且 id 未见过的（避免被 delta 覆盖的 None 推上去）
                                     if tc_name and tc_id and tc_id not in _seen_tool_ids:
                                         _seen_tool_ids.add(tc_id)
@@ -182,9 +188,9 @@ async def chat_endpoint(payload: dict):
                             tool_calls = getattr(chunk, "tool_call_chunks", None)
                             if tool_calls:
                                 for tc in tool_calls:
-                                    tc_name = getattr(tc, "name", None)
-                                    tc_args = getattr(tc, "args", "") or ""
-                                    tc_id = getattr(tc, "id", None)
+                                    tc_name = _gf(tc, "name")
+                                    tc_args = _gf(tc, "args", "") or ""
+                                    tc_id = _gf(tc, "id")
                                     if _diag:
                                         _diag_logger.info(f"tool_chunk(old) name={tc_name} id={tc_id} args={str(tc_args)[:80]}")
                                     # 只有见过 id 才推（避免 name=None/id=None 噪声；seen 集合里有了说明是同一工具的 args 增量）
