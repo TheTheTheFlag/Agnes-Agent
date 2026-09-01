@@ -527,11 +527,10 @@ function handleChatEvent(evt) {
       endStreaming();
     }
     setLiveBadge(evt.phase === "start");
-    // live status 跟随：start 进入 node / end 还原
+    // live status 跟随：start 进入 node；end 不重置（chatbot→planner→executor 链式流转，
+    // 跨 node 仍要保持"运行中"显示；只有 done/error 才回 idle）
     if (evt.phase === "start") {
       setLiveStatusRunning(evt.name);
-    } else if (evt.phase === "end") {
-      setLiveStatusIdle();
     }
   } else if (step === "token") {
     appendStreamToken(evt.text || "");
@@ -617,6 +616,7 @@ async function sendMessage(text, opts) {
 
   State.streaming = true;
   setLiveBadge(true);
+  setLiveStatusRunning("chatbot");  // 立即显示状态，不必等第一个 node 事件
   updateComposer();
   State.chatAbort = new AbortController();
 
