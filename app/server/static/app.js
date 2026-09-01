@@ -527,6 +527,12 @@ function handleChatEvent(evt) {
       endStreaming();
     }
     setLiveBadge(evt.phase === "start");
+    // live status 跟随：start 进入 node / end 还原
+    if (evt.phase === "start") {
+      setLiveStatusRunning(evt.name);
+    } else if (evt.phase === "end") {
+      setLiveStatusIdle();
+    }
   } else if (step === "token") {
     appendStreamToken(evt.text || "");
   } else if (step === "tool_chunk" || step === "tool") {
@@ -535,6 +541,20 @@ function handleChatEvent(evt) {
       State.pendingToolCard = attachToolCard(evt.name);
     }
     updateToolCard(evt);
+    // live status: 同一工具的参数增量累积；新工具 → 轮次 +1
+    if (step === "tool_chunk" && evt.name) {
+      if (LiveStatus.tool !== evt.name) {
+        LiveStatus.tool = evt.name;
+        LiveStatus.toolArgs = "";
+        LiveStatus.iteration = Math.min(LiveStatus.iteration + 1, LiveStatus.maxIterations);
+      }
+      LiveStatus.toolArgs = (LiveStatus.toolArgs || "") + (evt.args || "");
+      if (LiveStatus.toolArgs.length > 200) LiveStatus.toolArgs = LiveStatus.toolArgs.slice(0, 200);
+      renderLiveStatus();
+    } else if (step === "tool" && evt.phase === "end") {
+      // 工具结束：参数固定，轮次保留（直到下一轮）
+      renderLiveStatus();
+    }
   } else if (step === "approval") {
     renderApprovalCard(evt.data || {});
   } else if (step === "final") {
@@ -546,9 +566,11 @@ function handleChatEvent(evt) {
   } else if (step === "done") {
     endStreaming();
     setLiveBadge(false);
+    setLiveStatusIdle();
   } else if (step === "error") {
     endStreaming();
     setLiveBadge(false);
+    setLiveStatusIdle();
     addErrorBubble(evt.message || "未知错误");
   } else if (step === "heartbeat" || step === "__close__") {
     // 忽略
@@ -903,6 +925,64 @@ function refreshTopbar() {
 
 function setLiveBadge(on) {
   $("#liveBadge").classList.toggle("hidden", !on);
+}
+
+/* ----- live status: 实时显示轮次 / node / 正在执行的工具 ----- */
+// 状态字段：当前 node 名 + 正在调用的工具名 + 工具参数增量 + ReAct 轮次（前端自增）
+// 轮次自增策略：每次 LLM 决定调工具（tool_chunk 第一个字符到达）算一轮，1-based；
+// 这与后端 ReActLoop 的 iteration 计数大致一致（后端从 1 开始计数，本地自增也能从 1 开始）。
+const LiveStatus = {
+  node: null,         // chatbot | planner | executor | validator | summarizer
+  tool: null,         // 当前正在调用的工具名
+  toolArgs: "",       // 工具参数（截断显示）
+  iteration: 0,       // 当前 node 内的轮次
+  maxIterations: 5,   // 默认上限，与 builder.MAX_TOOL_CALL_ROUNDS 对齐
+  idle: true,
+};
+
+function renderLiveStatus() {
+  const root = $("#liveStatus");
+  const text = $(".live-status-text", root);
+  if (!root || !text) return;
+  if (LiveStatus.idle) {
+    root.classList.remove("running");
+    text.textContent = "空闲";
+    return;
+  }
+  root.classList.add("running");
+  const parts = [];
+  if (LiveStatus.node) parts.push(`[${LiveStatus.node}]`);
+  if (LiveStatus.iteration > 0) {
+    parts.push(`第 ${LiveStatus.iteration}/${LiveStatus.maxIterations} 轮`);
+  }
+  if (LiveStatus.tool) {
+    const args = (LiveStatus.toolArgs || "").trim().slice(0, 40);
+    parts.push(args ? `${LiveStatus.tool}: ${args}${args.length >= 40 ? "…" : ""}` : LiveStatus.tool);
+  } else {
+    parts.push("思考中…");
+  }
+  text.textContent = parts.join("  ");
+}
+
+function setLiveStatusIdle() {
+  LiveStatus.idle = true;
+  LiveStatus.node = null;
+  LiveStatus.tool = null;
+  LiveStatus.toolArgs = "";
+  LiveStatus.iteration = 0;
+  renderLiveStatus();
+}
+
+function setLiveStatusRunning(nodeName) {
+  // 切 node 时重置 node 内的轮次/工具（不同 node 的 ReAct 独立计数）
+  if (nodeName && nodeName !== LiveStatus.node) {
+    LiveStatus.node = nodeName;
+    LiveStatus.iteration = 0;
+    LiveStatus.tool = null;
+    LiveStatus.toolArgs = "";
+  }
+  LiveStatus.idle = false;
+  renderLiveStatus();
 }
 
 /* ==================== 输入区 ==================== */
