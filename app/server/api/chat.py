@@ -119,13 +119,31 @@ async def chat_endpoint(payload: dict):
                             # payload = (AIMessageChunk/AIMessage, metadata)
                             chunk, meta = payload
                             node = (meta or {}).get("langgraph_node", "")
+                            # AIMessage（非 chunk，on_llm_end 时 emit）：tool_calls 完整字段一定有 name
+                            # 流式 chunk 的 tool_calls 在第一个 chunk 短暂有 name 后被 delta 覆盖为 None（见 data/chat_diag.log 实测）
+                            # 所以必须从 AIMessage 提取 tool_calls 推给前端，不能只在 chunk 路径
+                            if not isinstance(chunk, AIMessageChunk):
+                                try:
+                                    _full_calls = getattr(chunk, "tool_calls", None) or []
+                                    _diag = _os.environ.get("CHAT_DIAG") == "1"
+                                    if _diag:
+                                        _diag_logger.info(f"AIMessage (full) tool_calls={_full_calls}")
+                                    for _tc in _full_calls:
+                                        _tcn = getattr(_tc, "name", None) or (_tc.get("name") if isinstance(_tc, dict) else None)
+                                        _tca = getattr(_tc, "args", None) or (_tc.get("args") if isinstance(_tc, dict) else None) or {}
+                                        if _tcn:
+                                            if isinstance(_tca, dict):
+                                                _tca = json.dumps(_tca, ensure_ascii=False)
+                                            sync_q.put({"step": "tool_chunk", "name": _tcn, "args": str(_tca)[:200], "node": node})
+                                except Exception as _e:
+                                    if _os.environ.get("CHAT_DIAG") == "1":
+                                        _diag_logger.info(f"AIMessage extract error: {_e}")
+                                continue
                             # 只处理流式 chunk：langgraph 的 messages 流对同一次 LLM 调用会先
                             # emit 流式 chunk（AIMessageChunk，含非流式模型的模拟流式），随后在
                             # on_llm_end 再 emit 一次完整消息（AIMessage）。二者内容相同，若都推给
                             # 前端，回复会被流式显示两遍（表现为回复文本重复）。因此忽略
                             # AIMessage（end 完整消息），完整文本由 updates 模式的 final 事件兜底。
-                            if not isinstance(chunk, AIMessageChunk):
-                                continue
                             text = ""
                             if hasattr(chunk, "content"):
                                 text = chunk.content or ""
