@@ -1,296 +1,204 @@
 # 🤖 Agnes Agent
 
-基于 **LangGraph** 的分层记忆智能体：模型自决工具调用、5 层记忆系统、多 Key 自动轮换、沉浸式 Web 调试面板。
+> 一个亲手搭建的 LangGraph 智能体：模型自决工具调用、5 层记忆、多 Key 自动轮换、沉浸式 Web 调试面板。
+> 目标不是"调 API 出结果"，而是把 Agent 的"思考—行动—观察"循环一层层拆开，看明白再动手。
+
+![Python](https://img.shields.io/badge/Python-3.12-blue) ![Status](https://img.shields.io/badge/Status-学习中-orange) ![License](https://img.shields.io/badge/License-MIT-green)
+
+🛠️ **学习实验项目** —— 以理解 ReAct / LangGraph 机制为主要目的，欢迎提 Issue 交流，勿期待生产级稳定性。
 
 ---
 
-## ✨ 功能特性
+## 📑 目录
 
-| 特性 | 说明 |
-|---|---|
-| 🧠 **模型自决** | 无 L1/L2/L3 硬路由，LLM 自行决定"直接回答 / 调工具 / 进入规划" |
-| 🛠 **工具调用** | 9 个工具：系统命令、Tavily 搜索、用户信息/偏好、HTML 校验、记忆读取、规划触发 |
-| 🔑 **多 Key 轮换** | api_key 逗号分隔多 key，报错（限流/连接/超时/鉴权）自动换下一个 + 指数退避 |
-| 🗂 **5 层记忆** | Working / Thread / User Profile / Episodic / Procedural / Semantic Cache |
-| 💬 **沉浸式面板** | 全屏对话 + 工具调用卡片可视化 + 调试抽屉（State/日志/记忆/Memory DB/定时任务） |
-| ⚙ **模型管理** | 设置页接入任意 OpenAI 兼容模型，自动拉取模型列表，设默认持久化 |
-| 📋 **可审查** | 输入/输出流、token 统计、工具耗时、checkpoint 深度解包、Thread 回放 |
+- [效果演示](#-效果演示)
+- [项目背景](#-项目背景)
+- [核心特性](#-核心特性)
+- [快速上手](#-快速上手)
+- [设计思路与实现过程](#-设计思路与实现过程)
+- [项目文件结构](#-项目文件结构)
+- [Roadmap 与致谢](#-roadmap-与致谢)
 
 ---
 
-## 📂 目录结构
+## 🎬 效果演示
+
+启动后，终端会打出模型自决决策的日志；对话过程中每一次工具调用都会在 Web 面板上实时展示（工具名 + 参数 + 结果）。
+
+```text
+LLM 类型: <class 'app.llm.llm_factory.RotatingKeyChatOpenAI'> | provider=openai_compatible model=agnes-2.5-flash
+🔍 控制面板: http://localhost:8000
+🤖 Agent 已启动，输入 'quit' 或 'exit' 退出。
+
+你 > 我最近的任务有哪些？
+[Chatbot] 自决模式（无 L1/L2/L3 硬切）
+[ReAct] 第 1/15 轮
+✅ [Chatbot] 回答长度: 210
+🤖 你最近的完成任务有：1. 开发网页版贪吃蛇游戏 ……（Web 面板同步展示工具卡片与状态行）
+```
+
+Web 面板（http://localhost:8000）：
+
+- 左侧**历史会话**列表显示每条会话的最后一条用户消息，支持**批量删除**
+- 发送框上方**状态行**实时显示正在执行的工具（`list_my_recent_tasks({...})`）
+- 需要人工确认的工具（命令执行 / 文件写改删）弹出**审批卡片**，可每次询问 / 本次会话允许 / 永久允许
+- 右上角**交付物 / 设置**入口：交付物页展示 Agent 生成的产出文件；设置页内含 State、提示词、追踪、记忆、Memory DB、定时任务、模型管理等调试能力
+
+---
+
+## 🧭 项目背景
+
+**为什么做这个？** 自学 LLM 应用时发现"光调 API 太无聊"——想亲手实现一遍 Agent 的调度逻辑：模型怎么决定调哪个工具？工具结果怎么回到上下文？多轮循环怎么终止？记忆怎么跨会话留存？
+
+**解决了什么问题？** 一个可本地运行的完整 Agent 骨架：对话 → 规划 → 执行 → 验证 → 总结，全程可观察、可审查、可切换模型。
+
+**标签**：🛠️ 学习实验项目 · 📚 概念验证。请不要把它当成生产框架来用。
+
+---
+
+## ✨ 核心特性
+
+- ✅ **模型自决路由**：无硬编码意图分类，LLM 自行决定"直接回答 / 调工具 / 进入多步规划"
+- ✅ **自定义 ReAct 循环**：亲手实现思考—行动—观察闭环（`ReActLoop`），支持工具安全拦截、人工审批、连续拒绝熔断、迭代上限防死循环
+- ✅ **5 层记忆系统**：会话摘要 / 用户画像 / 历史任务 / 命令历史 / 语义缓存，每轮自动注入 System Prompt
+- ✅ **多 Key 自动轮换**：api_key 逗号分隔，限流/超时/鉴权自动换 key + 指数退避重试
+- ✅ **沉浸式 Web 面板**：流式对话、工具状态行、审批卡片、State/日志/记忆/定时任务调试抽屉、模型一键切换
+- ✅ **标准 cron 定时任务**：`*/5 * * * *` 常规 cron 语法驱动 Agent 周期性执行任务
+
+---
+
+## 🚀 快速上手
+
+### 环境准备
+
+- **Python 3.12+**
+- 一个 **OpenAI 兼容网关**的 `base_url` + `api_key`（模型凭据在 Web 面板设置页接入，不写死在代码里）
+- 可选：Tavily API Key（联网搜索）
+
+### 安装
+
+```bash
+git clone <repo-url> && cd Agnes-Agent
+python -m venv .venv
+
+# Windows
+.venv\Scripts\activate
+# macOS / Linux
+source .venv/bin/activate
+
+pip install -r <(uv export --format requirements)   # 或按 pyproject.toml 安装依赖
+```
+
+### 最小运行
+
+```bash
+python -m app.main
+```
+
+预期输出：
+
+```text
+LLM 类型: <class 'app.llm.llm_factory.RotatingKeyChatOpenAI'> | provider=openai_compatible model=agnes-2.5-flash
+🔍 控制面板: http://localhost:8000
+🤖 Agent 已启动，输入 'quit' 或 'exit' 退出。
+```
+
+打开 http://localhost:8000 即可对话；首次使用先到右上角 **设置 → 模型** 页接入你的模型（填 Base URL + API Key，可自动拉取模型列表）。
+
+> `.env` 只放非模型密钥（如 `TAVILY_API_KEY`）；模型凭据统一在 `data/.model_config` 由设置页管理。
+
+---
+
+## 🧠 设计思路与实现过程
+
+### 架构总览
+
+```mermaid
+flowchart LR
+    U[用户输入] --> C[chatbot 节点<br/>模型自决 + ReActLoop]
+    C -->|直接回答| E1[END]
+    C -->|request_planning| P[planner 拆子任务]
+    P --> X[executor 执行<br/>ReActLoop + 工具]
+    X -->|有失败 ≤2 次| P
+    X -->|全部成功| V[validator 验证]
+    V -->|未通过| X
+    V -->|通过| S[summarizer 总结]
+    S --> END2[END]
+```
+
+### 关键模块拆解
+
+| 模块 | 职责 | 设计要点 |
+|---|---|---|
+| `graph/builder.py` | 节点编排 + 条件路由 | 路由决策全部读 DB（任务进度唯一真相源），state 只传标识 |
+| `planning/react_loop.py` | 思考—行动—观察循环 | 自实现：安全拦截、审批 interrupt、连续 3 次同调用熔断、`max_iterations` 防死循环 |
+| `memory/memory_manager.py` | 5 层记忆 | L2/L3/L4 每轮注入 System Prompt，L5 语义缓存带 TTL |
+| `llm/llm_factory.py` | 多 Key 轮换 | 401/429/5xx 换 key，指数退避（2^n+jitter，上限 30s） |
+| `server/api/chat.py` | SSE 流式推送 | `updates` + `messages` 双通道；工具事件监听桥 |
+
+### 技术选型理由
+
+- **为什么用 LangGraph？** 需要 checkpoint 中断/恢复来支撑"审批挂起"和"多轮会话续聊"，手写状态机成本太高。
+- **为什么工具执行不用 LangGraph 的 ToolNode，而是自写 ReActLoop？** 想亲手实现工具调度的完整细节：安全拦截、审批、拒绝熔断、`request_planning` 之类的"元工具"返回值透传——这些在 ToolNode 里会被框架隐藏。
+- **为什么 SSE 用双通道（updates + messages）？** 流式 token（messages）负责打字机效果，节点状态（updates）负责最终文本兜底与审批事件。
+
+### 踩坑与解决实录（真实经历）
+
+1. **坑：模型工具调用增量以 dict 形态投递，`getattr` 读出来恒为空。**
+   → 发送框上方的"工具调用状态行"一度永远空白。定位后发现网关把 `tool_call_chunks` 以 `dict` 投递（首个 chunk 带 name，后续是 JSON 片段），`getattr(tc, "name")` 对 dict 恒返回 `None`。解决：兼容 dict/对象两种形态解析，并按 `index` 累积参数片段。
+
+2. **坑：审批模式"每次询问"形同虚设——切了 per_ask 却不弹审批卡。**
+   → 后端 `_CONFIG` 里 `approval_mode` 会被"新建会话"整体重置回 `session_allow`，而前端按钮仍高亮 per_ask。解决：`/new`、`/resume` 只切换 `thread_id`、保留审批模式；前端切换会话后重新向后端读取实际模式同步按钮。
+
+3. **坑：messages 流对同一次 LLM 调用先推流式 chunk、再推完整消息，回复被显示两遍。**
+   → 只处理 `AIMessageChunk`，完整文本由 `updates` 模式的 final 事件兜底。
+
+4. **坑：调试面板 State 里的 messages 永远是空的。**
+   → `update_state` 只 import 从未调用，快照表恒空。解决：流结束后用 `graph.get_state()` 取完整 state 落快照。
+
+---
+
+## 📂 项目文件结构
 
 ```
 Agnes-Agent/
-├── app/                        # 应用主包
-│   ├── main.py                 # 入口（python -m app.main）
-│   ├── config.py               # 配置中心（统一路径，数据指向 data/）
-│   ├── graph/                  # LangGraph 工作流
-│   │   ├── builder.py          # build_graph + 节点 + 路由
-│   │   ├── state.py            # State / TaskPlan / Subtask
-│   │   ├── utils.py            # token 计数/压缩、工具调用解析、prompt 加载
-│   │   └── prompt_template.txt # 系统提示词模板
-│   ├── llm/                    # LLM 纯工厂（零配置，多 key 轮换）
-│   ├── memory/                 # 分层记忆管理器（SQLite）
-│   ├── planning/               # 规划-执行-验证-总结 + ReAct 循环
-│   ├── tools/                  # 工具集（9 个）
-│   └── server/                 # Web 服务
-│       ├── __init__.py         # FastAPI 组装 + start_debug_server + 定时任务
-│       ├── store.py            # 内存快照 / 日志 / 事件流
-│       ├── config.py           # 模型配置管理（厂商目录/凭据/默认模型）
-│       ├── api/                # API 子路由（system/memory/tools/chat + models）
-│       └── static/             # 前端（index.html + marked.min.js 离线可用）
-├── data/                       # 运行时数据
-│   ├── memory.db               # 记忆 SQLite（画像/偏好/任务/命令/语义缓存）
-│   ├── checkpoints.db          # LangGraph checkpoint
-│   └── .model_config           # 模型接入/默认模型配置
-├── configs/                    # 配置示例（预留）
-├── tests/                      # 测试（预留）
-├── docs/                       # 文档（预留）
-├── deliverables/               # Agent 生成的交付物
-├── .env                        # 非模型密钥（DASHSCOPE/TAVILY/DEEPSEEK）
-├── pyproject.toml              # 项目元数据 + 依赖 + 命令行入口
-├── uv.lock                     # 锁定依赖（uv）
+├── app/
+│   ├── main.py                    # 入口（python -m app.main）
+│   ├── config.py                  # 配置中心（路径统一指向 data/）
+│   ├── graph/                     # LangGraph 工作流（节点 + 路由 + 状态）
+│   ├── llm/                       # LLM 纯工厂（多 key 轮换，零配置）
+│   ├── memory/                    # 5 层记忆管理器（SQLite）
+│   ├── planning/                  # planner / executor / validator / summarizer + ReActLoop
+│   ├── tools/                     # 工具集（搜索/命令/文件/记忆/规划触发…）
+│   └── server/                    # FastAPI + SSE 流式 + 调试面板前端
+│       ├── store.py               # 公共删除逻辑 / 日志 / 事件流 / State 快照
+│       ├── config.py              # 模型目录管理（自定义来源，无内置厂商）
+│       └── static/                # 前端（index.html + app.js + style.css）
+├── data/                          # 运行时数据（memory.db / checkpoints.db / traces/）
+├── deliverables/                  # Agent 生成的交付物（如 snake_game/）
+├── tests/                         # pytest 回归测试
+├── pyproject.toml                 # 项目元数据 + 依赖
+├── uv.lock                        # 锁定依赖
 └── README.md
 ```
 
 ---
 
-## 🚀 环境准备
+## 🗺 Roadmap 与致谢
 
-### 1. 依赖工具
+**Roadmap**
 
-- **Python 3.12+**（项目 `.python-version` 指定 3.12）
-- **uv**（推荐，依赖管理）或 pip
-- Git（可选）
+- [ ] 接入更多工具（浏览器操作、数据库查询、图片生成）
+- [ ] 多模态输入（图片/语音进对话）
+- [ ] 记忆层增强：语义检索从"关键词缓存"升级为向量检索
+- [ ] 流式中间态可视化（思考过程实时展示）
 
-### 2. 安装依赖
+**致谢**
 
-```powershell
-# 方式一：uv（推荐，自动创建 .venv 并安装）
-cd C:\Users\17625\Agnes-Agent
-uv sync
+- ReAct 论文（*Synergizing Reasoning and Acting in Language Models*）
+- LangChain / LangGraph 社区
+- 所有在调试面板上被反复试错的模型网关
 
-# 方式二：已有 .venv + pip
-cd C:\Users\17625\Agnes-Agent
-python -m venv .venv
-.venv\Scripts\pip install -r <(uv export --format requirements)   # 或手动装 pyproject.toml 里的依赖
-```
+**许可证**：MIT
 
-> 若使用项目自带 `.venv`（已装好依赖），可跳过安装步骤。
-
----
-
-## 💻 进入虚拟环境
-
-### Windows PowerShell
-
-```powershell
-cd C:\Users\17625\Agnes-Agent
-.\.venv\Scripts\Activate.ps1
-# 激活后提示符出现 (Agnes-Agent)，验证：
-python --version        # 应输出 Python 3.12.x
-```
-
-> 若 PowerShell 禁止执行脚本，先运行：`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`
-
-### Windows CMD
-
-```cmd
-cd C:\Users\17625\Agnes-Agent
-.venv\Scripts\activate.bat
-```
-
-### Git Bash / WSL
-
-```bash
-cd /c/Users/17625/Agnes-Agent
-source .venv/Scripts/activate
-```
-
-### 退出虚拟环境
-
-```powershell
-deactivate
-```
-
----
-
-## ▶️ 启动
-
-### 方式一：虚拟环境内（推荐）
-
-```powershell
-# 先激活虚拟环境（见上文），然后：
-python -m app.main
-```
-
-### 方式二：直接用 venv 的 python（不激活）
-
-```powershell
-.\.venv\Scripts\python.exe -m app.main
-```
-
-### 方式三：命令行入口（已 pip install -e . 时）
-
-```powershell
-agnes-agent
-```
-
-启动后输出示例：
-
-```
-LLM 类型: <class 'app.llm.llm_factory.RotatingKeyChatOpenAI'> | provider=openai_compatible model=agnes-2.5-flash
-🔍 控制面板: http://localhost:8000
-[thread_id] 618a8084-869b-42a1-a29c-dda3dec389a7
-🤖 Agent 已启动，输入 'quit' 或 'exit' 退出。
-```
-
-- **Web 面板**：浏览器打开 http://localhost:8000（8000 被占用自动顺延 8001+）
-- **CLI 对话**：终端直接输入消息
-- `--new` 参数开启新会话：`python -m app.main --new`
-
----
-
-## 🖥 使用说明
-
-### 沉浸式对话面板（http://localhost:8000）
-
-- 默认进入 **💬 对话**：全屏聊天，输入即发送（Enter），`/` 触发命令提示
-- 对话过程中**工具调用以卡片展示**（工具名 + 状态 + 输入/输出），审批类工具弹出确认气泡
-- 右上角 **⚙ 面板** 打开调试抽屉：
-
-| Tab | 用途 |
-|---|---|
-| 📊 State | 当前 LangGraph state |
-| 📄 提示词 | 当前 system prompt（含分层记忆注入） |
-| 📝 日志 / 📋 事件 | ReAct 执行日志与事件流 |
-| 🧠 5层记忆 | 各层记忆快照 + 会话选择器 + Prompt 注入预览 |
-| 🗄 Memory DB | SQLite 表浏览器（增删改查） |
-| 🔧 工具 | 已注册工具列表 |
-| 🗓 定时任务 | interval / 每日任务调度 |
-| ⚙ 设置 | 默认模型 + 模型接入管理 |
-
-### 斜杠命令
-
-| 命令 | 功能 |
-|---|---|
-| `/new` | 开新对话（新 thread_id） |
-| `/resume [tid]` | 继续指定 thread |
-| `/threads` | 列出最近会话 |
-| `/model` | 查看当前模型 |
-| `/system [m]` | 切换审批模式（per_ask / session_allow / always_allow） |
-| `/clear` | 清空日志/事件 |
-| `/save` | 导出当前会话消息 |
-| `/help` | 帮助 |
-
----
-
-## ⚙️ 模型管理
-
-### 配置存储
-
-模型凭据统一存放在 `data/.model_config`：
-
-```json
-{
-  "provider": "agnes2.0",
-  "model": "agnes-2.5-flash",
-  "custom": [
-    {
-      "id": "openai_compatible",
-      "label": "OpenAI 兼容网关 (llm.chatops.fun)",
-      "base_url": "https://llm.chatops.fun/v1",
-      "api_key": "sk-xxxx",
-      "models": ["deepseek-v4-pro", "glm-5.1", "MiniMax-M3"]
-    }
-  ]
-}
-```
-
-### 接入自定义模型（⚙ 设置页）
-
-1. 填 **名称** + **base_url**（如 `https://api.openai.com/v1`）+ **api_key**（多个 key 用英文逗号隔开自动轮换）
-2. 点 **🔄 获取** 自动从网关拉取模型列表（GET /v1/models），或手动填
-3. 点 **✅ 接入** → 列表出现，可「使用」或「设为默认」
-
-### 多 Key 自动轮换
-
-api_key 填 `key1,key2,key3`：单个 key 报错（限流/连接/超时/鉴权）自动换下一个，全部失败后指数退避重试（2/4/8/16/30s，最多 5 轮）。
-
-### 内置厂商
-
-| provider | 说明 |
-|---|---|
-| `openai_compatible` | 任意 OpenAI 兼容网关 |
-| `agnes2.0` | Agnes 网关 |
-| `deepseek` | DeepSeek 官方 |
-| `tongyi` | 通义千问（DashScope） |
-
----
-
-## 🧠 5 层记忆系统
-
-| 层 | 内容 | 存储 | 触发 |
-|---|---|---|---|
-| **L0** Working | 当前对话上下文 | LangGraph state | 自动 |
-| **L1** Thread | 会话摘要 | task_summaries | summarizer 节点 |
-| **L2** User Profile | 用户画像/偏好 | user_profile / user_preferences | 写工具 + 每轮注入 prompt |
-| **L3** Episodic | 历史任务/对话 | task_plans / subtasks / messages | 任务执行 + 每轮注入 |
-| **L4** Procedural | 命令历史 | command_history | system_command 后自动记录 |
-| **L5** Semantic | 外部知识缓存 | semantic_cache（TTL 24h） | tavily 搜索后自动缓存 |
-
-**记忆读取**：每轮自动把 L2/L3/L4 摘要注入 system prompt（模型"自然记住"用户）；模型也可主动调 `search_my_memory` / `list_my_recent_tasks` / `get_command_history` 查详情。
-
----
-
-## 🔧 配置
-
-### .env（非模型密钥）
-
-```
-DASHSCOPE_API_KEY=sk-...
-TAVILY_API_KEY=tvly-...
-DEEPSEEK_API_KEY=sk-...
-```
-
-> 模型 key（OPENAI/AGNES）**不放在 .env**，统一在 `data/.model_config` 管理（页面设置操作）。
-
-### 数据文件
-
-| 文件 | 说明 |
-|---|---|
-| `data/memory.db` | 记忆 + 消息 + 命令历史 + 语义缓存 |
-| `data/checkpoints.db` | LangGraph 会话 checkpoint |
-| `data/.model_config` | 模型接入 + 默认模型 |
-
----
-
-## ❓ 常见问题
-
-**Q: 端口 8000 被占用？**
-A: 自动顺延到 8001/8002…，以启动输出为准。
-
-**Q: 对话很慢 / 卡住？**
-A: 网关多 key 轮换会逐个尝试（每个 key 30s 超时）。可在 `app/llm/llm_factory.py` 的 `_build_openai_client` 调小 `timeout`（如 10s）。
-
-**Q: tiktoken 首次下载慢？**
-A: 已内置 3s 超时 fallback 到本地编码，不会卡 20s。
-
-**Q: 已接入模型显示 0 个？**
-A: `data/.model_config` 的 `custom` 为空即 0 个，接入后显示。
-
-**Q: 切换了模型但没生效？**
-A: 模型切换会重建 graph 并持久化到 `.model_config`；重启自动用默认模型。
-
----
-
-## 🧪 开发
-
-```powershell
-# 运行测试（预留目录）
-python -m pytest tests/
-
-# 依赖锁定
-uv lock
-```
+**交流**：欢迎在仓库 Issue 区留言，或邮件联系（你的邮箱 / GitHub）。
