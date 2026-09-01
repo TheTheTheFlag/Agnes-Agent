@@ -114,6 +114,22 @@ async def chat_endpoint(payload: dict):
                             # 前端，回复会被流式显示两遍（表现为回复文本重复）。因此忽略
                             # AIMessage（end 完整消息），完整文本由 updates 模式的 final 事件兜底。
                             if not isinstance(chunk, AIMessageChunk):
+                                # AIMessage（非 chunk，on_llm_end 时 emit）：tool_calls 完整字段一定有 name
+                                # 流式 chunk 的 tool_calls 早期 name 有但后续被 delta 覆盖为 None。
+                                # 所以从 AIMessage（非 chunk）提取 name + args 存到累积表里，
+                                # 供后续 step:"tool" 事件查 tcid 取真名。
+                                try:
+                                    _full_calls = getattr(chunk, "tool_calls", None) or []
+                                    for _tc in _full_calls:
+                                        _tcid = getattr(_tc, "id", None)
+                                        _tcname = getattr(_tc, "name", None)
+                                        _tcargs = getattr(_tc, "args", None)
+                                        if isinstance(_tcargs, dict):
+                                            _tcargs = json.dumps(_tcargs, ensure_ascii=False)
+                                        if _tcid and _tcname and _tcid not in _seen_tc:
+                                            _seen_tc[_tcid] = {"name": _tcname, "args": _tcargs or ""}
+                                except Exception:
+                                    pass
                                 continue
                             text = ""
                             if hasattr(chunk, "content"):
