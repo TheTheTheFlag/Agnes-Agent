@@ -1,6 +1,7 @@
 """app.server.api.chat — 对话 API（流式 /api/chat + 斜杠命令 /api/command）。"""
 import json
 import asyncio
+import logging
 import uuid as _uuid
 from langgraph.types import Command
 from langchain_core.messages import AIMessageChunk
@@ -16,6 +17,16 @@ import os as _os
 _BASE_DIR = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 
 router = APIRouter()
+
+# ----- 诊断 logger（受 CHAT_DIAG=1 控制，写到 data/chat_diag.log）-----
+_diag_logger = logging.getLogger("chat_diag")
+_diag_logger.setLevel(logging.DEBUG)
+_diag_logger.propagate = False  # 不让根 logger 重复输出
+if not _diag_logger.handlers:
+    _diag_log_path = _os.path.join(_os.path.dirname(DB_PATH), "chat_diag.log")
+    _fh = logging.FileHandler(_diag_log_path, encoding="utf-8")
+    _fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    _diag_logger.addHandler(_fh)
 
 # 内部 LLM 输出过滤（摘要生成等非对话调用）的摘要结构 marker。
 # 用"前缀"形式（去掉尾部 **）：token 逐字到达时，一旦拼出"**用户目标"即可判定
@@ -131,7 +142,7 @@ async def chat_endpoint(payload: dict):
                             if _diag:
                                 _tcs = getattr(chunk, "tool_calls", None)
                                 _tccs = getattr(chunk, "tool_call_chunks", None)
-                                print(f"[DIAG chunk] tool_calls={_tcs}  tool_call_chunks={_tccs}", flush=True)
+                                _diag_logger.info(f"chunk tool_calls={_tcs}  tool_call_chunks={_tccs}")
                             tc_full = getattr(chunk, "tool_calls", None)
                             if tc_full:
                                 for tc in tc_full:
@@ -140,7 +151,7 @@ async def chat_endpoint(payload: dict):
                                     if isinstance(tc_args, dict):
                                         tc_args = json.dumps(tc_args, ensure_ascii=False)
                                     if _diag:
-                                        print(f"[DIAG tool_chunk] name={tc_name} args={str(tc_args)[:80]}", flush=True)
+                                        _diag_logger.info(f"tool_chunk name={tc_name} args={str(tc_args)[:80]}")
                                     sync_q.put({"step": "tool_chunk", "name": tc_name, "args": str(tc_args)[:200], "node": node})
                             # 兼容老路径：tool_call_chunks
                             tool_calls = getattr(chunk, "tool_call_chunks", None)
@@ -149,7 +160,7 @@ async def chat_endpoint(payload: dict):
                                     tc_name = getattr(tc, "name", None)
                                     tc_args = getattr(tc, "args", "") or ""
                                     if _diag:
-                                        print(f"[DIAG tool_chunk(old)] name={tc_name} args={str(tc_args)[:80]}", flush=True)
+                                        _diag_logger.info(f"tool_chunk(old) name={tc_name} args={str(tc_args)[:80]}")
                                     sync_q.put({"step": "tool_chunk", "name": tc_name, "args": str(tc_args)[:200], "node": node})
                         else:
                             # updates 模式：payload 是 {node: update_dict}
