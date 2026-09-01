@@ -1645,14 +1645,17 @@ function startSSE() {
 }
 
 function handleLiveEvent(evt) {
-  if (evt.type === "log") {
+  // 后端 SSE 数据结构：{type, data, timestamp, thread_id}——subtasks 嵌套在 data 里
+  const eType = evt.type;
+  const eData = evt.data || {};
+  if (eType === "log") {
     if (State.drawerTab === "logs") renderLogsTab(drawerBody);
-  } else if (evt.type === "event") {
+  } else if (eType === "event") {
     if (State.drawerTab === "events") renderEventsTab(drawerBody);
-  } else if (evt.type === "planner" || evt.type === "executor") {
+  } else if (eType === "planner" || eType === "executor") {
     // 任务计划/子任务状态变化 → 刷新待办面板
-    if (evt.subtasks && Array.isArray(evt.subtasks)) {
-      const items = evt.subtasks.map((s) => ({
+    if (eData.subtasks && Array.isArray(eData.subtasks)) {
+      const items = eData.subtasks.map((s) => ({
         id: s.id,
         text: s.desc || s.description || String(s.id),
         status: s.status === "done" ? "done" : (s.status === "running" ? "doing" : "todo"),

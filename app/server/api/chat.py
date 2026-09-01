@@ -178,6 +178,17 @@ async def chat_endpoint(payload: dict):
                                                 # executor/planner 的输出由执行树+事件表达，不污染对话气泡。
                                                 if node in ("chatbot", "summarizer"):
                                                     sync_q.put({"step": "final", "node": node, "text": content})
+                                                    # 兜底落表：流被 401/异常截断时 chatbot 节点不会 return，
+                                                    # 也就不会执行 builder.py:299 的 mm.add_message。
+                                                    # 这里在 SSE final 事件发出时同步落 messages 表，
+                                                    # 保证"前端看到了 = 表里就有"，切会话时 /api/messages 能回放。
+                                                    # add_message 自带 60s 同 role+content 幂等保护，重复触发无副作用。
+                                                    try:
+                                                        from app.memory import MemoryManager as _MM
+                                                        _mm = _MM(db_path=DB_PATH, thread_id=thread_id)
+                                                        _mm.add_message(thread_id, "assistant", content)
+                                                    except Exception:
+                                                        pass
                                             break
                                         # ToolMessage → 工具结果（供前端工具卡片展示）
                                         is_tool = (isinstance(m, dict) and m.get("type") == "tool") or \

@@ -52,6 +52,12 @@ def create_summarizer_node(llm):
 
         state["messages"].append(AIMessage(content=summary))
         mm.save_summary(thread_id, summary)
+        # 落 messages 表：让切会话时前端能通过 /api/messages 拉回这条最终汇总
+        # （chatbot 节点已落 user/assistant，但 summarizer 是另一个节点，需自己写）
+        try:
+            mm.add_message(thread_id, "assistant", summary)
+        except Exception:
+            pass
 
         print("[Summarizer] 完成")
         add_log_entry("success", "汇总完成")
