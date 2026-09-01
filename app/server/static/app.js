@@ -337,7 +337,10 @@ function renderApprovalCard(data) {
   const card = document.createElement("div");
   card.className = "approval-card";
   card.innerHTML = `
-    <div class="approval-title">🔐 需要你的确认</div>
+    <div class="approval-title">
+      <svg class="approval-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="7.5" width="9" height="6" rx="1.5"/><path d="M5.5 7.5V5a2.5 2.5 0 0 1 5 0v2.5"/></svg>
+      <span>需要你的确认</span>
+    </div>
     <div class="approval-question">${escapeHtml(data.question || "是否允许执行该操作？")}</div>
     ${data.command ? `<div class="approval-cmd">${escapeHtml(data.command)}</div>` : ""}
     <div class="approval-actions">
@@ -524,7 +527,12 @@ function handleChatEvent(evt) {
     } else if (evt.phase === "end") {
       // 节点结束：收尾当前气泡。否则 planner/executor 的 token 会持续堆进同一个气泡
       // （表现为规划 JSON 与执行文本连成一大段乱码）
-      endStreaming();
+      // 关键：chatbot 节点的 end 不在这里收尾——它可能是 interrupt 触发的"挂起"，
+      // 也可能是 done 的"完成"，两种情况都由后续 done/error 事件统一收尾。
+      // 只有 planner/executor 节点的 end 才需要立即收尾（它们的 token 不会再来）。
+      if (evt.name !== "chatbot") {
+        endStreaming();
+      }
     }
     setLiveBadge(evt.phase === "start");
   } else if (step === "token") {

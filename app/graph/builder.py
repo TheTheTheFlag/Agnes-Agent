@@ -201,7 +201,14 @@ def chatbot(state: State, config: RunnableConfig):
     # 审批 hook：命令执行 + 文件写/改/删走人工审批；其余工具直接放行
     def interrupt_handler(name, params):
         if name in _APPROVAL_TOOLS:
-            cmd = params.get('command', '')
+            # 工具不同，"命令"字段不一样：system_command 用 command，文件操作用 path
+            cmd = params.get('command') or params.get('path') or ''
+            if name in ("write_file", "edit_file", "delete_file") and params.get('path'):
+                cmd = f"{name}: {params['path']}"
+                if params.get('content'):
+                    cmd += f" ({len(str(params['content']))} 字符)"
+            elif name == "system_command" and params.get('command'):
+                cmd = params['command']
             # 审批模式来源（优先级）：
             #   1) 用户实时点按钮：写到 _srv_cfg._CONFIG（跨进程生效）
             #   2) 默认：session_allow（本次会话内不重复审批；每次启动 Agent 时重置为这个）
