@@ -580,20 +580,26 @@ async function readSSE(response, onEvent) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buf = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    let idx;
-    while ((idx = buf.indexOf("\n\n")) >= 0) {
-      const chunk = buf.slice(0, idx);
-      buf = buf.slice(idx + 2);
-      const line = chunk.split("\n").find((l) => l.startsWith("data: "));
-      if (!line) continue;
-      try {
-        onEvent(JSON.parse(line.slice(6)));
-      } catch (e) { /* 忽略坏帧 */ }
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf("\n\n")) >= 0) {
+        const chunk = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        const line = chunk.split("\n").find((l) => l.startsWith("data: "));
+        if (!line) continue;
+        try {
+          onEvent(JSON.parse(line.slice(6)));
+        } catch (e) { /* 忽略坏帧 */ }
+      }
     }
+  } finally {
+    // 兜底：无论流正常结束/异常/网络中断，状态都要还原 idle，
+    // 否则 done 事件丢失时会卡在 [chatbot] 思考中… 不还原
+    try { setLiveStatusIdle(); } catch (e) {}
   }
 }
 
