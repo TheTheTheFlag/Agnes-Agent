@@ -611,7 +611,9 @@ async function readSSE(response, onEvent) {
         const parsed = JSON.parse(line.slice(6));
         // 诊断开关：控制台执行 window.__diagSSE = true 后开启
         if (window.__diagSSE) {
-          console.log("[SSE]", parsed.step, parsed.name || "", parsed.phase || "", parsed.node || "");
+          const _t = (parsed.text || "").slice(0, 40).replace(/\n/g, "\\n");
+          const _a = (parsed.args || "").slice(0, 30);
+          console.log("[SSE]", parsed.step, parsed.name || "", parsed.phase || "", parsed.node || "", "t='" + _t + "'", _a ? "args=" + _a : "");
         }
         onEvent(parsed);
       } catch (e) { /* 忽略坏帧 */ }
@@ -634,6 +636,14 @@ async function sendMessage(text, opts) {
     // resume 模式：复用当前 assistant 气泡继续流式
     if (!State.currentAssistantEl) State.currentAssistantEl = addAssistantBubble("");
     State.currentAssistantEl.classList.add("streaming");
+    // resume 路径：addAssistantBubble 默认带 typing-dots，需移除并建 #stream-text
+    const _box = $(".msg-text", State.currentAssistantEl);
+    if (_box && !$("#stream-text", State.currentAssistantEl)) {
+      _box.querySelectorAll(":scope > :not(.tool-card):not(.approval-card)").forEach((n) => n.remove());
+      const _tn = document.createElement("div");
+      _tn.id = "stream-text";
+      _box.prepend(_tn);
+    }
   }
 
   State.streaming = true;
