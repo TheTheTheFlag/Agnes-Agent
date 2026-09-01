@@ -335,7 +335,11 @@ async def command_endpoint(payload: dict):
     if name == "new":
         import uuid as _uuid
         new_tid = str(_uuid.uuid4())
-        _srv_cfg._CONFIG = {"configurable": {"thread_id": new_tid}}
+        # 只切换 thread_id，保留 approval_mode（审批模式是用户意图，切换会话不应重置——
+        # 否则前端按钮还高亮着 per_ask，后端却悄悄回到 session_allow，造成"不弹卡直接执行"）
+        _cfg = dict(_srv_cfg._CONFIG or {})
+        _cfg.setdefault("configurable", {})["thread_id"] = new_tid
+        _srv_cfg._CONFIG = _cfg
         # 写入 .thread_id 文件以保持 main.py 行为一致
         try:
             with open(_os.path.join(_BASE_DIR, ".thread_id"), "w", encoding="utf-8") as f:
@@ -348,7 +352,10 @@ async def command_endpoint(payload: dict):
             # 列候选
             r = await get_threads()
             return {"result": "请用 /resume <thread_id> 选择：", "candidates": r["threads"][:10]}
-        _srv_cfg._CONFIG = {"configurable": {"thread_id": arg}}
+        # 同样只切换 thread_id，保留 approval_mode
+        _cfg = dict(_srv_cfg._CONFIG or {})
+        _cfg.setdefault("configurable", {})["thread_id"] = arg
+        _srv_cfg._CONFIG = _cfg
         try:
             with open(_os.path.join(_BASE_DIR, ".thread_id"), "w", encoding="utf-8") as f:
                 f.write(arg)

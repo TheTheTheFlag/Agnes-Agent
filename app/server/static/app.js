@@ -403,17 +403,23 @@ function setApprovalMode(mode) {
   }).catch((e) => toast(e.message, "error"));
 }
 
+function refreshApprovalMode() {
+  const bar = $("#approvalModeBar");
+  if (!bar) return;
+  // 从后端读取当前审批模式并高亮（新建/切换会话后调用，保证按钮与实际生效模式一致）
+  apiPost("/api/command", { command: "/system" }).then((d) => {
+    const m = (d && d.result || "").match(/(per_ask|session_allow|always_allow)/);
+    if (m) $$(".approval-mode-btn", bar).forEach((b) => b.classList.toggle("active", b.dataset.mode === m[1]));
+  }).catch(() => {});
+}
+
 function initApprovalMode() {
   const bar = $("#approvalModeBar");
   if (!bar) return;
   $$(".approval-mode-btn", bar).forEach((b) => {
     b.addEventListener("click", () => setApprovalMode(b.dataset.mode));
   });
-  // 从后端读取当前审批模式并高亮
-  apiPost("/api/command", { command: "/system" }).then((d) => {
-    const m = (d && d.result || "").match(/(per_ask|session_allow|always_allow)/);
-    if (m) $$(".approval-mode-btn", bar).forEach((b) => b.classList.toggle("active", b.dataset.mode === m[1]));
-  }).catch(() => {});
+  refreshApprovalMode();
 }
 
 /* ==================== 流式渲染调度 ==================== */
@@ -842,6 +848,7 @@ async function newThread() {
     updateChatTitle("新对话");
     refreshTopbar();
     loadThreads();
+    refreshApprovalMode(); // /new 会切换 thread_id，重新同步审批模式按钮（防按钮高亮与实际模式不一致）
     toast("已开启新对话", "success");
   } catch (e) {
     toast("新建失败: " + e.message, "error");
@@ -878,6 +885,7 @@ async function runCommand(cmd) {
       updateChatTitle("新对话");
       loadThreads();
       refreshTopbar();
+      refreshApprovalMode(); // 同上：切换会话后同步审批模式按钮
       toast("已开启新对话", "success");
     } else if (cmd.startsWith("/resume")) {
       if (data.thread_id) {
