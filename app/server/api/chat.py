@@ -109,6 +109,9 @@ async def chat_endpoint(payload: dict):
                 # 内部 LLM 输出过滤：update_summary 等节点内的非对话 LLM 调用（摘要生成）也会
                 # 被 messages 流以 node='chatbot' 捕获，必须丢弃，否则摘要文本污染聊天框。
                 _tok_state = {}
+                # 记忆已推过 tool_chunk 的 id（langchain 流式 chunk 在第一个非空 tool_call 后会被
+                # delta 覆盖 name=None/id=None，导致同一工具被重复推。用 id 去重保证 name 只推一次）
+                _seen_tool_ids = set()
                 try:
                     for mode, payload in _srv_cfg._GRAPH.stream(
                         inputs, config,
@@ -166,20 +169,27 @@ async def chat_endpoint(payload: dict):
                                 for tc in tc_full:
                                     tc_name = getattr(tc, "name", None)
                                     tc_args = getattr(tc, "args", {}) or {}
-                                    if isinstance(tc_args, dict):
-                                        tc_args = json.dumps(tc_args, ensure_ascii=False)
-                                    if _diag:
-                                        _diag_logger.info(f"tool_chunk name={tc_name} args={str(tc_args)[:80]}")
-                                    sync_q.put({"step": "tool_chunk", "name": tc_name, "args": str(tc_args)[:200], "node": node})
-                            # 兼容老路径：tool_call_chunks
+                                    tc_id = getattr(tc, "id", None)
+                                    # 只推带 name 且 id 未见过的（避免被 delta 覆盖的 None 推上去）
+                                    if tc_name and tc_id and tc_id not in _seen_tool_ids:
+                                        _seen_tool_ids.add(tc_id)
+                                        if isinstance(tc_args, dict):
+                                            tc_args = json.dumps(tc_args, ensure_ascii=False)
+                                        if _diag:
+                                            _diag_logger.info(f"tool_chunk[FIRST] name={tc_name} id={tc_id} args={str(tc_args)[:80]}")
+                                        sync_q.put({"step": "tool_chunk", "name": tc_name, "args": str(tc_args)[:200], "node": node})
+                            # 兼容老路径：tool_call_chunks（只用于累积 args 增量；name/id 已被 _seen_tool_ids 锁住）
                             tool_calls = getattr(chunk, "tool_call_chunks", None)
                             if tool_calls:
                                 for tc in tool_calls:
                                     tc_name = getattr(tc, "name", None)
                                     tc_args = getattr(tc, "args", "") or ""
+                                    tc_id = getattr(tc, "id", None)
                                     if _diag:
-                                        _diag_logger.info(f"tool_chunk(old) name={tc_name} args={str(tc_args)[:80]}")
-                                    sync_q.put({"step": "tool_chunk", "name": tc_name, "args": str(tc_args)[:200], "node": node})
+                                        _diag_logger.info(f"tool_chunk(old) name={tc_name} id={tc_id} args={str(tc_args)[:80]}")
+                                    # 只有见过 id 才推（避免 name=None/id=None 噪声；seen 集合里有了说明是同一工具的 args 增量）
+                                    if tc_id and tc_id in _seen_tool_ids:
+                                        sync_q.put({"step": "tool_chunk", "name": tc_name, "args": str(tc_args)[:200], "node": node})
                         else:
                             # updates 模式：payload 是 {node: update_dict}
                             for node, upd in (payload or {}).items():
