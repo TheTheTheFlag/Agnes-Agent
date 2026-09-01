@@ -1,7 +1,6 @@
 """app.server.api.chat — 对话 API（流式 /api/chat + 斜杠命令 /api/command）。"""
 import json
 import asyncio
-import logging
 import uuid as _uuid
 from langgraph.types import Command
 from langchain_core.messages import AIMessageChunk
@@ -17,16 +16,6 @@ import os as _os
 _BASE_DIR = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 
 router = APIRouter()
-
-# ----- 诊断 logger（受 CHAT_DIAG=1 控制，写到 data/chat_diag.log）-----
-_diag_logger = logging.getLogger("chat_diag")
-_diag_logger.setLevel(logging.DEBUG)
-_diag_logger.propagate = False  # 不让根 logger 重复输出
-if not _diag_logger.handlers:
-    _diag_log_path = _os.path.join(_os.path.dirname(DB_PATH), "chat_diag.log")
-    _fh = logging.FileHandler(_diag_log_path, encoding="utf-8")
-    _fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-    _diag_logger.addHandler(_fh)
 
 # 内部 LLM 输出过滤（摘要生成等非对话调用）的摘要结构 marker。
 # 用"前缀"形式（去掉尾部 **）：token 逐字到达时，一旦拼出"**用户目标"即可判定
@@ -109,9 +98,6 @@ async def chat_endpoint(payload: dict):
                 # 内部 LLM 输出过滤：update_summary 等节点内的非对话 LLM 调用（摘要生成）也会
                 # 被 messages 流以 node='chatbot' 捕获，必须丢弃，否则摘要文本污染聊天框。
                 _tok_state = {}
-                # 记忆已推过 tool_chunk 的 id（langchain 流式 chunk 在第一个非空 tool_call 后会被
-                # delta 覆盖 name=None/id=None，导致同一工具被重复推。用 id 去重保证 name 只推一次）
-                _seen_tool_ids = set()
                 try:
                     for mode, payload in _srv_cfg._GRAPH.stream(
                         inputs, config,
@@ -122,31 +108,13 @@ async def chat_endpoint(payload: dict):
                             # payload = (AIMessageChunk/AIMessage, metadata)
                             chunk, meta = payload
                             node = (meta or {}).get("langgraph_node", "")
-                            # AIMessage（非 chunk，on_llm_end 时 emit）：tool_calls 完整字段一定有 name
-                            # 流式 chunk 的 tool_calls 在第一个 chunk 短暂有 name 后被 delta 覆盖为 None（见 data/chat_diag.log 实测）
-                            # 所以必须从 AIMessage 提取 tool_calls 推给前端，不能只在 chunk 路径
-                            if not isinstance(chunk, AIMessageChunk):
-                                try:
-                                    _full_calls = getattr(chunk, "tool_calls", None) or []
-                                    _diag = _os.environ.get("CHAT_DIAG") == "1"
-                                    if _diag:
-                                        _diag_logger.info(f"AIMessage (full) tool_calls={_full_calls}")
-                                    for _tc in _full_calls:
-                                        _tcn = getattr(_tc, "name", None) or (_tc.get("name") if isinstance(_tc, dict) else None)
-                                        _tca = getattr(_tc, "args", None) or (_tc.get("args") if isinstance(_tc, dict) else None) or {}
-                                        if _tcn:
-                                            if isinstance(_tca, dict):
-                                                _tca = json.dumps(_tca, ensure_ascii=False)
-                                            sync_q.put({"step": "tool_chunk", "name": _tcn, "args": str(_tca)[:200], "node": node})
-                                except Exception as _e:
-                                    if _os.environ.get("CHAT_DIAG") == "1":
-                                        _diag_logger.info(f"AIMessage extract error: {_e}")
-                                continue
                             # 只处理流式 chunk：langgraph 的 messages 流对同一次 LLM 调用会先
                             # emit 流式 chunk（AIMessageChunk，含非流式模型的模拟流式），随后在
                             # on_llm_end 再 emit 一次完整消息（AIMessage）。二者内容相同，若都推给
                             # 前端，回复会被流式显示两遍（表现为回复文本重复）。因此忽略
                             # AIMessage（end 完整消息），完整文本由 updates 模式的 final 事件兜底。
+                            if not isinstance(chunk, AIMessageChunk):
+                                continue
                             text = ""
                             if hasattr(chunk, "content"):
                                 text = chunk.content or ""
@@ -157,45 +125,12 @@ async def chat_endpoint(payload: dict):
                                 if text:
                                     sync_q.put({"step": "token", "text": text, "node": node})
                             # 工具调用参数增量也透传（便于前端展示意图）
-                            # 关键：AIMessageChunk.tool_calls（非 _chunks 后缀）是完整字段，
-                            # 在第一个非空 chunk 就有 name+id+args；tool_call_chunks 早期可能为 null
-                            _diag = _os.environ.get("CHAT_DIAG") == "1"
-                            if _diag:
-                                _tcs = getattr(chunk, "tool_calls", None)
-                                _tccs = getattr(chunk, "tool_call_chunks", None)
-                                _diag_logger.info(f"chunk tool_calls={_tcs}  tool_call_chunks={_tccs}")
-                            # langchain 在 chunk 流里 tool_calls 元素可能是 dict 也可能是对象（langgraph v1+ 用 dict）
-                            # 必须两种情况都支持
-                            def _gf(tc, key, default=None):
-                                if isinstance(tc, dict):
-                                    return tc.get(key, default)
-                                return getattr(tc, key, default)
-                            tc_full = getattr(chunk, "tool_calls", None)
-                            if tc_full:
-                                for tc in tc_full:
-                                    tc_name = _gf(tc, "name")
-                                    tc_args = _gf(tc, "args", {}) or {}
-                                    tc_id = _gf(tc, "id")
-                                    # 只推带 name 且 id 未见过的（避免被 delta 覆盖的 None 推上去）
-                                    if tc_name and tc_id and tc_id not in _seen_tool_ids:
-                                        _seen_tool_ids.add(tc_id)
-                                        if isinstance(tc_args, dict):
-                                            tc_args = json.dumps(tc_args, ensure_ascii=False)
-                                        if _diag:
-                                            _diag_logger.info(f"tool_chunk[FIRST] name={tc_name} id={tc_id} args={str(tc_args)[:80]}")
-                                        sync_q.put({"step": "tool_chunk", "name": tc_name, "args": str(tc_args)[:200], "node": node})
-                            # 兼容老路径：tool_call_chunks（只用于累积 args 增量；name/id 已被 _seen_tool_ids 锁住）
                             tool_calls = getattr(chunk, "tool_call_chunks", None)
                             if tool_calls:
                                 for tc in tool_calls:
-                                    tc_name = _gf(tc, "name")
-                                    tc_args = _gf(tc, "args", "") or ""
-                                    tc_id = _gf(tc, "id")
-                                    if _diag:
-                                        _diag_logger.info(f"tool_chunk(old) name={tc_name} id={tc_id} args={str(tc_args)[:80]}")
-                                    # 只有见过 id 才推（避免 name=None/id=None 噪声；seen 集合里有了说明是同一工具的 args 增量）
-                                    if tc_id and tc_id in _seen_tool_ids:
-                                        sync_q.put({"step": "tool_chunk", "name": tc_name, "args": str(tc_args)[:200], "node": node})
+                                    tc_name = getattr(tc, "name", None)
+                                    tc_args = getattr(tc, "args", "") or ""
+                                    sync_q.put({"step": "tool_chunk", "name": tc_name, "args": str(tc_args)[:200], "node": node})
                         else:
                             # updates 模式：payload 是 {node: update_dict}
                             for node, upd in (payload or {}).items():

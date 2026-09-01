@@ -850,7 +850,7 @@ input, textarea { font-family: inherit; }
   align-items: center;
   gap: 8px;
   font-size: 12px;
-  color: var(--text-soft);
+  color: var(--text-2);
   padding: 0 4px;
   min-height: 18px;
   transition: color 0.2s;
@@ -859,7 +859,7 @@ input, textarea { font-family: inherit; }
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--text-faint);
+  background: var(--text-3);
   flex-shrink: 0;
   transition: background 0.2s, box-shadow 0.2s;
 }

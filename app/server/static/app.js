@@ -508,8 +508,7 @@ function endStreaming(finalText) {
     const hasCards = $(".tool-card, .approval-card", host);
     if (!State.streamBuffer && !hasCards) host.remove();
   }
-  // 不在这里清 State.currentAssistantEl —— 后续 token/final 仍要往这个气泡里写
-  // 只在 done/error 事件里显式清（避免重复创建气泡的 bug）
+  State.currentAssistantEl = null;
   State.streamBuffer = "";
   State.pendingToolCard = null;
   scrollToBottom();
@@ -528,40 +527,14 @@ function handleChatEvent(evt) {
       endStreaming();
     }
     setLiveBadge(evt.phase === "start");
-    // live status 跟随：start 进入 node；end 不重置（chatbot→planner→executor 链式流转，
-    // 跨 node 仍要保持"运行中"显示；只有 done/error 才回 idle）
-    if (evt.phase === "start") {
-      setLiveStatusRunning(evt.name);
-    }
   } else if (step === "token") {
     appendStreamToken(evt.text || "");
   } else if (step === "tool_chunk" || step === "tool") {
-    // 不再在消息气泡里插入工具卡片——工具执行状态由 #liveStatus 一行小字展示
-    // 原始 attachToolCard / updateToolCard 调用已禁用
-    // live status: 主要靠 step:tool end 事件更新（langchain 流式 chunk 在某些模型下
-    // tool_call_chunks 一直为空，name 只能从 tool end 拿）；tool_chunk 仅用于"正在调用"过渡展示
-    if (step === "tool_chunk" && evt.name) {
-      if (LiveStatus.tool !== evt.name) {
-        LiveStatus.tool = evt.name;
-        LiveStatus.toolArgs = "";
-        LiveStatus.iteration = Math.min(LiveStatus.iteration + 1, LiveStatus.maxIterations);
-      }
-      LiveStatus.toolArgs = (LiveStatus.toolArgs || "") + (evt.args || "");
-      if (LiveStatus.toolArgs.length > 200) LiveStatus.toolArgs = LiveStatus.toolArgs.slice(0, 200);
-      renderLiveStatus();
-    } else if (step === "tool" && evt.phase === "end" && evt.name) {
-      // 工具结束：兜底接管 LiveStatus（即使一个 tool_chunk 都没收到，只要 tool end 来了就能显示真名）
-      // 这是"已完成"状态，迭代计数 +1
-      if (LiveStatus.tool !== evt.name) {
-        LiveStatus.tool = evt.name;
-        LiveStatus.iteration = Math.min(LiveStatus.iteration + 1, LiveStatus.maxIterations);
-      }
-      LiveStatus.toolArgs = "";
-      renderLiveStatus();
-      // 兜底：工具结束后立刻 endStreaming，避免后端流被截/挂住时前端卡在"加载中动画"
-      // 真正的最终回复仍由 step:"final" / step:"token" 后续事件接管
-      if (State.currentAssistantEl) endStreaming();
+    // tool_chunk：工具开始（带参数增量）；tool：工具结束（带结果预览）
+    if (evt.name && (!State.pendingToolCard || State.pendingToolCard.dataset.tool !== evt.name)) {
+      State.pendingToolCard = attachToolCard(evt.name);
     }
+    updateToolCard(evt);
   } else if (step === "approval") {
     renderApprovalCard(evt.data || {});
   } else if (step === "final") {
@@ -573,15 +546,10 @@ function handleChatEvent(evt) {
   } else if (step === "done") {
     endStreaming();
     setLiveBadge(false);
-    setLiveStatusIdle();
-    // 真正的流结束：清空 currentAssistantEl，下次新消息时建新气泡
-    State.currentAssistantEl = null;
   } else if (step === "error") {
     endStreaming();
     setLiveBadge(false);
-    setLiveStatusIdle();
     addErrorBubble(evt.message || "未知错误");
-    State.currentAssistantEl = null;
   } else if (step === "heartbeat" || step === "__close__") {
     // 忽略
   }
@@ -591,31 +559,20 @@ async function readSSE(response, onEvent) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buf = "";
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      let idx;
-      while ((idx = buf.indexOf("\n\n")) >= 0) {
-        const chunk = buf.slice(0, idx);
-        buf = buf.slice(idx + 2);
-        const line = chunk.split("\n").find((l) => l.startsWith("data: "));
-        if (!line) continue;
-        try {
-          const parsed = JSON.parse(line.slice(6));
-          // 临时诊断：打印每个 SSE 事件，确认 tool/tool_chunk 是否真的到达前端
-          if (window.__diagSSE) {
-            console.log("[SSE]", parsed.step, parsed.name || "", parsed.phase || "", parsed.node || "");
-          }
-          onEvent(parsed);
-        } catch (e) { /* 忽略坏帧 */ }
-      }
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let idx;
+    while ((idx = buf.indexOf("\n\n")) >= 0) {
+      const chunk = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      const line = chunk.split("\n").find((l) => l.startsWith("data: "));
+      if (!line) continue;
+      try {
+        onEvent(JSON.parse(line.slice(6)));
+      } catch (e) { /* 忽略坏帧 */ }
     }
-  } finally {
-    // 兜底：无论流正常结束/异常/网络中断，状态都要还原 idle，
-    // 否则 done 事件丢失时会卡在 [chatbot] 思考中… 不还原
-    try { setLiveStatusIdle(); } catch (e) {}
   }
 }
 
@@ -638,7 +595,6 @@ async function sendMessage(text, opts) {
 
   State.streaming = true;
   setLiveBadge(true);
-  setLiveStatusRunning("chatbot");  // 立即显示状态，不必等第一个 node 事件
   updateComposer();
   State.chatAbort = new AbortController();
 
@@ -947,64 +903,6 @@ function refreshTopbar() {
 
 function setLiveBadge(on) {
   $("#liveBadge").classList.toggle("hidden", !on);
-}
-
-/* ----- live status: 实时显示轮次 / node / 正在执行的工具 ----- */
-// 状态字段：当前 node 名 + 正在调用的工具名 + 工具参数增量 + ReAct 轮次（前端自增）
-// 轮次自增策略：每次 LLM 决定调工具（tool_chunk 第一个字符到达）算一轮，1-based；
-// 这与后端 ReActLoop 的 iteration 计数大致一致（后端从 1 开始计数，本地自增也能从 1 开始）。
-const LiveStatus = {
-  node: null,         // chatbot | planner | executor | validator | summarizer
-  tool: null,         // 当前正在调用的工具名
-  toolArgs: "",       // 工具参数（截断显示）
-  iteration: 0,       // 当前 node 内的轮次
-  maxIterations: 5,   // 默认上限，与 builder.MAX_TOOL_CALL_ROUNDS 对齐
-  idle: true,
-};
-
-function renderLiveStatus() {
-  const root = $("#liveStatus");
-  const text = $(".live-status-text", root);
-  if (!root || !text) return;
-  if (LiveStatus.idle) {
-    root.classList.remove("running");
-    text.textContent = "空闲";
-    return;
-  }
-  root.classList.add("running");
-  const parts = [];
-  if (LiveStatus.node) parts.push(`[${LiveStatus.node}]`);
-  if (LiveStatus.iteration > 0) {
-    parts.push(`第 ${LiveStatus.iteration}/${LiveStatus.maxIterations} 轮`);
-  }
-  if (LiveStatus.tool) {
-    const args = (LiveStatus.toolArgs || "").trim().slice(0, 40);
-    parts.push(args ? `${LiveStatus.tool}: ${args}${args.length >= 40 ? "…" : ""}` : LiveStatus.tool);
-  } else {
-    parts.push("思考中…");
-  }
-  text.textContent = parts.join("  ");
-}
-
-function setLiveStatusIdle() {
-  LiveStatus.idle = true;
-  LiveStatus.node = null;
-  LiveStatus.tool = null;
-  LiveStatus.toolArgs = "";
-  LiveStatus.iteration = 0;
-  renderLiveStatus();
-}
-
-function setLiveStatusRunning(nodeName) {
-  // 切 node 时重置 node 内的轮次/工具（不同 node 的 ReAct 独立计数）
-  if (nodeName && nodeName !== LiveStatus.node) {
-    LiveStatus.node = nodeName;
-    LiveStatus.iteration = 0;
-    LiveStatus.tool = null;
-    LiveStatus.toolArgs = "";
-  }
-  LiveStatus.idle = false;
-  renderLiveStatus();
 }
 
 /* ==================== 输入区 ==================== */

@@ -210,12 +210,6 @@ def chatbot(state: State, config: RunnableConfig):
                 mode = (_srv_cfg._CONFIG or {}).get("configurable", {}).get("approval_mode") or "session_allow"
             except Exception:
                 mode = "session_allow"
-            # 诊断：print 实际 mode 值 + 工具名 + 进程内 _CONFIG 全貌（一次性，调试用）
-            try:
-                from app.server import config as _srv_cfg_d
-                print(f"[APPROVAL DEBUG] tool={name} mode={mode} _CONFIG={_srv_cfg_d._CONFIG}", flush=True)
-            except Exception:
-                pass
             if mode == "per_ask":
                 resp = interrupt({"question": f"执行命令？\n命令: {cmd}", "command": cmd, "mode": mode})
                 allow = resp.get("allow", False)
