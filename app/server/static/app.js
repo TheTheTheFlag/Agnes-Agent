@@ -535,11 +535,8 @@ function handleChatEvent(evt) {
   } else if (step === "token") {
     appendStreamToken(evt.text || "");
   } else if (step === "tool_chunk" || step === "tool") {
-    // tool_chunk：工具开始（带参数增量）；tool：工具结束（带结果预览）
-    if (evt.name && (!State.pendingToolCard || State.pendingToolCard.dataset.tool !== evt.name)) {
-      State.pendingToolCard = attachToolCard(evt.name);
-    }
-    updateToolCard(evt);
+    // 不再在消息气泡里插入工具卡片——工具执行状态由 #liveStatus 一行小字展示
+    // 原始 attachToolCard / updateToolCard 调用已禁用
     // live status: 主要靠 step:tool end 事件更新（langchain 流式 chunk 在某些模型下
     // tool_call_chunks 一直为空，name 只能从 tool end 拿）；tool_chunk 仅用于"正在调用"过渡展示
     if (step === "tool_chunk" && evt.name) {
