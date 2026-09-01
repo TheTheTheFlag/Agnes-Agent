@@ -15,7 +15,6 @@ const State = {
   currentAssistantEl: null,   // 当前流式输出的助手气泡
   streamBuffer: "",           // token 累积缓冲
   renderTimer: null,
-  pendingToolCard: null,      // tool_chunk 阶段的目标卡片
   liveToolName: "",           // LiveStatus 当前工具名（chunk 增量累积用）
   liveArgs: "",               // LiveStatus 参数累积缓冲
   approvalCard: null,         // 当前审批卡片
@@ -294,45 +293,6 @@ function createToolCard(name) {
   return wrap;
 }
 
-function attachToolCard(name) {
-  // 附加到当前助手气泡内
-  let host = State.currentAssistantEl;
-  if (!host) host = addAssistantBubble("");
-  const card = createToolCard(name);
-  $(".msg-text", host).appendChild(card);
-  State.pendingToolCard = card;
-  scrollToBottom();
-  return card;
-}
-
-function updateToolCard(payload) {
-  const card = State.pendingToolCard;
-  if (!card) return;
-  const step = payload.step;
-  if (step === "tool_chunk") {
-    const p = $(".tool-args", card);
-    if (p) {
-      p.textContent = p.textContent === "…" ? "" : p.textContent;
-      p.textContent += payload.args || "";
-    }
-  } else if (step === "tool") {
-    card.classList.remove("running");
-    card.classList.add(payload.phase === "end" ? "success" : "error");
-    const badge = $(".tool-badge", card);
-    if (badge) {
-      badge.textContent = payload.phase === "end" ? "✓ 完成" : "失败";
-      badge.className = "tool-badge " + (payload.phase === "end" ? "ok" : "fail");
-    }
-    const out = $(".tool-result", card);
-    if (out && payload.output_preview != null) out.textContent = payload.output_preview || "(无输出)";
-    const args = $(".tool-args", card);
-    if (args && args.textContent === "…") args.textContent = "(无参数)";
-    card.classList.add("open");
-    State.pendingToolCard = null;
-    scrollToBottom();
-  }
-}
-
 /* ==================== 审批卡片 ==================== */
 function renderApprovalCard(data) {
   const host = State.currentAssistantEl || addAssistantBubble("");
@@ -539,7 +499,6 @@ function endStreaming(finalText) {
   // 真正的"流结束"由调用方在合适的时机显式清空（done/error/abort/node end 非 chatbot）
   // interrupt/resume 路径下，chatbot node end 和 final 都不应清空，避免新气泡被创建
   State.streamBuffer = "";
-  State.pendingToolCard = null;
   scrollToBottom();
 }
 
@@ -564,12 +523,8 @@ function handleChatEvent(evt) {
   } else if (step === "token") {
     appendStreamToken(evt.text || "");
   } else if (step === "tool_chunk" || step === "tool") {
-    // tool_chunk：工具开始（带参数增量）；tool：工具结束（带结果预览）
-    if (evt.name && (!State.pendingToolCard || State.pendingToolCard.dataset.tool !== evt.name)) {
-      State.pendingToolCard = attachToolCard(evt.name);
-    }
-    updateToolCard(evt);
-    // 极简 LiveStatus：显示当前工具 name + args。
+    // 工具调用不在对话气泡里创建卡片（避免干扰聊天内容），只在发送框上方的
+    // 状态行实时显示当前工具 name + args；需要审批时由 approval 事件弹出审批卡片。
     // 网关把工具调用增量按 chunk 投递：首个 chunk 带 name，后续 chunk 只有 args 片段
     //（JSON 片段如 '{'、'limit'、': 5'…），这里按序拼接，实时刷新状态行。
     if (evt.name) {
