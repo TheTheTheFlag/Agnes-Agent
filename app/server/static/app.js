@@ -541,17 +541,31 @@ function handleChatEvent(evt) {
     }
     updateToolCard(evt);
     // live status: 同一工具的参数增量累积；新工具 → 轮次 +1
-    if (step === "tool_chunk" && evt.name) {
-      if (LiveStatus.tool !== evt.name) {
+    // 关键修复：langchain 流式 chunk 早期 evt.name 可能为 null（仅 args 增量），
+    // 这时仍要累积 args 到 LiveStatus.toolArgs（已有 tool 的情况下）；
+    // name 一旦到达就视作"新工具"信号，触发 iteration +1。
+    if (step === "tool_chunk") {
+      if (evt.name && LiveStatus.tool !== evt.name) {
         LiveStatus.tool = evt.name;
         LiveStatus.toolArgs = "";
         LiveStatus.iteration = Math.min(LiveStatus.iteration + 1, LiveStatus.maxIterations);
       }
-      LiveStatus.toolArgs = (LiveStatus.toolArgs || "") + (evt.args || "");
-      if (LiveStatus.toolArgs.length > 200) LiveStatus.toolArgs = LiveStatus.toolArgs.slice(0, 200);
-      renderLiveStatus();
-    } else if (step === "tool" && evt.phase === "end") {
-      // 工具结束：参数固定，轮次保留（直到下一轮）
+      if (LiveStatus.tool) {  // 已知工具名（即使是 name=null 的后续 chunk）就累积 args
+        LiveStatus.toolArgs = (LiveStatus.toolArgs || "") + (evt.args || "");
+        if (LiveStatus.toolArgs.length > 200) LiveStatus.toolArgs = LiveStatus.toolArgs.slice(0, 200);
+        renderLiveStatus();
+      } else if (evt.args) {
+        // 还没拿到 tool name 但 args 已经开始流——临时显示"调工具中…"
+        LiveStatus.tool = "调工具中…";
+        LiveStatus.toolArgs = String(evt.args).slice(0, 200);
+        renderLiveStatus();
+      }
+    } else if (step === "tool" && evt.phase === "end" && evt.name) {
+      // 工具结束：用真名（如果之前是占位"调工具中…"）替换，确保显示正确
+      if (LiveStatus.tool === "调工具中…") {
+        LiveStatus.tool = evt.name;
+      }
+      LiveStatus.toolArgs = "";
       renderLiveStatus();
     }
   } else if (step === "approval") {
