@@ -349,7 +349,10 @@ function renderApprovalCard(data) {
     </div>`;
   $(".btn-approve", card).addEventListener("click", () => respondApproval(true, data.mode));
   $(".btn-deny", card).addEventListener("click", () => respondApproval(false, data.mode));
-  $(".msg-text", host).appendChild(card);
+  // 移除气泡里的加载中动画（审批卡取代了它）
+  const msgText = $(".msg-text", host);
+  if (msgText) $(".typing-dots", msgText)?.remove();
+  msgText.appendChild(card);
   State.approvalCard = card;
   scrollToBottom();
 }
@@ -495,6 +498,23 @@ function appendStreamToken(text) {
   scheduleStreamRender();
 }
 
+/* ---------------- 极简 LiveStatus: 只显示当前工具 name + args ---------------- */
+function setLiveStatus(name, args) {
+  const root = $("#liveStatus");
+  const text = $(".live-status-text", root);
+  if (!root || !text) return;
+  root.classList.add("running");
+  const argStr = (args || "").trim().slice(0, 60);
+  text.textContent = argStr ? `${name}(${argStr}${argStr.length >= 60 ? "…" : ""})` : name;
+}
+function setLiveStatusIdle() {
+  const root = $("#liveStatus");
+  const text = $(".live-status-text", root);
+  if (!root || !text) return;
+  root.classList.remove("running");
+  text.textContent = "空闲";
+}
+
 function endStreaming(finalText) {
   if (State.renderTimer) {
     clearTimeout(State.renderTimer);
@@ -511,7 +531,9 @@ function endStreaming(finalText) {
     const hasCards = $(".tool-card, .approval-card", host);
     if (!State.streamBuffer && !hasCards) host.remove();
   }
-  State.currentAssistantEl = null;
+  // 不在这里清 State.currentAssistantEl——
+  // 真正的"流结束"由调用方在合适的时机显式清空（done/error/abort/node end 非 chatbot）
+  // interrupt/resume 路径下，chatbot node end 和 final 都不应清空，避免新气泡被创建
   State.streamBuffer = "";
   State.pendingToolCard = null;
   scrollToBottom();
@@ -543,6 +565,10 @@ function handleChatEvent(evt) {
       State.pendingToolCard = attachToolCard(evt.name);
     }
     updateToolCard(evt);
+    // 极简 LiveStatus: 只在 tool 结束时更新一次（不做 chunk 累积 / 不做去重）
+    if (step === "tool" && evt.phase === "end" && evt.name) {
+      setLiveStatus(evt.name, evt.args || "");
+    }
   } else if (step === "approval") {
     renderApprovalCard(evt.data || {});
   } else if (step === "final") {
@@ -554,10 +580,14 @@ function handleChatEvent(evt) {
   } else if (step === "done") {
     endStreaming();
     setLiveBadge(false);
+    setLiveStatusIdle();
+    State.currentAssistantEl = null;  // 真正的流结束：清空，下次新消息时建新气泡
   } else if (step === "error") {
     endStreaming();
     setLiveBadge(false);
+    setLiveStatusIdle();
     addErrorBubble(evt.message || "未知错误");
+    State.currentAssistantEl = null;
   } else if (step === "heartbeat" || step === "__close__") {
     // 忽略
   }
@@ -630,6 +660,8 @@ async function sendMessage(text, opts) {
       endStreaming();
       addErrorBubble(e.message || "请求失败");
     }
+    State.currentAssistantEl = null;  // 异常也清空，避免下次 new 消息时复用挂起气泡
+    setLiveStatusIdle();
   } finally {
     State.streaming = false;
     State.chatAbort = null;
@@ -644,6 +676,8 @@ function stopChat() {
   if (State.chatAbort) State.chatAbort.abort();
   endStreaming();
   setLiveBadge(false);
+  setLiveStatusIdle();
+  State.currentAssistantEl = null;  // 停止时清空，下次新消息时建新气泡
   State.streaming = false;
   updateComposer();
 }

@@ -160,7 +160,13 @@ async def chat_endpoint(payload: dict):
                                         t = m.get("type") if isinstance(m, dict) else getattr(m, "type", "")
                                         if t == "ai" and isinstance(m, dict):
                                             for tc in (m.get("tool_calls") or []):
-                                                call_names[tc.get("id", "")] = tc.get("name", "")
+                                                # 同时记录 name + args（dict 或对象两种形态兼容）
+                                                _tcid = tc.get("id", "")
+                                                _tcname = tc.get("name", "")
+                                                _tcargs = tc.get("args")
+                                                if isinstance(_tcargs, dict):
+                                                    _tcargs = json.dumps(_tcargs, ensure_ascii=False)
+                                                call_names[_tcid] = {"name": _tcname, "args": _tcargs or ""}
                                     for m in reversed(upd["messages"]):
                                         is_ai = (isinstance(m, dict) and m.get("type") == "ai") or \
                                                 (hasattr(m, "type") and getattr(m, "type") == "ai")
@@ -195,11 +201,13 @@ async def chat_endpoint(payload: dict):
                                                   (hasattr(m, "type") and getattr(m, "type") == "tool")
                                         if is_tool:
                                             tcid = m.get("tool_call_id") if isinstance(m, dict) else getattr(m, "tool_call_id", "")
-                                            tc_name = call_names.get(tcid, "tool")
+                                            tc_info = call_names.get(tcid, {"name": "tool", "args": ""})
+                                            tc_name = tc_info.get("name", "tool") if isinstance(tc_info, dict) else tc_info
+                                            tc_args = tc_info.get("args", "") if isinstance(tc_info, dict) else ""
                                             tc_content = m.get("content") if isinstance(m, dict) else getattr(m, "content", "")
                                             if isinstance(tc_content, list):
                                                 tc_content = "".join(str(x.get("text", "")) if isinstance(x, dict) else str(x) for x in tc_content)
-                                            sync_q.put({"step": "tool", "name": tc_name, "phase": "end", "output_preview": str(tc_content)[:300]})
+                                            sync_q.put({"step": "tool", "name": tc_name, "args": str(tc_args)[:200], "phase": "end", "output_preview": str(tc_content)[:300]})
                                 sync_q.put({"step": "node", "name": node, "phase": "end"})
                 except Exception as e:
                     sync_q.put({"_err": str(e)})
