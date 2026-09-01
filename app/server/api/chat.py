@@ -127,7 +127,7 @@ async def chat_endpoint(payload: dict):
                             # 工具调用参数增量也透传（便于前端展示意图）
                             # 关键：AIMessageChunk.tool_calls（非 _chunks 后缀）是完整字段，
                             # 在第一个非空 chunk 就有 name+id+args；tool_call_chunks 早期可能为 null
-                            _diag = os.environ.get("CHAT_DIAG") == "1"
+                            _diag = _os.environ.get("CHAT_DIAG") == "1"
                             if _diag:
                                 _tcs = getattr(chunk, "tool_calls", None)
                                 _tccs = getattr(chunk, "tool_call_chunks", None)
