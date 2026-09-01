@@ -557,6 +557,9 @@ function handleChatEvent(evt) {
       }
       LiveStatus.toolArgs = "";
       renderLiveStatus();
+      // 兜底：工具结束后立刻 endStreaming，避免后端流被截/挂住时前端卡在"加载中动画"
+      // 真正的最终回复仍由 step:"final" / step:"token" 后续事件接管
+      if (State.currentAssistantEl) endStreaming();
     }
   } else if (step === "approval") {
     renderApprovalCard(evt.data || {});
