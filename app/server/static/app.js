@@ -608,7 +608,12 @@ async function readSSE(response, onEvent) {
       const line = chunk.split("\n").find((l) => l.startsWith("data: "));
       if (!line) continue;
       try {
-        onEvent(JSON.parse(line.slice(6)));
+        const parsed = JSON.parse(line.slice(6));
+        // 诊断开关：控制台执行 window.__diagSSE = true 后开启
+        if (window.__diagSSE) {
+          console.log("[SSE]", parsed.step, parsed.name || "", parsed.phase || "", parsed.node || "");
+        }
+        onEvent(parsed);
       } catch (e) { /* 忽略坏帧 */ }
     }
   }
