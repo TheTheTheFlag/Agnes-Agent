@@ -137,9 +137,10 @@ _SCHED_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS scheduled_tasks (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
-    schedule_type TEXT NOT NULL,      -- 'interval' | 'daily'
-    interval_seconds INTEGER,          -- schedule_type=interval 时
-    daily_time TEXT,                   -- schedule_type=daily 时 "HH:MM"
+    schedule_type TEXT NOT NULL,      -- 'cron' | 'interval'(旧) | 'daily'(旧)
+    cron_expr TEXT,                   -- schedule_type=cron 时，标准 5 段 cron（分 时 日 月 周）
+    interval_seconds INTEGER,          -- 旧：schedule_type=interval 时
+    daily_time TEXT,                   -- 旧：schedule_type=daily 时 "HH:MM"
     prompt TEXT NOT NULL,
     thread_id TEXT,
     enabled INTEGER DEFAULT 1,
@@ -153,6 +154,15 @@ def _sched_init():
     import sqlite3 as _sqlite
     with _sqlite.connect(_SCHED_DB) as conn:
         conn.execute(_SCHED_TABLE_SQL)
+        # 旧库迁移：补充 cron_expr 列
+        try:
+            conn.execute("ALTER TABLE scheduled_tasks ADD COLUMN cron_expr TEXT")
+        except Exception:
+            pass
+        try:
+            conn.execute("ALTER TABLE scheduled_tasks ADD COLUMN thread_id TEXT")
+        except Exception:
+            pass
 
 _sched_init()
 
@@ -177,10 +187,11 @@ def _sched_insert(task: dict):
     import sqlite3 as _sqlite
     with _sqlite.connect(_SCHED_DB) as conn:
         conn.execute(
-            """INSERT INTO scheduled_tasks (id, name, schedule_type, interval_seconds, daily_time, prompt, thread_id, enabled)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (task["id"], task["name"], task["schedule_type"], task.get("interval_seconds"),
-             task.get("daily_time"), task["prompt"], task.get("thread_id"), 1 if task.get("enabled", True) else 0)
+            """INSERT INTO scheduled_tasks (id, name, schedule_type, cron_expr, interval_seconds, daily_time, prompt, thread_id, enabled)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (task["id"], task["name"], task["schedule_type"], task.get("cron_expr"),
+             task.get("interval_seconds"), task.get("daily_time"), task["prompt"],
+             task.get("thread_id"), 1 if task.get("enabled", True) else 0)
         )
 
 
@@ -198,10 +209,61 @@ def _sched_delete(task_id):
         conn.execute("DELETE FROM scheduled_tasks WHERE id = ?", (task_id,))
 
 
+def _cron_field(field, val, lo, hi):
+    """判断单个 cron 字段是否匹配值 val。支持 * 、*/n 、a-b 、a-b/n 、a,b,c 。"""
+    field = str(field).strip()
+    if field == "*":
+        return True
+    if "," in field:
+        return any(_cron_field(x, val, lo, hi) for x in field.split(","))
+    if "-" in field:
+        rng, _, step_part = field.partition("/")
+        a, b = rng.split("-")
+        a, b = int(a), int(b)
+        step = int(step_part) if step_part else 1
+        return a <= val <= b and (val - a) % step == 0
+    if "/" in field:
+        base, step = field.split("/")
+        return _cron_field(base, val, lo, hi) and int(step) > 0 and val % int(step) == 0
+    return int(field) == val
+
+
+def _cron_match(expr, dt):
+    """标准 5 段 cron 匹配：分 时 日 月 周。
+    dt 为 datetime；周字段 cron 约定 0/7=周日、1=周一…6=周六，与 Python weekday() 对齐。"""
+    try:
+        parts = str(expr).split()
+        if len(parts) != 5:
+            return False
+        minute, hour, dom, month, dow = parts
+        cron_dow = (dt.weekday() + 1) % 7  # 0=周日 … 6=周六
+        fields = [
+            (minute, dt.minute, 0, 59),
+            (hour, dt.hour, 0, 23),
+            (dom, dt.day, 1, 31),
+            (month, dt.month, 1, 12),
+            (dow, cron_dow, 0, 6),
+        ]
+        return all(_cron_field(f, v, lo, hi) for (f, v, lo, hi) in fields)
+    except Exception:
+        return False
+
+
 def _sched_due(task: dict, now: float, now_str: str) -> bool:
     """判断任务是否到点执行。"""
     if not task.get("enabled"):
         return False
+    if task["schedule_type"] == "cron":
+        # 常规 cron：匹配当前时间，且本分钟尚未执行过（last_run_at 不落在当前分钟）
+        from datetime import datetime as _dt
+        try:
+            now_dt = _dt.fromisoformat(now_str)
+        except Exception:
+            return False
+        if not _cron_match(task.get("cron_expr") or "", now_dt):
+            return False
+        last = task.get("last_run_at") or ""
+        return not last.startswith(now_str[:16])
     if task["schedule_type"] == "interval":
         secs = task.get("interval_seconds") or 0
         if secs <= 0:
@@ -515,21 +577,29 @@ async def sched_list():
 @app.post("/api/scheduler")
 async def sched_create(payload: dict):
     """新增定时任务。
-    payload: { name, schedule_type: 'interval'|'daily', interval_seconds?, daily_time?("HH:MM"), prompt, thread_id? }
+    payload: { name, schedule_type: 'cron'|'interval'|'daily', cron_expr?("分 时 日 月 周"), interval_seconds?, daily_time?, prompt, thread_id? }
     """
     import uuid as _uid
     p = payload or {}
     name = (p.get("name") or "").strip()
     prompt = (p.get("prompt") or "").strip()
-    stype = p.get("schedule_type", "interval")
+    stype = p.get("schedule_type", "cron")
     if not name or not prompt:
         return JSONResponse({"error": "name 和 prompt 必填"}, status_code=400)
-    if stype not in ("interval", "daily"):
-        return JSONResponse({"error": "schedule_type 必须是 interval 或 daily"}, status_code=400)
+    cron_expr = None
+    if stype == "cron":
+        cron_expr = (p.get("cron_expr") or "").strip()
+        if not cron_expr:
+            return JSONResponse({"error": "cron 表达式必填（如 */5 * * * *）"}, status_code=400)
+        if len(cron_expr.split()) != 5:
+            return JSONResponse({"error": "cron 表达式需为 5 段：分 时 日 月 周（如 0 9 * * *）"}, status_code=400)
+    elif stype not in ("interval", "daily"):
+        return JSONResponse({"error": "schedule_type 必须是 cron / interval / daily"}, status_code=400)
     task = {
         "id": _uid.uuid4().hex,
         "name": name,
         "schedule_type": stype,
+        "cron_expr": cron_expr,
         "interval_seconds": int(p.get("interval_seconds") or 0),
         "daily_time": p.get("daily_time"),
         "prompt": prompt,

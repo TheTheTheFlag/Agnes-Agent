@@ -31,6 +31,8 @@
       <input id="threadSearch" type="text" placeholder="搜索会话…" autocomplete="off">
     </div>
 
+    <div class="thread-toolbar" id="threadToolbar"></div>
+
     <nav id="threadList" class="thread-list"></nav>
 
     <div class="sidebar-foot">
@@ -66,12 +68,13 @@
           <button class="approval-mode-btn" data-mode="session_allow">♻️ 本次会话允许</button>
           <button class="approval-mode-btn" data-mode="always_allow">🔓 永久允许</button>
         </div>
-        <button id="btnClearLogs" class="btn-ghost" title="清空日志/事件">
-          <svg viewBox="0 0 16 16" width="14" height="14"><path d="M2 4h12M6.5 4V2.8h3V4M4 4l.7 9h6.6l.7-9" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <button id="btnDeliverables" class="btn-ghost" title="交付物">
+          <svg viewBox="0 0 16 16" width="14" height="14"><path d="M2.5 4.5h11v9h-11z" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linejoin="round"/><path d="M5.5 4.5V3a2.5 2.5 0 0 1 5 0v1.5M2.5 8h11" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linecap="round"/></svg>
+          <span>交付物</span>
         </button>
-        <button id="btnDrawer" class="btn-ghost drawer-toggle" title="调试面板">
+        <button id="btnDrawer" class="btn-ghost drawer-toggle" title="设置面板">
           <svg viewBox="0 0 16 16" width="14" height="14"><rect x="2" y="2.5" width="12" height="11" rx="2" stroke="currentColor" stroke-width="1.3" fill="none"/><path d="M2 6.5h12M9.5 2.5v11" stroke="currentColor" stroke-width="1.3"/></svg>
-          <span>调试</span>
+          <span>设置</span>
         </button>
       </div>
     </header>

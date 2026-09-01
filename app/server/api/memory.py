@@ -81,7 +81,8 @@ async def get_memory_api(thread_id: str = Query("default")):
 @router.get("/api/threads")
 async def get_threads():
     """列出所有有过活动的 thread（来自 messages / task_plans），
-    并把当前会话（main.py 注入的 thread_id）置顶、标记 current=true。"""
+    并把当前会话（main.py 注入的 thread_id）置顶、标记 current=true。
+    每项携带 last_user_msg（该会话最后一条用户消息，供列表标题展示）。"""
     import sqlite3 as _sqlite
     db = _sqlite.connect(DB_PATH)
     out = []
@@ -101,7 +102,21 @@ async def get_threads():
             existing["task_count"] = r[1]
         else:
             out.append({"thread_id": r[0], "source": "task_plans", "count": r[1], "last": r[2]})
+    # 每个 thread 的最后一条用户消息（会话列表标题用，替代裸 thread_id）
+    try:
+        user_rows = db.execute(
+            """SELECT thread_id, content FROM (
+                   SELECT thread_id, content,
+                          ROW_NUMBER() OVER (PARTITION BY thread_id ORDER BY timestamp DESC) rn
+                   FROM messages WHERE role='user' AND content IS NOT NULL AND content != ''
+               ) WHERE rn = 1"""
+        ).fetchall()
+        last_user = {r[0]: (r[1] or "") for r in user_rows}
+    except Exception:
+        last_user = {}
     db.close()
+    for t in out:
+        t["last_user_msg"] = last_user.get(t["thread_id"], "")
     # 当前会话置顶（即使无消息也要显示）
     current_tid = (_srv_cfg._CONFIG or {}).get("configurable", {}).get("thread_id")
     if current_tid:
@@ -111,8 +126,20 @@ async def get_threads():
             out.remove(cur_entry)
             out.insert(0, cur_entry)
         else:
-            out.insert(0, {"thread_id": current_tid, "source": "current", "count": 0, "last": None, "current": True})
+            out.insert(0, {"thread_id": current_tid, "source": "current", "count": 0, "last": None, "current": True, "last_user_msg": ""})
     return {"threads": out, "current_thread_id": current_tid}
+
+
+@router.post("/api/threads/delete")
+async def delete_threads_batch(payload: dict):
+    """批量删除会话。payload: { "thread_ids": ["...", ...] }，复用 store 公共删除逻辑。"""
+    from app.server.store import delete_thread_records
+    ids = (payload or {}).get("thread_ids") or []
+    ids = [str(i).strip() for i in ids if str(i).strip()]
+    deleted = []
+    for tid in ids:
+        deleted.append({"thread_id": tid, **delete_thread_records(tid)})
+    return {"deleted": deleted, "total": len(deleted)}
 
 
 @router.get("/api/inspect")

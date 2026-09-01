@@ -247,6 +247,38 @@ input, textarea { font-family: inherit; }
   padding: 26px 10px;
 }
 
+/* 会话列表批量删除操作条 */
+.thread-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px 8px;
+  min-height: 24px;
+}
+.thread-toolbar .t-btn {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-soft);
+  border-radius: 7px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+  white-space: nowrap;
+}
+.thread-toolbar .t-btn:hover { background: var(--bg-hover); color: var(--text); }
+.thread-toolbar .t-btn.danger { color: var(--danger); border-color: var(--danger-bg); }
+.thread-toolbar .t-btn.danger:hover { background: var(--danger-bg); color: var(--danger); }
+.thread-toolbar .t-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.thread-toolbar .tb-count { font-size: 11.5px; color: var(--text-faint); margin-right: 2px; white-space: nowrap; }
+.thread-item .t-check {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
 .sidebar-foot {
   display: flex;
   align-items: center;

@@ -54,6 +54,13 @@ class FakeGraph:
         yield ("updates", {"chatbot": {"messages": [AIMessage(content="已为你查到任务。")]}})
         return
 
+    def get_state(self, config):
+        """模拟 graph.get_state：返回带 values 的快照（chat.py 流结束后保存用）。"""
+        tid = config["configurable"]["thread_id"]
+        return type("StateSnapshot", (), {
+            "values": {"thread_id": tid, "messages": [{"type": "human", "content": "hi"}]},
+        })
+
 
 async def _collect(payload: dict) -> list:
     """调用真实 chat_endpoint，消费流式响应，返回事件 dict 列表。"""
@@ -101,6 +108,15 @@ class ChatToolEventsTest(unittest.TestCase):
         asyncio.run(_collect({"message": "查任务", "thread_id": "test-tid"}))
         after = len(_store._event_listeners)
         self.assertEqual(after, before)
+
+    def test_state_snapshot_saved_after_stream(self):
+        """流结束后应保存完整 graph state 快照（State 面板 messages 不再恒空）。"""
+        from app.server import store as _store
+        _store._state_snapshots.clear()
+        asyncio.run(_collect({"message": "查任务", "thread_id": "test-tid"}))
+        snap = _store._state_snapshots.get("test-tid")
+        self.assertTrue(snap, "应写入 test-tid 的 state 快照")
+        self.assertTrue(snap.get("messages"), "快照中 messages 应非空")
 
 
 if __name__ == "__main__":

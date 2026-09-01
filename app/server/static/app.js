@@ -20,6 +20,9 @@ const State = {
   approvalCard: null,         // 当前审批卡片
   drawerTab: null,
   sse: null,
+  bulkMode: false,            // 会话列表批量删除模式
+  bulkSelected: new Set(),    // 批量删除选中的 thread_id
+  renderedThreads: [],        // 当前渲染的可见会话（供"全选"）
   todos: [],                  // 当前会话的任务待办（planner 拆的子任务）
   todosExpanded: false,       // 待办面板是否展开
   todoPanelDismissed: false,  // 用户是否手动关闭了面板
@@ -800,6 +803,7 @@ function renderThreads(threads) {
   const kw = $("#threadSearch").value.trim().toLowerCase();
   threadListEl.innerHTML = "";
   const visible = threads.filter((t) => !kw || String(t.thread_id).toLowerCase().includes(kw));
+  State.renderedThreads = visible; // 供"全选"使用
 
   if (!visible.length) {
     threadListEl.innerHTML = `<div class="thread-empty">${threads.length ? "没有匹配的会话" : "还没有会话，点击「新建会话」开始"}</div>`;
@@ -810,24 +814,121 @@ function renderThreads(threads) {
     const item = document.createElement("div");
     item.className = "thread-item" + (t.thread_id === State.threadId ? " active" : "");
     const last = t.last ? fmtAgo(t.last) : "从未对话";
+    // 标题显示该会话的最后一条用户消息（不显示裸 thread_id）
+    const title = truncate((t.last_user_msg || "").trim() || "（无消息）", 24);
+    const checked = State.bulkMode && State.bulkSelected.has(t.thread_id);
     item.innerHTML = `
+      ${State.bulkMode ? `<input type="checkbox" class="t-check"${checked ? " checked" : ""}>` : ""}
       <div class="t-main">
-        <div class="t-title">${escapeHtml(t.thread_id.slice(0, 13))}</div>
+        <div class="t-title">${escapeHtml(title)}</div>
         <div class="t-sub">${t.count} 条消息 · ${last}</div>
       </div>
-      <button class="t-del" title="删除会话">×</button>`;
+      ${State.bulkMode ? "" : `<button class="t-del" title="删除会话">×</button>`}`;
     item.addEventListener("click", (e) => {
-      if (e.target.classList.contains("t-del")) return;
+      if (e.target.classList.contains("t-del") || e.target.classList.contains("t-check")) return;
+      if (State.bulkMode) {
+        const cb = $(".t-check", item);
+        cb.checked = !cb.checked;
+        if (cb.checked) State.bulkSelected.add(t.thread_id); else State.bulkSelected.delete(t.thread_id);
+        updateBulkBar();
+        return;
+      }
       selectThread(t.thread_id);
     });
-    $(".t-del", item).addEventListener("click", (e) => {
+    const del = $(".t-del", item);
+    if (del) del.addEventListener("click", (e) => {
       e.stopPropagation();
-      if (confirm(`确定删除会话 ${t.thread_id.slice(0, 13)}… ？此操作不可恢复。`)) {
+      if (confirm("确定删除该会话？此操作不可恢复。")) {
         deleteThread(t.thread_id);
       }
     });
+    const cb = $(".t-check", item);
+    if (cb) cb.addEventListener("change", () => {
+      if (cb.checked) State.bulkSelected.add(t.thread_id); else State.bulkSelected.delete(t.thread_id);
+      updateBulkBar();
+    });
     threadListEl.appendChild(item);
   });
+  updateBulkBar();
+}
+
+/* ==================== 会话批量删除 ==================== */
+function renderThreadToolbar() {
+  const bar = $("#threadToolbar");
+  if (!bar) return;
+  if (!State.bulkMode) {
+    bar.innerHTML = `<button id="btnBulk" class="t-btn">🗑 批量删除</button>`;
+    const b = $("#btnBulk", bar);
+    if (b) b.addEventListener("click", enterBulkMode);
+  } else {
+    const n = State.bulkSelected.size;
+    bar.innerHTML = `
+      <span class="tb-count">已选 ${n}</span>
+      <button id="bulkAll" class="t-btn">全选</button>
+      <button id="bulkDel" class="t-btn danger"${n ? "" : " disabled"}>删除</button>
+      <button id="bulkCancel" class="t-btn">取消</button>`;
+    $("#bulkAll", bar).addEventListener("click", () => {
+      const all = (State.renderedThreads || []).map((t) => t.thread_id);
+      if (State.bulkSelected.size === all.length && all.length) State.bulkSelected.clear();
+      else all.forEach((id) => State.bulkSelected.add(id));
+      updateBulkBar();
+      loadThreads(); // 重渲染勾选状态
+    });
+    $("#bulkDel", bar).addEventListener("click", bulkDeleteThreads);
+    $("#bulkCancel", bar).addEventListener("click", exitBulkMode);
+  }
+}
+
+function updateBulkBar() {
+  const bar = $("#threadToolbar");
+  if (!bar) return;
+  const n = State.bulkSelected.size;
+  const count = $(".tb-count", bar);
+  if (count) count.textContent = `已选 ${n}`;
+  const del = $("#bulkDel", bar);
+  if (del) del.disabled = !n;
+  // 同步刷新各 checkbox 勾选态
+  $$(".t-check", threadListEl).forEach((cb) => {
+    const item = cb.closest(".thread-item");
+    const idx = Array.from(threadListEl.children).indexOf(item);
+    const t = (State.renderedThreads || [])[idx];
+    if (t) cb.checked = State.bulkSelected.has(t.thread_id);
+  });
+}
+
+function enterBulkMode() {
+  State.bulkMode = true;
+  State.bulkSelected = new Set();
+  renderThreadToolbar();
+  loadThreads(); // 重渲染列表，每项显示 checkbox
+}
+
+function exitBulkMode() {
+  State.bulkMode = false;
+  State.bulkSelected = new Set();
+  renderThreadToolbar();
+  loadThreads();
+}
+
+async function bulkDeleteThreads() {
+  const ids = [...State.bulkSelected];
+  if (!ids.length) return;
+  if (!confirm(`确定删除选中的 ${ids.length} 个会话？此操作不可恢复。`)) return;
+  try {
+    const r = await apiPost("/api/threads/delete", { thread_ids: ids });
+    const deletedIds = new Set((r.deleted || []).map((d) => d.thread_id));
+    if (State.threadId && deletedIds.has(State.threadId)) {
+      State.threadId = null;
+      messagesInner().innerHTML = "";
+      renderWelcome();
+      updateChatTitle("新对话");
+    }
+    exitBulkMode();
+    loadThreads();
+    toast(`已删除 ${r.total != null ? r.total : ids.length} 个会话`, "success");
+  } catch (e) {
+    toast("批量删除失败: " + e.message, "error");
+  }
 }
 
 async function selectThread(tid) {
@@ -1397,6 +1498,11 @@ async function renderSchedTab(el) {
   try {
     const data = await apiGet("/api/scheduler");
     const tasks = data.tasks || [];
+    const schedDesc = (t) => {
+      if (t.schedule_type === "cron") return `cron ${t.cron_expr || "(空)"}`;
+      if (t.schedule_type === "interval") return `每 ${t.interval_seconds}s（旧格式）`;
+      return `每日 ${t.daily_time}（旧格式）`;
+    };
     const list = tasks.length ? tasks.map((t) => `
       <div class="sched-item">
         <div class="s-head">
@@ -1406,7 +1512,7 @@ async function renderSchedTab(el) {
           <button class="d-btn sm" data-act="toggle" data-id="${t.id}">${t.enabled ? "停用" : "启用"}</button>
           <button class="d-btn sm danger" data-act="del" data-id="${t.id}">删除</button>
         </div>
-        <div class="s-meta">${t.schedule_type === "interval" ? `每 ${t.interval_seconds}s` : `每日 ${t.daily_time}`} · ${t.thread_id || "默认线程"}</div>
+        <div class="s-meta">${schedDesc(t)} · ${t.thread_id || "默认线程"}</div>
         <div class="s-result">${escapeHtml(truncate(t.prompt, 120))}</div>
         ${t.last_result ? `<div class="s-result" style="color:var(--text-faint)">上次: ${escapeHtml(truncate(t.last_result, 140))}</div>` : ""}
       </div>`).join("") : `<div class="d-empty">暂无定时任务</div>`;
@@ -1415,30 +1521,20 @@ async function renderSchedTab(el) {
       <div class="d-card">
         <h4 style="margin-bottom:8px">新建定时任务</h4>
         <div class="d-row"><label>任务名</label><input class="d-input" id="schedName" placeholder="如：每日日报"></div>
-        <div class="d-row"><label>类型</label>
-          <select class="d-select" id="schedType">
-            <option value="interval">间隔执行</option><option value="daily">每日执行</option>
-          </select>
-        </div>
-        <div class="d-row" id="schedIntervalRow"><label>间隔(秒)</label><input class="d-input" id="schedInterval" value="3600"></div>
-        <div class="d-row hidden" id="schedDailyRow"><label>时间 (HH:MM)</label><input class="d-input" id="schedDaily" placeholder="09:00"></div>
+        <div class="d-row"><label>Cron 表达式</label><input class="d-input" id="schedCron" placeholder="*/5 * * * *（分 时 日 月 周）"></div>
+        <div class="d-row" style="font-size:11px;color:var(--text-faint)">示例：<code>*/5 * * * *</code> 每5分钟 · <code>0 9 * * *</code> 每天9点 · <code>0 9 * * 1-5</code> 工作日9点</div>
         <div class="d-row"><label>提示词</label><textarea class="d-input" id="schedPrompt" rows="2" placeholder="任务内容…"></textarea></div>
         <div class="d-row"><button class="d-btn primary" id="schedAdd">创建</button></div>
       </div>
       ${drawerSection("任务列表", list)}`;
 
-    $("#schedType", el).addEventListener("change", () => {
-      const v = $("#schedType", el).value;
-      $("#schedIntervalRow", el).classList.toggle("hidden", v !== "interval");
-      $("#schedDailyRow", el).classList.toggle("hidden", v !== "daily");
-    });
     $("#schedAdd", el).addEventListener("click", async () => {
       const name = $("#schedName", el).value.trim();
       const prompt = $("#schedPrompt", el).value.trim();
-      const type = $("#schedType", el).value;
-      const payload = { name, prompt, schedule_type: type };
-      if (type === "interval") payload.interval_seconds = +($("#schedInterval", el).value || 0);
-      else payload.daily_time = $("#schedDaily", el).value.trim();
+      const cron = $("#schedCron", el).value.trim();
+      if (!name || !prompt) { toast("任务名和提示词必填", "error"); return; }
+      if (!cron || cron.split(/\s+/).length !== 5) { toast("请填写 5 段 cron 表达式（分 时 日 月 周）", "error"); return; }
+      const payload = { name, prompt, schedule_type: "cron", cron_expr: cron };
       try {
         await apiPost("/api/scheduler", payload);
         toast("已创建", "success");
@@ -1647,7 +1743,7 @@ const DRAWER_TABS = [
   { id: "tools", label: "工具", icon: "🔧" },
   { id: "sched", label: "定时任务", icon: "🗓️" },
   { id: "models", label: "模型", icon: "⚙️" },
-  { id: "deliv", label: "交付物", icon: "📦" },
+  // 交付物 tab 已移到主页顶栏（#btnDeliverables），点击时仍通过 activateTab("deliv") 渲染
 ];
 
 function initDrawer() {
@@ -1715,11 +1811,10 @@ function bindEvents() {
   $("#btnDrawer").addEventListener("click", openDrawer);
   $("#btnDrawerClose").addEventListener("click", closeDrawer);
   $("#drawerMask").addEventListener("click", closeDrawer);
-  $("#btnClearLogs").addEventListener("click", async () => {
-    try {
-      await apiPost("/api/clear-logs", {});
-      toast("日志/事件已清空", "success");
-    } catch (e) { toast(e.message, "error"); }
+  // 交付物入口（主页设置按钮左边）：打开抽屉并激活交付物页
+  $("#btnDeliverables").addEventListener("click", () => {
+    openDrawer();
+    activateTab("deliv");
   });
   $("#sidebarModel").addEventListener("click", () => {
     openDrawer();
@@ -1765,6 +1860,7 @@ async function init() {
   bindEvents();
   startSSE();
   initApprovalMode();
+  renderThreadToolbar();
   chatInput.focus();
 }
 

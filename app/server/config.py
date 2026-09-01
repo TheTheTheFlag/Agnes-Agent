@@ -13,16 +13,9 @@ router = APIRouter()
 _GRAPH = None
 _CONFIG = None
 
-MODEL_CATALOG = {
-    "openai_compatible": {
-        "label": "OpenAI 兼容网关 (llm.chatops.fun)",
-        "models": ["deepseek-v4-pro", "glm-5.1", "MiniMax-M3"],
-    },
-    "agnes2.0": {
-        "label": "Agnes 2.0",
-        "models": ["agnes-2.0-flash", "agnes-2.5-flash"],
-    },
-}
+# 内置来源目录已弃用（置空）：模型目录完全由自定义接入（.model_config 的 custom 列表）驱动，
+# 避免模型页出现"内置"标签——所有来源统一以"自定义"呈现。凭据/模型均由用户在调试面板接入。
+MODEL_CATALOG = {}
 
 from app.config import MODEL_CONFIG_PATH as _MODEL_CONFIG_FILE
 
@@ -79,7 +72,8 @@ def save_custom_models(custom: list):
 
 def get_full_catalog() -> dict:
     """合并内置厂商 + 自定义接入，得到页面完整目录。
-    custom 中与内置同 id（如 openai_compatible / agnes2.0）时覆盖内置（带凭据信息）。"""
+    内置目录（MODEL_CATALOG）已弃用置空，目录完全由自定义接入（.model_config custom）构成，
+    全部以"自定义"呈现（builtin=False）。"""
     catalog = {}
     for pid, info in MODEL_CATALOG.items():
         catalog[pid] = dict(info, builtin=True, custom=False)

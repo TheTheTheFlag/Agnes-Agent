@@ -266,6 +266,16 @@ async def chat_endpoint(payload: dict):
                     _drain_listener()
                     if _listen_q in _store._event_listeners:
                         _store._event_listeners.remove(_listen_q)
+                    # 保存完整 graph state 快照（调试面板 State tab 展示，含 messages）。
+                    # 之前 update_state 从未被调用 → _state_snapshots 恒空 → State 面板 messages 永远为空。
+                    try:
+                        from app.server import update_state as _upd_state
+                        _gs = _srv_cfg._GRAPH.get_state(config)
+                        _vals = getattr(_gs, "values", None) or {}
+                        if isinstance(_vals, dict):
+                            _upd_state(dict(_vals))
+                    except Exception:
+                        pass
                     sync_q.put(None)  # 哨兵
 
             t = Thread(target=sync_runner, daemon=True)
@@ -392,49 +402,9 @@ async def command_endpoint(payload: dict):
 
 
 async def _delete_thread(thread_id: str) -> dict:
-    """删除某 thread 的所有数据（memory.db + checkpoints.db）。"""
-    import sqlite3 as _sqlite
-    counts = {"messages": 0, "tasks": 0, "summaries": 0, "commands": 0, "cache": 0, "subtasks": 0, "checkpoints": 0}
-
-    # memory.db
-    db = _sqlite.connect(DB_PATH)
-    try:
-        # 先删子任务（外键）
-        task_ids = [r[0] for r in db.execute("SELECT id FROM task_plans WHERE thread_id = ?", (thread_id,))]
-        for tid in task_ids:
-            cur = db.execute("DELETE FROM subtasks WHERE task_plan_id = ?", (tid,))
-            counts["subtasks"] += cur.rowcount
-        cur = db.execute("DELETE FROM messages WHERE thread_id = ?", (thread_id,))
-        counts["messages"] += cur.rowcount
-        cur = db.execute("DELETE FROM task_plans WHERE thread_id = ?", (thread_id,))
-        counts["tasks"] += cur.rowcount
-        cur = db.execute("DELETE FROM task_summaries WHERE thread_id = ?", (thread_id,))
-        counts["summaries"] += cur.rowcount
-        cur = db.execute("DELETE FROM command_history WHERE thread_id = ?", (thread_id,))
-        counts["commands"] += cur.rowcount
-        db.commit()
-    finally:
-        db.close()
-
-    # checkpoints.db（LangGraph checkpoint 表）
-    try:
-        ck = _sqlite.connect(CHECKPOINT_DB_PATH)
-        try:
-            cur = ck.execute("DELETE FROM checkpoints WHERE thread_id = ?", (thread_id,))
-            counts["checkpoints"] += cur.rowcount
-            # 部分版本有 writes / checkpoint_writes 表
-            for tbl in ("writes", "checkpoint_writes"):
-                try:
-                    cur = ck.execute(f"DELETE FROM {tbl} WHERE thread_id = ?", (thread_id,))
-                    counts["checkpoints"] += cur.rowcount
-                except _sqlite.OperationalError:
-                    pass
-            ck.commit()
-        finally:
-            ck.close()
-    except Exception:
-        pass
-    return counts
+    """删除某 thread 的所有数据（memory.db + checkpoints.db）。逻辑在 store 公共函数。"""
+    from app.server.store import delete_thread_records
+    return delete_thread_records(thread_id)
 
 
 def _safe(obj):

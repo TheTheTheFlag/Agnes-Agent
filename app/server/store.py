@@ -55,6 +55,52 @@ def _init_persist():
 _init_persist()
 
 
+def delete_thread_records(thread_id: str) -> dict:
+    """删除某 thread 的所有数据（memory.db + checkpoints.db）。
+    供 /delete 命令与批量删除接口（POST /api/threads/delete）共用。"""
+    counts = {"messages": 0, "tasks": 0, "summaries": 0, "commands": 0, "cache": 0, "subtasks": 0, "checkpoints": 0}
+
+    # memory.db
+    db = _sqlite.connect(DB_PATH)
+    try:
+        # 先删子任务（外键）
+        task_ids = [r[0] for r in db.execute("SELECT id FROM task_plans WHERE thread_id = ?", (thread_id,))]
+        for tid in task_ids:
+            cur = db.execute("DELETE FROM subtasks WHERE task_plan_id = ?", (tid,))
+            counts["subtasks"] += cur.rowcount
+        cur = db.execute("DELETE FROM messages WHERE thread_id = ?", (thread_id,))
+        counts["messages"] += cur.rowcount
+        cur = db.execute("DELETE FROM task_plans WHERE thread_id = ?", (thread_id,))
+        counts["tasks"] += cur.rowcount
+        cur = db.execute("DELETE FROM task_summaries WHERE thread_id = ?", (thread_id,))
+        counts["summaries"] += cur.rowcount
+        cur = db.execute("DELETE FROM command_history WHERE thread_id = ?", (thread_id,))
+        counts["commands"] += cur.rowcount
+        db.commit()
+    finally:
+        db.close()
+
+    # checkpoints.db（LangGraph checkpoint 表）
+    try:
+        ck = _sqlite.connect(CHECKPOINT_DB_PATH)
+        try:
+            cur = ck.execute("DELETE FROM checkpoints WHERE thread_id = ?", (thread_id,))
+            counts["checkpoints"] += cur.rowcount
+            # 部分版本有 writes / checkpoint_writes 表
+            for tbl in ("writes", "checkpoint_writes"):
+                try:
+                    cur = ck.execute(f"DELETE FROM {tbl} WHERE thread_id = ?", (thread_id,))
+                    counts["checkpoints"] += cur.rowcount
+                except _sqlite.OperationalError:
+                    pass
+            ck.commit()
+        finally:
+            ck.close()
+    except Exception:
+        pass
+    return counts
+
+
 def _persist_log(level: str, message: str, data, timestamp: str):
     try:
         with _sqlite.connect(DB_PATH) as conn:
