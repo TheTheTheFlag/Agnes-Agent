@@ -6,12 +6,16 @@ Supports text-to-video, image-to-video, and keyframe animation.
 
 import json
 import os
+import time
 import requests
 from typing import Optional, Dict, Any, List
 
 
 class AgnesVideoGenerator:
-    def __init__(self, keys_file: str = "~/.hermes/agnes_keys.json"):
+    def __init__(self, keys_file: str = None):
+        # 默认读取本技能目录下的 keys.json（自包含，不依赖 ~/.hermes）
+        if keys_file is None:
+            keys_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "keys.json")
         self.keys_file = os.path.expanduser(keys_file)
         self.api_key = self._load_api_key()
         self.base_url = "https://api.agnes-ai.cn/v1"

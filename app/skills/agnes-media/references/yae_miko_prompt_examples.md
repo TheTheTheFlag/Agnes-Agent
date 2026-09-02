@@ -5,7 +5,7 @@
 **提示词：**
 超高真实感二次元真人化摄影，《原神》八重神子（Yae Miko），高度还原官方角色设定，粉色渐变长发，标志性狐狸感发型，发丝柔顺自然散落，紫粉色眼眸，白皙细腻肌肤，精致五官，韩系清透裸妆，自然唇色，轻柔浅笑，脸颊微微泛红，温柔凝视镜头，眼神柔和、富有情感，带有轻松自然的互动感，卧躺在沙滩浴巾上，身体自然放松，一只手轻轻搭在肩侧或发丝旁，另一只手自然放于身体一侧，姿态舒展优雅，双腿自然向镜头方向延伸，超低机位摄影，镜头位于腿部前方，从腿部向头部拍摄（low-angle perspective from legs to face），24mm广角镜头，明显近大远小透视，身体线条自然延伸至头部，头部位于画面上方，角色直视镜头，夏日海边度假主题，洁白细腻沙滩，湛蓝透明海水，远处轻柔海浪，蓝天白云，午后暖阳，背景少量游客作为环境点缀，海平线清晰，人物躺在浅色沙滩浴巾上，微风轻轻吹动发丝，八重神子主题夏日泳装，以白色、红色、粉色、金色为主色调，融入神社巫女元素、樱花纹样、御币、雷元素纹饰、金属饰件等官方风格设计，轻盈透明薄纱披肩，服饰随海风轻轻扬起，阳光照射下布料具有柔和光泽，皮肤呈现自然健康光感，细腻真实肤质，柔和高光，真实阴影，HDR，RAW Photography，Photorealistic，Ultra Realistic，Natural Lighting，Soft Sunlight，Global Illumination，Ray Tracing，Cinematic Color Grading，Travel Photography，Editorial Photography，Lifestyle Photography，Vacation Photography，韩系Ins旅行写真，高端时尚杂志摄影，浅景深，背景轻微虚化，电影级构图，真实广角透视，Sharp Focus，Ultra Detailed，Masterpiece，Best Quality，8K，Ultra HD
 
-**输出：** `/home/mirror/agnes-media/20260730/img_0001.png`
+**输出：** `<skill_dir>/output/20260730/img_0001.png`
 
 ---
 
@@ -14,7 +14,7 @@
 **提示词：**
 原神八重神子 cosplay 可爱脸型 顶级漫展场照 极度写实 柔和漫射光 哑光肌肤 自然肌理 拒绝油腻高光 真实光影 细腻布料材质 逼真发丝质感 动漫假发造型 俏皮灵动神态 甜美自信 微笑勾唇 眼神交流 单眼眨眼 精致清透妆容 佩戴美瞳 浓密睫毛 模糊漫展背景 景深 散景 杂志拼图排版 电影级画质 高级感 自然生动
 
-**输出：** `/home/mirror/agnes-media/20260730/img_0002.png`
+**输出：** `<skill_dir>/output/20260730/img_0002.png`
 
 ---
 

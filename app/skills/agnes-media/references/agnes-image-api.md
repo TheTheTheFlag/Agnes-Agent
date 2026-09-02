@@ -34,9 +34,8 @@ Body:
 
 ```python
 import json, os
-keys = json.load(open(os.path.expanduser("~/.hermes/agnes_keys.json")))
-agnes_key = keys["agnes"]       # Agnes API key
-dashscope_key = keys["dashscope"]  # DashScope API key
+keys = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "keys.json")))
+agnes_key = keys["agnes"]       # Agnes API key（keys.json 与本脚本同目录）
 ```
 
 ## 已知限制

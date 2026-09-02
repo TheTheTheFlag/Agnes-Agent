@@ -1,5 +1,5 @@
 ---
-name: 图片理解
+name: Image-Understanding
 description: 通义千问图片理解 — 用 qwen3.7-plus 视觉模型识别图片内容
 triggers:
   - 识别图片

@@ -15,7 +15,7 @@ triggers:
   - agnes-video
   - Agnes AI
 config:
-  keys_file: ~/.hermes/agnes_keys.json
+  keys_file: keys.json
   base_url: https://api.agnes-ai.cn
   model_image_default: agnes-image-2.1-flash
   model_image_legacy: agnes-image-2.0-flash
@@ -25,6 +25,9 @@ config:
 ---
 
 # Agnes AI — 图片 & 视频生成
+
+> **本技能目录 `<skill_dir>`** = `app/skills/agnes-media/`（相对项目根；SKILL.md、image_generator.py、video_generator.py、keys.json、output/ 均在此目录）。
+> 密钥一律从 `<skill_dir>/keys.json` 读取；所有生成产物（图片/视频/日志）一律保存到 `<skill_dir>/output/` 下。执行前可先 `ls app/skills/agnes-media/` 确认。
 
 ## 默认模型
 
@@ -46,7 +49,7 @@ config:
 ## 基本信息
 
 - **Endpoint**: `POST https://api.agnes-ai.cn/v1/images/generations`
-- **认证**: `Authorization: Bearer <your_api_key>`（从 `~/.hermes/agnes_keys.json` 读取）
+- **认证**: `Authorization: Bearer <your_api_key>`（从 `<skill_dir>/keys.json` 读取）
   **⚠️** `response_format` 必须放在 `extra_body` 里，不能放请求体顶层
 
 ## 模型选择
@@ -143,7 +146,7 @@ config:
 
 每次图片生成完成后，必须将 prompt 和 URL 追加写入日志文件。
 
-**日志文件路径**: 与图片同目录，即 `/home/mirror/agnes-media/YYYYMMDD/log.md`
+**日志文件路径**: 与图片同目录，即 `<skill_dir>/output/YYYYMMDD/log.md`
 
 **日志格式**:
 ```markdown
@@ -164,17 +167,17 @@ config:
 
 ## 图片存储路径要求
 
-所有生成的图片**必须**保存到 `/home/mirror/agnes-media/` 目录下，按日期组织：
+所有生成的图片**必须**保存到 `<skill_dir>/output/` 目录下，按日期组织：
 
-- **根目录**: `/home/mirror/agnes-media/`
+- **根目录**: `<skill_dir>/output/`
 - **每日子目录**: 格式为 `YYYYMMDD`，例如今天 `20260615`
-- **完整路径示例**: `/home/mirror/agnes-media/20260615/img_0001.png`
+- **完整路径示例**: `<skill_dir>/output/20260615/img_0001.png`
 
 **生成图片时**:
 1. 先获取当天日期目录：`$(date +%Y%m%d)`
-2. 确保目录存在：`mkdir -p /home/mirror/agnes-media/$(date +%Y%m%d)`
+2. 确保目录存在：`mkdir -p <skill_dir>/output/$(date +%Y%m%d)`
 3. 图片保存到该日期目录下，文件名格式：`img_XXXX.png`（四位序号，从0001递增）
-4. 日志中的 File 路径也要更新为 `/home/mirror/agnes-media/YYYYMMDD/img_XXXX.png`
+4. 日志中的 File 路径也要更新为 `<skill_dir>/output/YYYYMMDD/img_XXXX.png`
 
 **历史迁移**:
 - 旧位置的文件（如 `/home/mirror/asian_girls_*/`, `/home/mirror/random_poses/`, `/home/mirror/knee_pose_*.png`, `/home/mirror/stand_pose_*.png`, `/home/mirror/girl_portrait*.png`）应迁移到对应日期的目录下
@@ -188,11 +191,11 @@ config:
 
 **URL**: https://platform-outputs.agnes-ai.space/images/text-to-image/2026/06/xxxx.png
 
-**File**: /home/mirror/agnes-media/20260615/img_0001.png
+**File**: <skill_dir>/output/20260615/img_0001.png
 
 ---
 ```
-- 视频生成也同理，使用日志文件 `~/.openclaw/agents/main/sessions/agnes_video_log.md`
+- 视频生成也同理，使用日志文件 `<skill_dir>/output/video_log.md`
 
 ## 异步批量生成
 
@@ -206,7 +209,7 @@ config:
 import json, requests, os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-with open(os.path.expanduser("~/.hermes/agnes_keys.json")) as f:
+with open("<skill_dir>/keys.json") as f:
     keys = json.load(f)
 api_key = keys["agnes"]
 
@@ -232,7 +235,7 @@ tasks = [
     # ...
 ]
 
-output_dir = "/home/mirror/batch_imgs"
+output_dir = "<skill_dir>/output/batch"
 os.makedirs(output_dir, exist_ok=True)
 
 with ThreadPoolExecutor(max_workers=5) as executor:
@@ -253,7 +256,7 @@ with ThreadPoolExecutor(max_workers=5) as executor:
 | `timeout=60` | 单次请求超时，避免阻塞 |
 | `size` | 支持 `1024x1024`、`1024x1280`、`1280x1024` |
 
-**发送批量图片到飞书**：按顺序遍历 `output_dir` 下的文件，逐个 `send_message(message="MEDIA:/home/mirror/batch_imgs/img_000.png")` 即可。
+**发送批量图片到飞书**：按顺序遍历 `output_dir` 下的文件，逐个 `send_message(message="MEDIA:<skill_dir>/output/batch/img_000.png")` 即可。
 
 ## Portrait（人物）Prompt 指南
 
@@ -281,7 +284,7 @@ with ThreadPoolExecutor(max_workers=5) as executor:
 
 - **创建任务**: `POST https://api.agnes-ai.cn/v1/videos`
 - **查询结果（推荐）**: `GET https://api.agnes-ai.cn/agnesapi?video_id=<VIDEO_ID>`
-- **认证**: `Authorization: Bearer <your_api_key>`（从 `~/.hermes/agnes_keys.json` 读取）
+- **认证**: `Authorization: Bearer <your_api_key>`（从 `<skill_dir>/keys.json` 读取）
   **⚠️** 视频是**异步任务**，需轮询
 
 ## 四种模式
@@ -374,7 +377,7 @@ with ThreadPoolExecutor(max_workers=5) as executor:
 2. **轮询查询**: 每 8 秒 GET `/agnesapi?video_id=<ID>`（避免 429 限速）
 3. **等待完成**: 状态 `queued` → `processing` → `completed` / `failed`
 4. **获取视频**: 从 `remixed_from_video_id` 提取视频 URL
-5. **发送到飞书**: 下载到 `/home/mirror/` 后用 `MEDIA:/路径` 发送
+5. **发送到飞书**: 下载到 `<skill_dir>/output/` 后用 `MEDIA:/路径` 发送
 
 ## 响应格式
 
@@ -450,9 +453,9 @@ while True:
 
 - **图片**: `response_format` 必须放 `extra_body` 里，不能放请求体顶层，否则 400
 - **视频**: 异步任务，耗时 30-120 秒，需轮询
-- **发送文件**: 下载到 `/home/mirror/` 后用 `MEDIA:/路径` 发飞书
-- **API key**: 从 `~/.hermes/agnes_keys.json` 读取（`json.load`），键名为 `"agnes"`，不要再硬编码 key
-- **发送文件**: 下载到 `/home/mirror/` 后用 `MEDIA:/路径` 发飞书
+- **发送文件**: 下载到 `<skill_dir>/output/` 后用 `MEDIA:/路径` 发飞书
+- **API key**: 从 `<skill_dir>/keys.json` 读取（`json.load`），键名为 `"agnes"`，不要再硬编码 key
+- **发送文件**: 下载到 `<skill_dir>/output/` 后用 `MEDIA:/路径` 发飞书
 ---
 
 ## 🐍 Python SDK
