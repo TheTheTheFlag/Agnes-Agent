@@ -1434,6 +1434,68 @@ input, textarea { font-family: inherit; }
 }
 .btn-attach:hover { background: var(--bg-hover); color: var(--text); }
 
+/* ==================== 待发送附件条 ==================== */
+.attach-bar {
+  max-width: 800px;
+  margin: 0 auto 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: flex-end;
+}
+.attach-item {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 4px 4px 5px;
+  max-width: 96px;
+}
+.attach-item img {
+  width: 80px;
+  height: 64px;
+  object-fit: cover;
+  border-radius: 8px;
+  background: var(--bg-input);
+}
+.attach-file {
+  width: 80px;
+  height: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 26px;
+  background: var(--bg-input);
+  border-radius: 8px;
+}
+.attach-name {
+  font-size: 11px;
+  color: var(--text-soft);
+  max-width: 88px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.attach-remove {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  width: 18px;
+  height: 18px;
+  line-height: 15px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 13px;
+  cursor: pointer;
+}
+.attach-remove:hover { background: rgba(220, 60, 60, 0.9); }
+
 /* ==================== 登录遮罩 ==================== */
 .login-overlay {
   position: fixed; inset: 0; z-index: 9999;

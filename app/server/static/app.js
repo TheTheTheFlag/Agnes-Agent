@@ -26,6 +26,7 @@ const State = {
   todos: [],                  // 当前会话的任务待办（planner 拆的子任务）
   todosExpanded: false,       // 待办面板是否展开
   todoPanelDismissed: false,  // 用户是否手动关闭了面板
+  pendingAttachments: [],     // 待发送附件 [{path, name, isImg}]：上传/粘贴后先进附件条，点发送才发出
 };
 
 /* ==================== 工具函数 ==================== */
@@ -222,9 +223,8 @@ function highlightCode(code) {
   return s;
 }
 
-/* 上传文件并作为消息发送：图片自动附"识别"指令（命中视觉理解技能），
-   消息内保留项目内路径 uploads/xxx，Agent 可直接读取该文件。 */
-async function uploadAndSend(file) {
+/* 上传文件 → 加入待发送附件条（不自动发送）。用户输入文字后点发送，附件随消息一起发出。 */
+async function uploadFileToBar(file) {
   const imgLike = file.type.startsWith("image/") || /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(file.name || "");
   const fd = new FormData();
   fd.append("file", file);
@@ -233,14 +233,31 @@ async function uploadAndSend(file) {
     if (r.status === 401) return onUnauthorized();
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
-    const text = imgLike
-      ? `我上传了一张图片，请识别图片内容：\n\n![上传图片](${d.path})`
-      : `我上传了文件：${d.path}`;
-    sendMessage(text);
-    toast("已上传: " + (d.name || d.path));
+    if (State.pendingAttachments.length >= 6) throw new Error("一次最多挂 6 个附件");
+    State.pendingAttachments.push({ path: d.path, name: d.name || d.path, isImg: imgLike });
+    renderAttachBar();
+    chatInput.focus();
   } catch (e) {
     toast("上传失败: " + e.message);
   }
+}
+
+/* 渲染待发送附件条（缩略图/文件名 + 移除按钮） */
+function renderAttachBar() {
+  const bar = $("#attachBar");
+  if (!bar) return;
+  const atts = State.pendingAttachments || [];
+  bar.innerHTML = atts.map((a, i) => `
+    <div class="attach-item">
+      ${a.isImg ? `<img src="/api/${a.path}" alt="">` : `<div class="attach-file">📄</div>`}
+      <span class="attach-name" title="${escapeHtml(a.name)}">${escapeHtml(a.name)}</span>
+      <button class="attach-remove" data-i="${i}" title="移除附件">×</button>
+    </div>`).join("");
+  bar.classList.toggle("hidden", !atts.length);
+  $$(".attach-remove", bar).forEach((b) => b.addEventListener("click", () => {
+    State.pendingAttachments.splice(+b.dataset.i, 1);
+    renderAttachBar();
+  }));
 }
 
 /* 图片链接预处理：把消息里的裸图片 URL / 本地技能产物路径转成 markdown 图片语法，
@@ -1242,9 +1259,21 @@ $("#cmdMenu").addEventListener("mousedown", (e) => {
 
 function sendFromComposer() {
   const val = chatInput.value.trim();
-  if (!val || State.streaming) return;
-  if (val.startsWith("/")) { runCommand(val); return; }
-  sendMessage(val);
+  const atts = State.pendingAttachments || [];
+  if (State.streaming) return;
+  if (!val && !atts.length) return;
+  if (val.startsWith("/") && !atts.length) { runCommand(val); return; }
+  // 有附件：把附件 markdown 拼进消息（图片渲染 + Agent 可读 uploads/ 路径），随本次输入一起发送
+  let text = val;
+  if (atts.length) {
+    const attText = atts.map((a) => a.isImg
+      ? `![${a.name}](${a.path})`
+      : `[附件：${a.name}](${a.path})`).join("\n");
+    text = attText + (val ? "\n\n" + val : "");
+    State.pendingAttachments = [];
+    renderAttachBar();
+  }
+  sendMessage(text);
 }
 
 /* ==================== 主题 ==================== */
@@ -1944,9 +1973,23 @@ function bindEvents() {
   $("#btnSend").addEventListener("click", sendFromComposer);
   $("#btnAttach").addEventListener("click", () => $("#fileInput").click());
   $("#fileInput").addEventListener("change", (e) => {
-    const f = e.target.files && e.target.files[0];
+    const files = Array.from(e.target.files || []);
     e.target.value = "";            // 允许重复选择同一文件
-    if (f) uploadAndSend(f);
+    files.forEach(uploadFileToBar);
+  });
+  // 直接粘贴文件（如截图 Ctrl+V）到发送栏 → 加入附件条；纯文本粘贴不受影响
+  $("#chatInput").addEventListener("paste", (e) => {
+    const items = e.clipboardData && e.clipboardData.items;
+    if (!items) return;
+    const files = [];
+    for (const it of items) {
+      if (it.kind === "file") { const f = it.getAsFile(); if (f) files.push(f); }
+    }
+    if (files.length) {
+      e.preventDefault();
+      files.forEach(uploadFileToBar);
+      toast(files.length + " 个文件已加入附件，输入指令后点发送");
+    }
   });
   $("#btnStop").addEventListener("click", stopChat);
   $("#btnToggleTheme").addEventListener("click", cycleTheme);
