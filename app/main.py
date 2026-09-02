@@ -43,7 +43,7 @@ def get_or_create_thread_id() -> str:
 
 def main():
     # 启动调试服务器（后台线程；端口可能被占用会自动顺延）
-    debug_thread = start_debug_server(host="0.0.0.0", port=8000)
+    debug_thread = start_debug_server(host="0.0.0.0", port=8081)
     add_log_entry("info", "Agent 启动")
 
     graph = build_graph()
@@ -58,7 +58,7 @@ def main():
     print("🤖 Agent 已启动，输入 'quit' 或 'exit' 退出。")
     # 提示的端口保持 8000，但 start_debug_server 已在顺延后打印过实际端口；
     # 此处保留原提示以免破坏既有提示习惯。
-    print("💡 调试面板: http://localhost:8000 （若已被占用，启动时已顺延到 8001+，请看上方面板提示）")
+    print("💡 调试面板: http://localhost:8081 （若已被占用，启动时已顺延到 8082+，请看上方面板提示）")
     print("💡 当工具调用需要审批时，您可以选择：")
     print("   [y] 允许执行本次")
     print("   [n] 拒绝执行本次")

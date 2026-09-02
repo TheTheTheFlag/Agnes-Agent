@@ -107,6 +107,37 @@ LLM 类型: <class 'app.llm.llm_factory.RotatingKeyChatOpenAI'> | provider=opena
 
 > `.env` 只放非模型密钥（如 `TAVILY_API_KEY`）；模型凭据统一在 `data/.model_config` 由设置页管理。
 
+### 服务模式（HTTP 常驻 + 代码热重载）
+
+不想要终端交互循环、希望 Agent 作为常驻服务跑、改代码自动重启时，用服务模式：
+
+```bash
+python -m app.service                       # 默认 0.0.0.0:8081，开启热重载
+python -m app.service --port 9000           # 改端口
+python -m app.service --no-reload           # 关闭热重载
+python -m app.service --new                 # 开新会话（新的 thread_id）
+```
+
+与 console 模式的区别：
+
+- **纯 HTTP 驱动**：没有终端输入循环，对话/审批/定时任务全部走 Web 面板（`/api/chat`、`/api/scheduler` 等）；
+- **端口固定**：被占用直接报错，不再自动顺延；
+- **热重载**：修改 `app/` 目录下的 `.py` 文件，或改 `data/.model_config`（模型配置）后自动重建 graph 并重启，无需手动重启进程（等价命令 `uvicorn app.service:app --reload --reload-dirs app data --reload-includes .model_config`）。只监控 `app/` 与 `.model_config`，`data/*.db`、`traces/` 等运行期写入不会误触发重启；
+- 服务与 console 模式共用 `.thread_id` 文件与 SQLite 存储，会话、记忆天然连续。
+
+### 部署为开机自启服务（Linux systemd）
+
+```bash
+sudo useradd --system --home /opt/agnes-agent agnes   # 首次：创建运行用户
+sudo chown -R agnes:agnes /opt/agnes-agent
+sudo cp deploy/agnes-agent.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now agnes-agent               # 开机自启 + 立即启动
+journalctl -u agnes-agent -f                          # 看日志
+```
+
+> 服务默认**保留热重载**（改 `app/` 代码或 `data/.model_config` 自动重建）；生产环境想关闭可给启动命令追加 `--no-reload`。脚本/单元文件里的端口、路径按需修改。
+
 ---
 
 ## 🧠 设计思路与实现过程
@@ -163,7 +194,8 @@ flowchart LR
 ```
 Agnes-Agent/
 ├── app/
-│   ├── main.py                    # 入口（python -m app.main）
+│   ├── main.py                    # 入口 console 模式（python -m app.main）
+│   ├── service.py                 # 入口 服务模式：HTTP 常驻 + 热重载（python -m app.service）
 │   ├── config.py                  # 配置中心（路径统一指向 data/）
 │   ├── graph/                     # LangGraph 工作流（节点 + 路由 + 状态）
 │   ├── llm/                       # LLM 纯工厂（多 key 轮换，零配置）

@@ -1,0 +1,43 @@
+# =====================================================================
+# agnes-agent.service — systemd 服务单元（Linux 部署）
+#
+# 部署步骤（在 Linux 服务器上，按实际路径修改下面三个字段）：
+#   1. 把项目放到 /opt/agnes-agent，创建独立用户：
+#        sudo useradd --system --home /opt/agnes-agent agnes
+#        sudo chown -R agnes:agnes /opt/agnes-agent
+#      （项目内建虚拟环境：python -m venv .venv && .venv/bin/pip install -e . 或 uv sync）
+#   2. 安装单元：
+#        sudo cp deploy/agnes-agent.service /etc/systemd/system/
+#        sudo systemctl daemon-reload
+#   3. 开机自启 + 立即启动：
+#        sudo systemctl enable --now agnes-agent
+#   4. 常用命令：
+#        sudo systemctl status agnes-agent          # 查看状态
+#        sudo journalctl -u agnes-agent -f          # 跟随日志
+#        sudo systemctl restart agnes-agent         # 手动重启
+#        sudo systemctl disable --now agnes-agent   # 停止并取消开机自启
+#
+# 热重载：默认开启（uvicorn reload 监控 app/ 与 data/.model_config）。
+#   改代码或模型配置后服务自动重建，无需 restart。
+#   生产环境如不需要，在 ExecStart 行尾追加 --no-reload 并 systemctl restart。
+# =====================================================================
+
+[Unit]
+Description=Agnes Agent — LangGraph HTTP service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 按实际部署路径修改这三处
+User=agnes
+Group=agnes
+WorkingDirectory=/opt/agnes-agent
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/agnes-agent/.venv/bin/python -m app.service --host 0.0.0.0 --port 8081
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
