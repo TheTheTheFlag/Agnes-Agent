@@ -12,8 +12,8 @@ Search Tavily API for recent AI news and return structured results.
 
 1. Search today's AI news:
 ```python
-import urllib.request, json
-key = "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"
+import os, urllib.request, json
+key = os.environ["TAVILY_API_KEY"]   # 从项目 .env 读取，不要硬编码 key（若缺失先询问用户配置）
 url = "https://api.tavily.com/search"
 payload = {"api_key": key, "query": "AI artificial intelligence latest news", "max_results": 5, "search_depth": "advanced"}
 data = json.dumps(payload).encode("utf-8")

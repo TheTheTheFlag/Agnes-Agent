@@ -14,7 +14,7 @@ Use Amap (高德地图) v3/weather/weatherInfo API to query weather forecast.
 import urllib.request, json
 from urllib.parse import urlencode
 
-key = "48d4aaacc5ed4f273bced906ca9c67aa"
+key = json.load(open("app/skills/amap-weather/keys.json"))["amap"]   # 读技能目录 keys.json，不要硬编码
 # Hangzhou adcode: 330100
 params = urlencode({"key": key, "city": "330100", "extensions": "all"})
 url = f"https://restapi.amap.com/v3/weather/weatherInfo?{params}"

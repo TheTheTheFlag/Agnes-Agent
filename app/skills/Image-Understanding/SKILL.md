@@ -10,7 +10,7 @@ triggers:
   - 理解图片
   - 图片理解
 config:
-  keys_file: ~/.hermes/agnes_keys.json
+  keys_file: keys.json
   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions
   model: qwen3.7-plus
 ---
@@ -108,4 +108,5 @@ config:
 - 图片 URL 必须公网可访问，或使用 base64 编码
 - `min_pixels` / `max_pixels` 控制图片Token数量，影响精度和成本
 - 该模型也可用于 general vision 任务，不只是 OCR
-- API key 从 `~/.hermes/agnes_keys.json` 读取（`json.load`），不要再硬编码 key
+- API key 从本技能目录 `keys.json` 读取（`json.load`，键名为 `"dashscope"`，即相对项目根
+  `app/skills/Image-Understanding/keys.json`），不要再硬编码 key

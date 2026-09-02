@@ -131,7 +131,7 @@ agent-browser is visible @e2                     # Check visibility
 ### Session Management
 ```bash
 agent-browser --session login open site.com      # Isolated session
-agent-browser --profile ~/.myprofile open site   # Persistent cookies
+agent-browser --profile app/skills/agent-browser/.profile open site   # Persistent cookies（登录态存技能目录，可复用）
 agent-browser close                              # Clean up
 ```
 

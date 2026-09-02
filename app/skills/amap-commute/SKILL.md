@@ -14,7 +14,7 @@ Use Amap (高德地图) API v5/direction/driving to query route distance and est
 ```python
 import urllib.request, json
 from urllib.parse import urlencode
-key = "48d4aaacc5ed4f273bced906ca9c67aa"
+key = json.load(open("app/skills/amap-commute/keys.json"))["amap"]   # 读技能目录 keys.json，不要硬编码
 params = urlencode({"key": key, "address": "杭州市临安区宝龙广场", "output": "json"})
 url = f"https://restapi.amap.com/v3/geocode/geo?{params}"
 with urllib.request.urlopen(url) as resp:
