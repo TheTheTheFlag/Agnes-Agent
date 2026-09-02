@@ -9,6 +9,7 @@ from .list_my_recent_tasks import list_my_recent_tasks
 from .get_command_history import get_command_history
 from .file_ops import ls, read_file, write_file, edit_file, delete_file, glob_files, grep_files
 from .execute_command import execute_command
+from .skill_tools import list_skills, read_skill, search_skillhub, install_skill
 
 # 工具列表：
 #   - 文件操作（Python 包装，无需审批，限项目目录内）：ls / read_file / write_file / edit_file / delete_file / glob_files / grep_files
@@ -33,4 +34,9 @@ tools = [
     search_my_memory,
     list_my_recent_tasks,
     get_command_history,
+    # 技能路由 + SkillHub：list_skills / read_skill / search_skillhub / install_skill
+    list_skills,
+    read_skill,
+    search_skillhub,
+    install_skill,
 ]

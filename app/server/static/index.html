@@ -42,6 +42,9 @@
           <svg class="ic-moon" viewBox="0 0 16 16" width="15" height="15"><path d="M13.5 9.5A5.5 5.5 0 1 1 6.5 2.5a4.5 4.5 0 0 0 7 7z" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linejoin="round"/></svg>
           <svg class="ic-sun" viewBox="0 0 16 16" width="15" height="15" style="display:none"><circle cx="8" cy="8" r="3.2" stroke="currentColor" stroke-width="1.3" fill="none"/><path d="M8 1.5v1.6M8 12.9v1.6M1.5 8h1.6M12.9 8h1.6M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M12.6 3.4l-1.1 1.1M4.5 11.5l-1.1 1.1" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
         </button>
+        <button id="btnLogout" class="icon-btn" title="退出登录">
+          <svg viewBox="0 0 16 16" width="15" height="15"><path d="M10 3.5V2.8a1 1 0 0 0-1-1H3.5a1 1 0 0 0-1 1v10.4a1 1 0 0 0 1 1H9a1 1 0 0 0 1-1v-.7M13 8H6.5M13 8l-2.3-2.3M13 8l-2.3 2.3" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
         <button id="btnCollapseSidebar" class="icon-btn" title="折叠边栏">
           <svg viewBox="0 0 16 16" width="15" height="15"><path d="M10 3L5 8l5 5" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>
@@ -130,6 +133,23 @@
 </div>
 
 <div id="toast" class="toast"></div>
+
+<!-- ==================== 登录遮罩 ==================== -->
+<div id="loginOverlay" class="login-overlay hidden">
+  <div class="login-card">
+    <div class="login-logo">
+      <svg viewBox="0 0 32 32" width="36" height="36"><rect width="32" height="32" rx="8" fill="url(#brandGrad)"/><path d="M10 21l6-10 6 10" stroke="white" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </div>
+    <h2 class="login-title">Agnes Agent</h2>
+    <p class="login-sub">调试面板 · 登录后使用</p>
+    <form id="loginForm" autocomplete="off">
+      <input id="loginUser" type="text" placeholder="账号" autocomplete="username" spellcheck="false">
+      <input id="loginPass" type="password" placeholder="密码" autocomplete="current-password">
+      <div id="loginError" class="login-error hidden"></div>
+      <button id="btnLogin" type="submit">登 录</button>
+    </form>
+  </div>
+</div>
 
 <script src="/static/marked.min.js"></script>
 <script src="/static/app.js"></script>

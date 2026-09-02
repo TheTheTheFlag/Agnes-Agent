@@ -116,6 +116,21 @@ def chatbot(state: State, config: RunnableConfig):
     system_text = system_text.replace("{{preferences_section}}", f"用户偏好：\n{preferences_section}\n" if preferences_section else "")
     system_text = system_text.replace("{{summary_section}}", f"对话摘要：\n{summary_section}\n" if summary_section else "")
     system_text = system_text.replace("{{task_plan_section}}", task_plan_section)
+    # 技能路由元数据：动态读取 app/skills/ 下所有 SKILL.md（实时，新增技能无需重启）
+    try:
+        from app.skills.loader import load_all_skills as _load_all_skills
+        _local_skills = _load_all_skills()
+        if _local_skills:
+            _skill_lines = []
+            for _s in _local_skills:
+                _trig = (f"（触发词: {', '.join(_s['triggers'][:6])}）") if _s.get("triggers") else ""
+                _skill_lines.append(f"- {_s['name']}: {_s.get('description') or ''}{_trig}")
+            _skills_section = "本地已安装技能（用户任务匹配技能时，read_skill 后按其步骤执行）：\n" + "\n".join(_skill_lines)
+        else:
+            _skills_section = "本地暂无技能。"
+        system_text = system_text.replace("{{skills_section}}", _skills_section)
+    except Exception:
+        system_text = system_text.replace("{{skills_section}}", "本地暂无技能。")
     # 5 层记忆的注入（L2/L3/L4）追加到 system prompt 末尾
     if memory_section:
         system_text = system_text + "\n" + memory_section

@@ -110,8 +110,15 @@ function copyCode(btn) {
 }
 
 /* ==================== API 封装 ==================== */
+function onUnauthorized() {
+  // 登录态失效（未登录 / token 过期）：回到登录界面
+  showLogin();
+  throw new Error("未登录或登录已过期");
+}
+
 async function apiGet(url) {
   const r = await fetch(url);
+  if (r.status === 401) return onUnauthorized();
   if (!r.ok) throw new Error(`HTTP ${r.status}: ${(await r.text()).slice(0, 200)}`);
   return r.json();
 }
@@ -122,9 +129,61 @@ async function apiPost(url, body) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body || {}),
   });
+  if (r.status === 401) return onUnauthorized();
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
   return data;
+}
+
+/* ==================== 登录 ==================== */
+function showLogin() {
+  $("#loginOverlay").classList.remove("hidden");
+  $("#loginError").classList.add("hidden");
+  $("#loginPass").value = "";
+  setTimeout(() => { const u = $("#loginUser"); if (u) u.focus(); }, 60);
+}
+
+function hideLogin() {
+  $("#loginOverlay").classList.add("hidden");
+}
+
+async function checkAuth() {
+  try {
+    const r = await fetch("/api/auth/status");
+    const d = await r.json().catch(() => ({}));
+    return !!d.authenticated;
+  } catch (e) {
+    return false;
+  }
+}
+
+function bindAuthEvents() {
+  $("#loginForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const btn = $("#btnLogin");
+    btn.disabled = true;
+    $("#loginError").classList.add("hidden");
+    try {
+      const r = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: $("#loginUser").value.trim(), password: $("#loginPass").value }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || "登录失败");
+      hideLogin();
+      init();   // 登录成功 → 初始化主界面
+    } catch (err) {
+      $("#loginError").textContent = err.message || "登录失败";
+      $("#loginError").classList.remove("hidden");
+    } finally {
+      btn.disabled = false;
+    }
+  });
+  $("#btnLogout").addEventListener("click", async () => {
+    try { await fetch("/api/auth/logout", { method: "POST" }); } catch (e) { /* 忽略 */ }
+    showLogin();
+  });
 }
 
 /* ==================== Markdown 渲染（防 XSS + 代码高亮） ==================== */
@@ -1492,6 +1551,44 @@ async function renderToolsTab(el) {
   } catch (e) { el.innerHTML = drawerErr(e); }
 }
 
+/* ---- 技能 ---- */
+async function renderSkillsTab(el) {
+  el.innerHTML = `<div class="d-empty">加载中…</div>`;
+  try {
+    const data = await apiGet("/api/skills");
+    const skills = data.skills || [];
+    if (!skills.length) {
+      el.innerHTML = drawerSection("技能（app/skills）", `<div class="d-empty">暂无技能。可让 Agent 用 search_skillhub 搜索下载，或手工把 SKILL.md 放到 app/skills/ 下。</div>`);
+      return;
+    }
+    el.innerHTML = drawerSection(`技能（${skills.length}）`, skills.map((s) => `
+      <div class="tool-item skill-item" data-name="${escapeHtml(s.name)}">
+        <div class="t-name">✨ ${escapeHtml(s.name)}</div>
+        <div class="t-desc">${escapeHtml(s.description || "")}</div>
+        ${(s.triggers || []).length ? `<div class="t-desc" style="color:var(--text-faint)">触发词: ${escapeHtml(s.triggers.slice(0, 8).join("、"))}</div>` : ""}
+        <div class="t-desc" style="font-family:var(--mono);color:var(--text-faint)">${escapeHtml(s.path || "")}</div>
+      </div>`).join(""));
+    $$(".skill-item", el).forEach((item) => {
+      item.addEventListener("click", () => renderSkillDetail(el, item.dataset.name));
+    });
+  } catch (e) { el.innerHTML = drawerErr(e); }
+}
+
+async function renderSkillDetail(el, name) {
+  el.innerHTML = `<div class="d-empty">加载中…</div>`;
+  try {
+    const s = await apiGet(`/api/skills/${encodeURIComponent(name)}`);
+    const head = `
+      <div class="t-desc">${escapeHtml(s.description || "")}</div>
+      ${(s.triggers || []).length ? `<div class="t-desc">触发词: ${escapeHtml(s.triggers.join("、"))}</div>` : ""}
+      <div class="t-desc" style="color:var(--text-faint)">位置: ${escapeHtml(s.path || "")}</div>`;
+    el.innerHTML = `<div class="skill-back"><button class="btn-ghost" id="btnSkillBack">← 返回技能列表</button></div>`
+      + drawerSection(`技能: ${escapeHtml(s.name)}`, head)
+      + drawerSection("SKILL.md 原文", `<pre class="d-pre">${escapeHtml(s.raw || "")}</pre>`);
+    $("#btnSkillBack").addEventListener("click", () => renderSkillsTab(el));
+  } catch (e) { el.innerHTML = drawerErr(e); }
+}
+
 /* ---- 定时任务 ---- */
 async function renderSchedTab(el) {
   el.innerHTML = `<div class="d-empty">加载中…</div>`;
@@ -1729,6 +1826,7 @@ const DRAWER_LOADERS = {
   memory: renderMemoryTab,
   memorydb: renderMemoryDBTab,
   tools: renderToolsTab,
+  skills: renderSkillsTab,
   sched: renderSchedTab,
   models: renderModelsTab,
   deliv: renderDelivTab,
@@ -1741,6 +1839,7 @@ const DRAWER_TABS = [
   { id: "memory", label: "记忆", icon: "🧠" },
   { id: "memorydb", label: "Memory DB", icon: "🗄️" },
   { id: "tools", label: "工具", icon: "🔧" },
+  { id: "skills", label: "技能", icon: "✨" },
   { id: "sched", label: "定时任务", icon: "🗓️" },
   { id: "models", label: "模型", icon: "⚙️" },
   // 交付物 tab 已移到主页顶栏（#btnDeliverables），点击时仍通过 activateTab("deliv") 渲染
@@ -1835,6 +1934,12 @@ function bindEvents() {
 
 /* ==================== 初始化 ==================== */
 async function init() {
+  // 登录校验：未登录先显示登录界面，登录成功后再走主流程
+  if (!(await checkAuth())) {
+    showLogin();
+    return;
+  }
+
   // 主题
   applyTheme();
   // 模型信息
@@ -1864,4 +1969,7 @@ async function init() {
   chatInput.focus();
 }
 
-document.addEventListener("DOMContentLoaded", init);
+document.addEventListener("DOMContentLoaded", () => {
+  bindAuthEvents();
+  init();
+});

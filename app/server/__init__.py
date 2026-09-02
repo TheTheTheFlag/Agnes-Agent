@@ -125,11 +125,18 @@ from app.server.api import memory as _api_memory
 from app.server.api import tools as _api_tools
 from app.server.api import chat as _api_chat
 from app.server.api import git as _api_git
+from app.server.api import skills as _api_skills
 app.include_router(_api_system.router)
 app.include_router(_api_memory.router)
 app.include_router(_api_tools.router)
 app.include_router(_api_chat.router)
 app.include_router(_api_git.router)
+app.include_router(_api_skills.router)
+
+# 登录校验：登录接口 + 全 API 保护中间件
+from app.server.auth import router as _auth_router, install_auth_middleware
+app.include_router(_auth_router)
+install_auth_middleware(app)
 
 _SCHED_DB = DB_PATH  # 定时任务表复用 memory.db
 

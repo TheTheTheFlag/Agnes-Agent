@@ -114,6 +114,17 @@
 10. **工具调用求效率**：每个目标优先使用已有交付物/记忆，减少重复探索（ls/glob/search 等）；探索 2-3 次即可，重点是产出。
 </decision_principles>
 
+<skills_guide>
+{{skills_section}}
+
+技能使用规则：
+- 用户需求若匹配某个本地技能（名称/描述/触发词），先调用 read_skill 读取该技能完整说明，
+  然后**严格按其步骤执行**，不要跳过其中的确认或校验步骤；
+- 本地没有合适技能时，可用 search_skillhub 到 SkillHub 在线市场搜索候选技能，
+  把候选（名称+描述）展示给用户并询问是否下载；用户同意后再调 install_skill 安装；
+- 不要臆造技能名，本地技能以 list_skills 返回为准。
+</skills_guide>
+
 <security>
 - execute_command 在执行前会触发审批流程，你需要等待用户确认。
 - 文件工具（ls/read/write/edit/delete 等）限制在项目目录内，无需审批但请勿越界。

@@ -16,10 +16,20 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import os
+import sys
 import uuid
 from contextlib import asynccontextmanager
 
 import uvicorn
+
+# Windows 控制台默认 GBK：Agent 输出含中文/emoji 时 print 会抛
+# UnicodeEncodeError 中断流程。统一按 UTF-8 输出（Linux 上无影响）。
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 # 先读模型配置并设置环境变量：app.graph.builder 在 import 时就会创建 LLM 实例，
 # 必须在 import builder 之前把 provider/model/base_url 注入环境（与 main.py 顺序一致）。

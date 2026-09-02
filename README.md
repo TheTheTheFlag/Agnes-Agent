@@ -103,7 +103,7 @@ LLM 类型: <class 'app.llm.llm_factory.RotatingKeyChatOpenAI'> | provider=opena
 🤖 Agent 已启动，输入 'quit' 或 'exit' 退出。
 ```
 
-打开 http://localhost:8000 即可对话；首次使用先到右上角 **设置 → 模型** 页接入你的模型（填 Base URL + API Key，可自动拉取模型列表）。
+打开 http://localhost:8000 即可对话（**调试面板需登录**：默认账号 `Mirror` / 密码 `Jxh1997.`，可用 `.env` 的 `AGENT_USERNAME`/`AGENT_PASSWORD` 覆盖）；首次使用先到右上角 **设置 → 模型** 页接入你的模型（填 Base URL + API Key，可自动拉取模型列表）。
 
 > `.env` 只放非模型密钥（如 `TAVILY_API_KEY`）；模型凭据统一在 `data/.model_config` 由设置页管理。
 
@@ -124,6 +124,13 @@ python -m app.service --new                 # 开新会话（新的 thread_id）
 - **端口固定**：被占用直接报错，不再自动顺延；
 - **热重载**：修改 `app/` 目录下的 `.py` 文件，或改 `data/.model_config`（模型配置）后自动重建 graph 并重启，无需手动重启进程（等价命令 `uvicorn app.service:app --reload --reload-dirs app data --reload-includes .model_config`）。只监控 `app/` 与 `.model_config`，`data/*.db`、`traces/` 等运行期写入不会误触发重启；
 - 服务与 console 模式共用 `.thread_id` 文件与 SQLite 存储，会话、记忆天然连续。
+
+### 技能系统（Skills）
+
+Agent 的复合能力包：技能 = `app/skills/<name>/SKILL.md`（YAML frontmatter 元数据 + 步骤正文）。
+每轮对话自动把本地技能清单注入 system prompt，命中时模型调 `read_skill` 读全文后**严格按其步骤执行**；
+本地不够用时 `search_skillhub` 到 SkillHub 在线市场搜索，你确认后 `install_skill` 下载即装（立即可用）。
+调试面板 **设置 → 技能** 页可浏览全部技能与内容。新增技能：在 `app/skills/` 建 `<name>/SKILL.md` 即可，无需重启。
 
 ### 部署为开机自启服务（Linux systemd）
 
@@ -201,7 +208,8 @@ Agnes-Agent/
 │   ├── llm/                       # LLM 纯工厂（多 key 轮换，零配置）
 │   ├── memory/                    # 5 层记忆管理器（SQLite）
 │   ├── planning/                  # planner / executor / validator / summarizer + ReActLoop
-│   ├── tools/                     # 工具集（搜索/命令/文件/记忆/规划触发…）
+│   ├── tools/                     # 工具集（搜索/命令/文件/记忆/规划触发…）+ 技能路由/SkillHub 工具
+│   ├── skills/                    # 技能系统：loader(扫描 SKILL.md) + hub(SkillHub 客户端) + 用户技能
 │   └── server/                    # FastAPI + SSE 流式 + 调试面板前端
 │       ├── store.py               # 公共删除逻辑 / 日志 / 事件流 / State 快照
 │       ├── config.py              # 模型目录管理（自定义来源，无内置厂商）
