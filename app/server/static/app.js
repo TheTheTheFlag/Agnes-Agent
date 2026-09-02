@@ -1241,10 +1241,8 @@ chatInput.addEventListener("keydown", (e) => {
   }
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
-    const val = chatInput.value.trim();
-    if (!val) return;
-    if (val.startsWith("/")) { runCommand(val); return; }
-    sendMessage(val);
+    // 统一走 sendFromComposer：带附件一起发送（含 streaming/空输入/斜杠命令处理）
+    sendFromComposer();
   }
 });
 

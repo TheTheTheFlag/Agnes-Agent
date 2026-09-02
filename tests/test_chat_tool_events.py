@@ -13,7 +13,10 @@ state update，updates 分支收不到 tool 结束事件。chat.py 的修复：
 """
 import asyncio
 import json
+import os as _os
+import tempfile
 import unittest
+from unittest import mock
 
 from langchain_core.messages import AIMessage, AIMessageChunk
 
@@ -78,7 +81,26 @@ async def _collect(payload: dict) -> list:
 
 class ChatToolEventsTest(unittest.TestCase):
     def setUp(self):
+        # 隔离：chat_endpoint 落库（assistant 消息）走 chat.DB_PATH，
+        # store.add_event/log 写 app_events 走 store.DB_PATH——两者都指向临时 DB，
+        # 避免测试污染真实 memory.db（否则每次跑测试都会留下 thread=test-tid 的幽灵会话）。
+        fd, self._tmp_db = tempfile.mkstemp(suffix=".db")
+        _os.close(fd)
+        self._patchers = [
+            mock.patch("app.server.api.chat.DB_PATH", self._tmp_db),
+            mock.patch("app.server.store.DB_PATH", self._tmp_db),
+        ]
+        for p in self._patchers:
+            p.start()
         set_graph(FakeGraph(), {"configurable": {"thread_id": "test-tid"}})
+
+    def tearDown(self):
+        for p in self._patchers:
+            p.stop()
+        try:
+            _os.remove(self._tmp_db)
+        except OSError:
+            pass
 
     def test_tool_chunk_carries_name_and_args_delta(self):
         """dict 形态的 tool_call_chunks 应解析出 name（首个 chunk）+ args 增量。"""
