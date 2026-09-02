@@ -104,6 +104,10 @@
       </div>
       <div id="cmdMenu" class="cmd-menu hidden"></div>
       <div class="composer-box">
+        <button id="btnAttach" class="btn-attach" title="上传图片/文件（Agent 可识别图片）">
+          <svg viewBox="0 0 16 16" width="16" height="16"><path d="M9.5 4.5v5a2 2 0 0 1-4 0v-6a1 1 0 0 1 2 0v5.5a.5.5 0 0 0 1 0v-5.5a1 1 0 1 1 2 0v6a2.5 2.5 0 0 1-5 0v-6" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round"/></svg>
+        </button>
+        <input type="file" id="fileInput" accept="image/*,.pdf,.txt,.md,.json,.csv,.html" hidden>
         <textarea id="chatInput" rows="1" placeholder="给 Agnes 发送消息…（Enter 发送 / Shift+Enter 换行）" autocomplete="off"></textarea>
         <button id="btnStop" class="btn-stop hidden" title="停止生成">
           <svg viewBox="0 0 16 16" width="13" height="13"><rect x="3.5" y="3.5" width="9" height="9" rx="1.5" fill="currentColor"/></svg>

@@ -24,6 +24,7 @@ dependencies = [
     "ormsgpack>=1.7.0",
     "requests>=2.31.0",
     "watchfiles",
+    "python-multipart>=0.0.32",
 ]
 
 [dependency-groups]

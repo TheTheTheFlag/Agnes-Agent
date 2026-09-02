@@ -222,11 +222,34 @@ function highlightCode(code) {
   return s;
 }
 
+/* 上传文件并作为消息发送：图片自动附"识别"指令（命中视觉理解技能），
+   消息内保留项目内路径 uploads/xxx，Agent 可直接读取该文件。 */
+async function uploadAndSend(file) {
+  const imgLike = file.type.startsWith("image/") || /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(file.name || "");
+  const fd = new FormData();
+  fd.append("file", file);
+  try {
+    const r = await fetch("/api/upload", { method: "POST", body: fd });
+    if (r.status === 401) return onUnauthorized();
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    const text = imgLike
+      ? `我上传了一张图片，请识别图片内容：\n\n![上传图片](${d.path})`
+      : `我上传了文件：${d.path}`;
+    sendMessage(text);
+    toast("已上传: " + (d.name || d.path));
+  } catch (e) {
+    toast("上传失败: " + e.message);
+  }
+}
+
 /* 图片链接预处理：把消息里的裸图片 URL / 本地技能产物路径转成 markdown 图片语法，
    使 marked 渲染成 <img>。本地产物走受登录保护的 /api/skill-media/ 端点。 */
 function imageizeMarkdown(text) {
   if (!text) return text;
   let t = text;
+  // 0) 用户上传文件：uploads/<file> → /api/uploads/<file>（含 markdown 链接内的 src）
+  t = t.replace(/(uploads\/[A-Za-z0-9_.\-]+)/g, "/api/$1");
   // 1) 本地技能产物：app/skills/<skill>/output/<rest> → /api/skill-media/<skill>/<rest>
   t = t.replace(/app\/skills\/([A-Za-z0-9_.\-]+)\/output\/([A-Za-z0-9_\-./]+)/g, (m, skill, rest) => {
     if (!/\.(png|jpe?g|gif|webp|bmp)$/i.test(rest)) return m;
@@ -1919,6 +1942,12 @@ function handleLiveEvent(evt) {
 function bindEvents() {
   $("#btnNewChat").addEventListener("click", newThread);
   $("#btnSend").addEventListener("click", sendFromComposer);
+  $("#btnAttach").addEventListener("click", () => $("#fileInput").click());
+  $("#fileInput").addEventListener("change", (e) => {
+    const f = e.target.files && e.target.files[0];
+    e.target.value = "";            // 允许重复选择同一文件
+    if (f) uploadAndSend(f);
+  });
   $("#btnStop").addEventListener("click", stopChat);
   $("#btnToggleTheme").addEventListener("click", cycleTheme);
   $("#btnCollapseSidebar").addEventListener("click", () => {
