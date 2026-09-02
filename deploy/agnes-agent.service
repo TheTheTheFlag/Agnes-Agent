@@ -29,6 +29,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# ⚠️ 务必改成你的真实部署环境，否则服务会 status=217/USER 启动失败：
+#    User/Group 必须是服务器上存在的用户，WorkingDirectory/ExecStart 指向实际路径。
 # 按实际部署路径修改这三处
 User=agnes
 Group=agnes
