@@ -71,7 +71,8 @@ def search_skillhub(query: str) -> str:
 def install_skill(hub_id: str) -> str:
     """把 SkillHub 上的技能下载安装到本地 app/skills/ 目录，安装后立即可用（无需重启）。
     参数:
-      hub_id: search_skillhub 返回的候选技能 id
+      hub_id: search_skillhub 返回的候选技能 id（uuid），也可直接传技能名称（如 create-skill，
+             会自动解析成对应 id）
     注意: 仅当用户明确同意下载时调用；安装成功后向用户确认。"""
     try:
         r = _hub_install((hub_id or "").strip())

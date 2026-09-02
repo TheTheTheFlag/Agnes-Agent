@@ -2,13 +2,19 @@
 
 受登录中间件保护（与其他 /api/* 一致）。
 """
+import os
+import re
+
 from fastapi import APIRouter
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from app.skills import loader
 from app.skills.hub import search as _hub_search, fetch_detail as _hub_detail, install as _hub_install
 
 router = APIRouter(prefix="/api", tags=["skills"])
+
+_SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]+$")
+_IMG_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
 
 
 @router.get("/skills")
@@ -46,7 +52,7 @@ async def skillhub_detail(skill_id: str):
 
 @router.post("/skillhub/install")
 async def skillhub_install(payload: dict):
-    """把 SkillHub 技能下载安装到 app/skills/<name>/SKILL.md。payload: {id}"""
+    """把 SkillHub 技能下载安装到 app/skills/<name>/SKILL.md。payload: {id}（uuid 或技能名均可）"""
     sid = (payload or {}).get("id", "")
     if not sid:
         return JSONResponse({"error": "缺少技能 id"}, status_code=400)
@@ -55,3 +61,23 @@ async def skillhub_install(payload: dict):
     except Exception as e:
         return JSONResponse({"error": f"安装失败: {e}"}, status_code=502)
     return {"ok": True, **result}
+
+
+@router.get("/skill-media/{skill_name}/{rest:path}")
+async def skill_media(skill_name: str, rest: str):
+    """提供技能产物文件（图片/视频/日志），供前端 <img> 渲染。
+
+    仅暴露 app/skills/<skill_name>/output/ 目录（生成产物），
+    技能的其他文件（SKILL.md、keys.json 等）不可通过此端点访问。
+    """
+    if not _SKILL_NAME_RE.match(skill_name or ""):
+        return JSONResponse({"error": "非法技能名"}, status_code=400)
+    if not rest or ".." in rest or rest.startswith("/") or "\\" in rest:
+        return JSONResponse({"error": "非法路径"}, status_code=400)
+    ext = os.path.splitext(rest)[1].lower()
+    if ext not in _IMG_EXT:
+        return JSONResponse({"error": "仅支持图片文件"}, status_code=400)
+    fp = os.path.join(loader.SKILLS_DIR, skill_name, "output", rest)
+    if not os.path.isfile(fp):
+        return JSONResponse({"error": "文件不存在"}, status_code=404)
+    return FileResponse(fp)

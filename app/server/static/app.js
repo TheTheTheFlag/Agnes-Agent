@@ -222,10 +222,31 @@ function highlightCode(code) {
   return s;
 }
 
+/* 图片链接预处理：把消息里的裸图片 URL / 本地技能产物路径转成 markdown 图片语法，
+   使 marked 渲染成 <img>。本地产物走受登录保护的 /api/skill-media/ 端点。 */
+function imageizeMarkdown(text) {
+  if (!text) return text;
+  let t = text;
+  // 1) 本地技能产物：app/skills/<skill>/output/<rest> → /api/skill-media/<skill>/<rest>
+  t = t.replace(/app\/skills\/([A-Za-z0-9_.\-]+)\/output\/([A-Za-z0-9_\-./]+)/g, (m, skill, rest) => {
+    if (!/\.(png|jpe?g|gif|webp|bmp)$/i.test(rest)) return m;
+    return `![${skill}](${"/api/skill-media/" + skill + "/" + rest})`;
+  });
+  // 2) 远程图片 URL（非 markdown 链接内部、以图片扩展名结尾）
+  t = t.replace(/(?<!\]\()https?:\/\/[^\s"'<>]+/g, (m) => {
+    const u = m.replace(/[),.;，。、:：]+$/, "");
+    if (/\.(png|jpe?g|gif|webp|bmp|svg)(\?|$)/i.test(u)) {
+      return `![图片](${u})${m.slice(u.length)}`;
+    }
+    return m;
+  });
+  return t;
+}
+
 function renderMarkdown(text) {
   if (!text) return "";
-  // 先整体转义（防 XSS），再交给 marked 渲染 markdown 语法
-  let html = marked.parse(escapeHtml(text));
+  // 先转义（防 XSS）→ marked 渲染；图片 URL 已在上一步转成 markdown 图片语法
+  let html = marked.parse(escapeHtml(imageizeMarkdown(text)));
   // 代码块后处理：语言标签 + 复制按钮 + 语法高亮
   html = html.replace(/<pre><code class="language-([^"]+)">([\s\S]*?)<\/code><\/pre>/g, (_, lang, body) => {
     const src = decodeEntities(body);

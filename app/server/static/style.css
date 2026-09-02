@@ -1408,6 +1408,15 @@ input, textarea { font-family: inherit; }
 .tool-item.skill-item:hover { border-color: var(--accent); }
 .skill-back { margin: 0 0 6px; }
 
+/* ==================== 消息内图片渲染 ==================== */
+.msg-text img, .msg-body img {
+  max-width: min(560px, 100%);
+  border-radius: 10px;
+  margin: 6px 0;
+  display: block;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.25);
+}
+
 /* ==================== 登录遮罩 ==================== */
 .login-overlay {
   position: fixed; inset: 0; z-index: 9999;
