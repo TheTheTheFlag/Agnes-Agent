@@ -1,3 +1,0 @@
-{"type": "node_start", "ts": "2026-09-07T10:19:11.857", "ts_ms": 1788747551857.9443, "data": {"node": "chatbot"}}
-{"type": "error", "ts": "2026-09-07T10:19:15.008", "ts_ms": 1788747555008.0352, "data": {"node": "chatbot", "message": "RetryError[<Future at 0x23cd378ea80 state=finished raised TypeError>]"}}
-{"type": "node_end", "ts": "2026-09-07T10:19:18.742", "ts_ms": 1788747558742.2798, "data": {"node": "chatbot", "result": "LLM 调用失败: TypeError: APIStatusError.__init__() missing 2 required keyword-only arguments: 'response' and 'body' | 当前消息约 3300 tokens"}}

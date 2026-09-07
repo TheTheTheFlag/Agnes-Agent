@@ -105,6 +105,19 @@ class ReActLoop:
                     print("⚠️ 连续3次相同工具调用，终止循环并报告信息不足")
                     final_answer = "无法获取有效信息，请尝试更具体的查询或稍后再试。"
                     break
+                if same_call_count >= 2:
+                    # 第二次发起完全相同的工具调用（参数逐字一致）：多半是模型空转/没消化结果。
+                    # 不再执行该轮重复调用（避免白跑一次 + 再塞一大坨重复结果进上下文），
+                    # 改为注入"防死循环"引导，让模型要么换动作、要么直接收尾。
+                    dup = "; ".join(f"{n}({str(a)[:100]})" for n, a in current_calls)
+                    messages.append(SystemMessage(
+                        content="[防死循环] 你刚发起了与上一轮完全相同的工具调用：" + dup +
+                                "。该调用并未推进任务。请立即采取行动：若所需信息已掌握，"
+                                "就调用真正完成任务的工具（如 execute_command / 写文件），或直接给出最终回答；"
+                                "不要再次重复相同调用。"
+                    ))
+                    print(f"⚠️ 检测到重复工具调用（第 {same_call_count} 次），注入防死循环引导")
+                    continue
             else:
                 same_call_count = 0
                 last_tool_calls = current_calls
