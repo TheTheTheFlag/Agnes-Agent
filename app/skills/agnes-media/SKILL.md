@@ -34,8 +34,7 @@ config:
 | 类型 | 默认模型 | 说明 |
 |------|----------|------|
 | 图片 | `agnes-image-2.5-flash` | 用户说「2.0」时用 `agnes-image-2.0-flash` |
-| 视频 | `agnes-video-2.5-flash` | 默认视频生成模型，支持 720p 固定分辨率 |
-| 视频（旧版） | `agnes-video-v2.0` | 需指定 height/width/num_frames |
+| 视频 | `agnes-video-v2.0` | 视频生成唯一模型，需指定 height/width/num_frames |
 
 ## 判断类型
 
@@ -288,14 +287,11 @@ with ThreadPoolExecutor(max_workers=5) as executor:
 - **认证**: `Authorization: Bearer <your_api_key>`（从 `<skill_dir>/keys.json` 读取）
   **⚠️** 视频是**异步任务**，需轮询
 
-## 视频模型对比
+## 视频模型
 
-| 模型 | 说明 | 参数方式 |
-|------|------|----------|
-| `agnes-video-2.5-flash` | 默认模型，固定 720p，支持 ratio + duration | 推荐 |
-| `agnes-video-v2.0` | 旧模型，需手动指定分辨率和帧数 | 兼容 |
+当前唯一支持的模型是 `agnes-video-v2.0`，需要手动指定分辨率和帧数。
 
-### agnes-video-2.5-flash 参数
+### agnes-video-v2.0 参数
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
@@ -335,19 +331,6 @@ with ThreadPoolExecutor(max_workers=5) as executor:
 
 ### Text-to-Video（文生视频）
 
-#### agnes-video-2.5-flash（推荐）
-
-```json
-{
-  "model": "agnes-video-2.5-flash",
-  "prompt": "A cat walking on the beach at sunset, soft ocean waves, warm golden lighting, realistic motion",
-  "size": "720P",
-  "seconds": 5
-}
-```
-
-#### agnes-video-v2.0（旧版）
-
 ```json
 {
   "model": "agnes-video-v2.0",
@@ -372,38 +355,12 @@ with ThreadPoolExecutor(max_workers=5) as executor:
 }
 ```
 
-### Image-to-Video（图生视频）- 2.5-flash
-
-```json
-{
-  "model": "agnes-video-2.5-flash",
-  "prompt": "The woman slowly turns around, natural facial expression, cinematic camera movement",
-  "size": "720P",
-  "seconds": 5,
-  "image": "https://example.com/image.png",
-  "mode": "ti2vid"
-}
-```
-
-### Keyframe Animation（关键帧动画）- 2.5-flash
-
-```json
-{
-  "model": "agnes-video-2.5-flash",
-  "prompt": "Smooth cinematic transition between keyframes, natural camera movement",
-  "size": "720P",
-  "seconds": 8,
-  "image": ["https://example.com/kf1.png", "https://example.com/kf2.png"],
-  "mode": "keyframes"
-}
-```
-
 ## 调用流程
 
 1. **创建任务**: POST 到 `/v1/videos`，获取 `video_id`
 2. **轮询查询**: 每 8 秒 GET `/agnesapi?video_id=<ID>`（避免 429 限速）
 3. **等待完成**: 状态 `queued` → `processing` → `completed` / `failed`
-4. **获取视频**: 从顶层 `url` 字段提取视频 URL（v2.0）或使用 `remixed_from_video_id`（2.5-flash，如需要）
+4. **获取视频**: 从顶层 `url` 字段提取视频 URL
 5. **发送到飞书**: 下载到 `<skill_dir>/output/` 后用 `MEDIA:/路径` 发送
 
 ## 响应格式
@@ -459,8 +416,7 @@ while True:
     )
     data = resp.json()
     if data.get("status") == "completed":
-        # v2.0 使用顶层 url，2.5-flash 可能用 remixed_from_video_id
-        video_url = data.get("url") or data.get("remixed_from_video_id")
+        video_url = data.get("url")
         break
     elif data.get("status") == "failed":
         raise Exception(f"Video failed: {data.get('error')}")
@@ -469,20 +425,7 @@ while True:
 
 ## 参数说明
 
-### agnes-video-2.5-flash 参数
-
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| model | string | ✅ | 模型名称，使用 `agnes-video-2.5-flash` |
-| prompt | string | ✅ | 视频内容的文本描述 |
-| ratio | string | ✅ | 宽高比：`21:9`, `16:9`, `4:3`, `1:1`, `3:4`, `9:16` |
-| duration | string | ✅ | 时长：`"4"` 到 `"12"`（秒） |
-| image | string/array | ❌ | 图片 URL，单图或数组（最多 5 张） |
-| mode | string | ❌ | 生成模式：`"ti2vid"`（图生视频）、`"keyframes"`（关键帧） |
-| seed | integer | ❌ | 随机种子 |
-| num_inference_steps | integer | ❌ | 推理步数 |
-
-### agnes-video-v2.0 参数（旧版，兼容）
+### agnes-video-v2.0 参数
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|

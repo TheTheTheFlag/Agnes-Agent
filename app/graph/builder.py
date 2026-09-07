@@ -20,7 +20,8 @@ from openai import RateLimitError
 from app.graph.state import State
 from app.graph.utils import (count_tokens, retry_llm_call, parse_tool_calls_from_content,
     ensure_tool_calls, compress_messages, ensure_token_limit, sync_state_to_db, load_prompt_template,
-    MODEL_CONTEXT_LIMIT, TOKEN_LIMIT, KEEP_RECENT, MAX_TOOL_CALL_ROUNDS, _tool_params_summary)
+    MODEL_CONTEXT_LIMIT, TOKEN_LIMIT, KEEP_RECENT, MAX_TOOL_CALL_ROUNDS, _tool_params_summary,
+    prepare_context_messages, apply_reply_guard)
 from app.tools import tools, request_planning
 from app.llm import create_llm
 from app.memory import MemoryManager
@@ -262,8 +263,10 @@ def chatbot(state: State, config: RunnableConfig):
     def on_before_llm(msgs):
         return ensure_token_limit(msgs, system_text, thread_id)
 
-    history_messages = state["messages"][-KEEP_RECENT:]
-    initial_messages = ensure_token_limit([SystemMessage(content=system_text)] + history_messages, system_text, thread_id)
+    history_messages = state["messages"]
+    # 业界做法组装上下文：退化尾巴清理 + 结构清洗 + 按完整回合裁剪（不拆散 assistant↔ToolMessage），
+    # 修复"坏会话因孤儿 tool 消息 / 满屏兜底文案而持续空返回"的问题。
+    initial_messages = prepare_context_messages(history_messages, system_text, keep_recent=KEEP_RECENT)
 
     print(f"[Chatbot] 自决模式（无 L1/L2/L3 硬切）")
     loop = ReActLoop(llm_with_tools, max_iterations=MAX_TOOL_CALL_ROUNDS, node="chatbot")
@@ -317,6 +320,18 @@ def chatbot(state: State, config: RunnableConfig):
             state["recent_summary"] = new_summary
         except Exception as e:
             pass
+
+    # 连续异常回复熔断：异常兜底文案首次照常落库、第二次替换为提示、其后跳过写入，
+    # 避免"同一句兜底文案无限刷屏"（历史上最后几十条全被同一句占满 → 模型持续空返回 → 再刷屏）。
+    content, _skip_reply = apply_reply_guard(state["messages"], content)
+    if _skip_reply:
+        add_log_entry("warning", "模型连续多轮未正常回复，已跳过本轮写入（防刷屏）")
+        try:
+            from app.trace import record_node_end
+            record_node_end(thread_id, "chatbot", "[已跳过：连续异常回复]")
+        except Exception:
+            pass
+        return {"messages": [], "thread_id": thread_id}
 
     mm.add_message(thread_id, "assistant", content)
     sync_state_to_db(state, mm)
