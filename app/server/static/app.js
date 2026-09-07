@@ -13,7 +13,8 @@ const State = {
   streaming: false,
   chatAbort: null,
   currentAssistantEl: null,   // 当前流式输出的助手气泡
-  streamBuffer: "",           // token 累积缓冲
+  streamBuffer: "",           // token 累积缓冲（当前段）
+  procCount: 0,               // 已折叠的"工具轮思考过程"段计数
   renderTimer: null,
   liveToolName: "",           // LiveStatus 当前工具名（chunk 增量累积用）
   liveArgs: "",               // LiveStatus 参数累积缓冲
@@ -633,7 +634,7 @@ function appendStreamToken(text) {
     // 移除打字动画，建立流式文本节点
     const box = $(".msg-text", host);
     if (box) {
-      box.querySelectorAll(":scope > :not(.tool-card):not(.approval-card)").forEach((n) => n.remove());
+      box.querySelectorAll(":scope > :not(.tool-card):not(.approval-card):not(.proc-text)").forEach((n) => n.remove());
       const tn = document.createElement("div");
       tn.id = "stream-text";
       box.prepend(tn);
@@ -662,6 +663,33 @@ function setLiveStatusIdle() {
   State.liveArgs = "";
 }
 
+/* 工具轮"思考过程"折叠：
+   模型在每轮工具调用前会先输出一句过程性文本（如"让派蒙先确认一下…"），
+   这些不是最终回答。由于后端把每轮 LLM 的 content 都按 token 推给前端，
+   这里以 tool_call 首个 chunk 为"该轮文本已收齐"的信号：把缓冲中的文本
+   从正文移出，折叠成灰色小段（默认收起，点击展开），避免满屏口头禅。 */
+function foldToolRoundText() {
+  const host = State.currentAssistantEl;
+  if (!host) return;
+  const box = $(".msg-text", host);
+  const tn = box && $("#stream-text", box);
+  const text = (State.streamBuffer || "").trim();
+  if (!tn || !text) return;  // 无正文的工具轮（常见）不处理
+  State.procCount += 1;
+  State.streamBuffer = "";
+  tn.textContent = "";
+  const seg = document.createElement("div");
+  seg.className = "proc-text collapsed";
+  seg.innerHTML = `<span class="proc-label">💭 思考过程 ${State.procCount}</span><div class="proc-body"></div>`;
+  $(".proc-body", seg).innerHTML = renderMarkdown(text);
+  seg.addEventListener("click", (e) => {
+    e.stopPropagation();
+    seg.classList.toggle("collapsed");
+  });
+  box.insertBefore(seg, tn);
+  scrollToBottom();
+}
+
 function endStreaming(finalText) {
   if (State.renderTimer) {
     clearTimeout(State.renderTimer);
@@ -674,9 +702,9 @@ function endStreaming(finalText) {
     flushStreamRender();
     const tn = $("#stream-text", host);
     if (tn && State.streamBuffer) tn.innerHTML = renderMarkdown(State.streamBuffer);
-    // 没有文本内容且没有任何卡片 → 移除空气泡
-    const hasCards = $(".tool-card, .approval-card", host);
-    if (!State.streamBuffer && !hasCards) host.remove();
+    // 没有文本内容、没有任何卡片/思考过程段 → 移除空气泡
+    const hasExtras = $(".tool-card, .approval-card, .proc-text", host);
+    if (!State.streamBuffer && !hasExtras) host.remove();
   }
   // 不在这里清 State.currentAssistantEl——
   // 真正的"流结束"由调用方在合适的时机显式清空（done/error/abort/node end 非 chatbot）
@@ -714,6 +742,8 @@ function handleChatEvent(evt) {
       State.liveToolName = evt.name;
       State.liveArgs = evt.args || "";
       setLiveStatus(State.liveToolName, State.liveArgs);
+      // 工具轮确认：把刚才流式输出的文本折叠为"思考过程"段（是执行工具前的过程话语，不是最终回答）
+      foldToolRoundText();
     } else if (step === "tool_chunk" && State.liveToolName) {
       State.liveArgs = (State.liveArgs || "") + (evt.args || "");
       setLiveStatus(State.liveToolName, State.liveArgs);
@@ -791,7 +821,7 @@ async function sendMessage(text, opts) {
     // resume 路径：addAssistantBubble 默认带 typing-dots，需移除并建 #stream-text
     const _box = $(".msg-text", State.currentAssistantEl);
     if (_box && !$("#stream-text", State.currentAssistantEl)) {
-      _box.querySelectorAll(":scope > :not(.tool-card):not(.approval-card)").forEach((n) => n.remove());
+      _box.querySelectorAll(":scope > :not(.tool-card):not(.approval-card):not(.proc-text)").forEach((n) => n.remove());
       const _tn = document.createElement("div");
       _tn.id = "stream-text";
       _box.prepend(_tn);

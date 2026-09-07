@@ -5,6 +5,9 @@
 `<skill_dir>/keys.json`（技能目录下，即相对项目根 `app/skills/agnes-media/keys.json`）。
 技能自包含：不读取 `~/.hermes/agnes_keys.json` 等外部路径。
 
+> 统一生成脚本 `media.py` 会自动从同目录 `keys.json` 读取该 key；调用方（Agent）**不要**再
+> 手工读 key 或把 key 写进任何生成脚本。
+
 ## 内容格式
 
 ```json

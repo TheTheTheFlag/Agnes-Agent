@@ -1,6 +1,6 @@
 ---
 name: agnes-media
-description: Agnes AI — image and video generation (text-to-image, image-to-image, text-to-video, image-to-video, multi-image video, keyframe animation)
+description: Agnes AI — 图片 & 视频统一生成（文生图 / 图生图 / 多图合成 / 文生视频 / 图生视频 / 关键帧动画），生成、下载、日志一条龙
 triggers:
   - 生成图片
   - 生成视频
@@ -8,6 +8,7 @@ triggers:
   - 文生视频
   - 图生图
   - 图生视频
+  - 关键帧
   - 生图
   - 生视频
   - Agnes
@@ -20,423 +21,112 @@ config:
   model_image_default: agnes-image-2.5-flash
   model_image_legacy: agnes-image-2.0-flash
   model_video: agnes-video-v2.0
-  size_default: "720P"
-  ratio_default: "16:9"
+  image_size_default: "1K"
+  image_ratio_default: "1:1"
+  video_duration_default: 5
 ---
 
-# Agnes AI — 图片 & 视频生成
+# Agnes AI — 图片 & 视频生成（单脚本工作流）
 
-> **本技能目录 `<skill_dir>`** = `app/skills/agnes-media/`（相对项目根；SKILL.md、image_generator.py、video_generator.py、keys.json、output/ 均在此目录）。
-> 密钥一律从 `<skill_dir>/keys.json` 读取；所有生成产物（图片/视频/日志）一律保存到 `<skill_dir>/output/` 下。执行前可先 `ls app/skills/agnes-media/` 确认。
+> 技能目录 `<skill_dir>` = `app/skills/agnes-media/`。
+> **一切生成统一调用 `<skill_dir>/media.py`**：提交 → 轮询（视频）→ 下载产物 → 追加日志，
+> 全在一个脚本里完成。**禁止**再手写 `generate_*.py`、内联 curl、或复制固定生成脚本。
+> 调用参数（prompt / 模型 / 尺寸 / 参考图 / 时长 / seed 等）由你根据用户需求与下文参数表实时构造。
 
-## 默认模型
+## 使用前确认
 
-| 类型 | 默认模型 | 说明 |
-|------|----------|------|
-| 图片 | `agnes-image-2.5-flash` | 用户说「2.0」时用 `agnes-image-2.0-flash` |
-| 视频 | `agnes-video-v2.0` | 视频生成唯一支持的模型 |
+- 先 `ls <skill_dir>/` 确认 `media.py`、`keys.json` 存在。
+- 接口速查与尺寸表见 `<skill_dir>/references/agnes-api-quickref.md`。
 
-## 判断类型
+## 快速上手
 
-- 关键词：图、图片、image → 调用图片 API
-- 关键词：视频、video、生成视频 → 调用视频 API
-- 两者都有时优先按用户明确说的来
+```bash
+# 文生图（默认 1K，1:1）
+python <skill_dir>/media.py image --prompt "一个穿和服撑伞的少女站在樱花树下，电影级光影，写实风格" --size 2K --ratio 3:4
 
----
+# 图生图（本地路径或 URL 均可，自动转 Data URI；多张参考图重复传 --ref）
+python <skill_dir>/media.py image --prompt "把人物换成赛博朋克夜景背景，保留人物构图" --ref C:/Users/xxx/photo.png --ratio 9:16
 
-# 图片生成
+# 文生视频（默认 5 秒 @24fps；--duration 可选 3/5/10/18；竖版短视频可传 --width 672 --height 1152 提示 9:16）
+python <skill_dir>/media.py video --prompt "A young woman turns to camera, smiling, cinematic" --duration 5
 
-## 基本信息
-
-- **Endpoint**: `POST https://api.agnes-ai.cn/v1/images/generations`
-- **认证**: `Authorization: Bearer <your_api_key>`（从 `<skill_dir>/keys.json` 读取）
-  **⚠️** `response_format` 必须放在 `extra_body` 里，不能放请求体顶层
-
-## 模型选择
-
-| 用户说法 | 使用模型 |
-|----------|----------|
-| 生成图片（默认） | `agnes-image-2.5-flash` |
-| 用 2.0 / Agnes Image 2.0 Flash | `agnes-image-2.0-flash` |
-
-## 请求格式
-
-```json
-{
-  "model": "<选择的模型，默认 agnes-image-2.1-flash>",
-  "prompt": "<描述>",
-  "size": "1K",      // 推荐值: 1K、2K、3K、4K；也支持精确尺寸如 1024x1024
-  "ratio": "1:1",   // 可选: 1:1、3:4、4:3、16:9、9:16、2:3、3:2、21:9
-  "return_base64": false,  // 如需 Base64 返回设为 true
-  "extra_body": {
-    "response_format": "url"   // 或 "b64_json"
-  }
-}
+# 关键帧动画（≥2 张参考图，URL 或本地路径）
+python <skill_dir>/media.py video --prompt "在两张关键帧之间平滑转场，保持角色一致" --keyframes <url1> --keyframes <url2> --duration 5
 ```
 
-## 尺寸与宽高比
+脚本结束会在 stdout 输出 `URL=` / `FILE=` / `LOG=`（产物文件与日志路径），据此向用户回话并展示图片；不要编造路径。
 
-推荐使用 `size` + `ratio` 组合获得可预期输出：
-- **size**: `1K`、`2K`、`3K`、`4K`
-- **ratio**: `1:1`、`3:4`、`4:3`、`16:9`、`9:16`、`2:3`、`3:2`、`21:9`
+## 子命令与参数
 
-> ⚠️ 直接使用精确尺寸（如 1920x1080）可能会被标准化映射到最接近的档位。
-
-## 三种模式
-
-### 1. Text-to-Image（文生图）
-
-```json
-{
-  "model": "agnes-image-2.1-flash",
-  "prompt": "A beautiful sunset over the ocean, photorealistic",
-  "size": "1024x1024",
-  "extra_body": { "response_format": "url" }
-}
-```
-
-### 2. Image-to-Image（图生图）
-
-`image` 为 base64 data URI 数组（放请求体顶层，不是 extra_body）：
-
-```json
-{
-  "model": "agnes-image-2.1-flash",
-  "prompt": "Transform into cyberpunk style, preserve main subject",
-  "size": "1024x1024",
-  "image": ["data:image/png;base64,iVBORw0KGgo..."],
-  "extra_body": { "response_format": "url" }
-}
-```
-
-**调用方式**：用户给参考图时，读取本地图片 → base64 编码 → 放入 `image` 数组
-
-### 3. Multi-Image Composition（多图合成）
-
-`image` 为 base64 data URI 数组：
-
-```json
-{
-  "model": "agnes-image-2.1-flash",
-  "prompt": "Combine these two characters into one scene",
-  "size": "1024x1024",
-  "image": ["data:image/png;base64,iVBOR...", "data:image/png;base64,iVBOR..."],
-  "extra_body": { "response_format": "url" }
-}
-```
-
-## 响应
-
-| 字段 | 说明 |
-|------|------|
-| data[0].url | 图片 URL（`response_format: url`） |
-| data[0].b64_json | Base64 数据（`response_format: b64_json`） |
-
-## 调用流程
-
-1. 判断模型：默认 `agnes-image-2.1-flash`，用户说「2.0」才切换
-2. 组装请求体（`response_format` 必须放 `extra_body` 内）
-3. POST 到 `/v1/images/generations`
-4. 从 `data[0].url` 提取图片 URL
-5. **将 prompt 和 URL 追加写入日志文件**（见下方日志格式）
-6. **图片必须保存到指定目录**（见下方存储路径要求）
-7. 下载到本地后用 `MEDIA:/路径` 发送到飞书
-
-## 调用日志
-
-每次图片生成完成后，必须将 prompt 和 URL 追加写入日志文件。
-
-**日志文件路径**: 与图片同目录，即 `<skill_dir>/output/YYYYMMDD/log.md`
-
-**日志格式**:
-```markdown
-## 2026-06-14 15:30:25
-
-**Prompt**: <完整提示词>
-
-**URL**: https://platform-outputs.agnes-ai.space/images/text-to-image/2026/06/xxxx.png
-
----
-```
-
-**写入时机**: 每次成功获取图片 URL 后立即追加写入（使用 `exec` 执行 `cat >>` 或 `echo` 追加），不要等到任务全部完成。
-
-**注意**:
-- prompt 写入前不做截断，写完整内容
-- 批量生成时每张都要单独追加一条记录
-
-## 图片存储路径要求
-
-所有生成的图片**必须**保存到 `<skill_dir>/output/` 目录下，按日期组织：
-
-- **根目录**: `<skill_dir>/output/`
-- **每日子目录**: 格式为 `YYYYMMDD`，例如今天 `20260615`
-- **完整路径示例**: `<skill_dir>/output/20260615/img_0001.png`
-
-**生成图片时**:
-1. 先获取当天日期目录：`$(date +%Y%m%d)`
-2. 确保目录存在：`mkdir -p <skill_dir>/output/$(date +%Y%m%d)`
-3. 图片保存到该日期目录下，文件名格式：`img_XXXX.png`（四位序号，从0001递增）
-4. 日志中的 File 路径也要更新为 `<skill_dir>/output/YYYYMMDD/img_XXXX.png`
-
-**历史迁移**:
-- 旧位置的文件（如 `/home/mirror/asian_girls_*/`, `/home/mirror/random_poses/`, `/home/mirror/knee_pose_*.png`, `/home/mirror/stand_pose_*.png`, `/home/mirror/girl_portrait*.png`）应迁移到对应日期的目录下
-- 迁移后旧目录可删除
-
-**日志格式（更新后）**:
-```markdown
-## 2026-06-15 14:30:25
-
-**Prompt**: <完整提示词>
-
-**URL**: https://platform-outputs.agnes-ai.space/images/text-to-image/2026/06/xxxx.png
-
-**File**: <skill_dir>/output/20260615/img_0001.png
-
----
-```
-- 视频生成也同理，使用日志文件 `<skill_dir>/output/video_log.md`
-
-## 异步批量生成
-
-图片 API 为同步接口，批量生成需用 `ThreadPoolExecutor` 并发请求。
-
-**使用场景**：同一 prompt 生成多张图、或不同 prompt 并发生成（最多 10 并发）。
-
-**核心代码：**
-
-```python
-import json, requests, os
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
-with open("<skill_dir>/keys.json") as f:
-    keys = json.load(f)
-api_key = keys["agnes"]
-
-url = "https://api.agnes-ai.cn/v1/images/generations"
-headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-
-def generate_one(args):
-    idx, prompt, model, size = args
-    payload = {
-        "model": model,
-        "prompt": prompt,
-        "size": size,
-        "extra_body": {"response_format": "url"}
-    }
-    resp = requests.post(url, headers=headers, json=payload, timeout=60)
-    data = resp.json()
-    return idx, data["data"][0]["url"]
-
-# N 个任务
-tasks = [
-    (0, "prompt 1", "agnes-image-2.1-flash", "1024x1024"),
-    (1, "prompt 2", "agnes-image-2.1-flash", "1024x1024"),
-    # ...
-]
-
-output_dir = "<skill_dir>/output/batch"
-os.makedirs(output_dir, exist_ok=True)
-
-with ThreadPoolExecutor(max_workers=5) as executor:
-    futures = {executor.submit(generate_one, t): t[0] for t in tasks}
-    for future in as_completed(futures):
-        idx, img_url = future.result()
-        path = f"{output_dir}/img_{idx:03d}.png"
-        with open(path, "wb") as f:
-            f.write(requests.get(img_url).content)
-        print(f"Saved {path}")
-```
-
-**参数说明：**
+### `image` — 文生图 / 图生图 / 多图合成（同步）
 
 | 参数 | 说明 |
 |------|------|
-| `max_workers` | 并发数，建议 ≤10；超过可能触发 API 限流 |
-| `timeout=60` | 单次请求超时，避免阻塞 |
-| `size` | 支持 `1024x1024`、`1024x1280`、`1280x1024` |
+| `--prompt` | 描述。文生图结构：`[主体]+[场景/环境]+[风格]+[光照]+[构图]+[质量]`；图生图：`[改变]+[新风格]+[增删元素]+[保留元素]` |
+| `--model` | 默认 `agnes-image-2.5-flash`；用户明确要旧版/2.0 时用 `agnes-image-2.0-flash` |
+| `--size` | `1K`/`2K`/`3K`/`4K`（默认 1K）。高清海报/壁纸用 2K-4K |
+| `--ratio` | `1:1 3:4 4:3 16:9 9:16 2:3 3:2 21:9`（默认 1:1）。竖屏头像 3:4、短视频封面 9:16 |
+| `--ref` | 参考图（URL **或本地路径**），可重复传多张 = 多图合成；脚本自动把本地文件转 Data URI |
+| `--format` | `url`（默认）或 `b64_json` |
+| `--extra` | 附加参数 JSON（合并进 extra_body） |
+| `--dry-run` | 只打印请求体 |
 
-**发送批量图片到飞书**：按顺序遍历 `output_dir` 下的文件，逐个 `send_message(message="MEDIA:<skill_dir>/output/batch/img_000.png")` 即可。
+示例（官方尺寸 → 实际像素见 quickref 表）：`--size 2K --ratio 16:9` → `2624x1472`。
 
-## Portrait（人物）Prompt 指南
+### `video` — 文生视频 / 图生视频 / 关键帧动画（异步，自动轮询+下载）
 
-生成人物写真时，prompt 必须包含以下三类元素，否则图片会显得呆板：
+| 参数 | 说明 |
+|------|------|
+| `--prompt` | `[主体]+[动作]+[场景]+[镜头运动]+[光线]+[风格]`；图生视频描述"什么动、什么保持稳定" |
+| `--model` | 默认 `agnes-video-v2.0`（唯一） |
+| `--duration` | `3`/`5`/`10`/`18` 秒（@24fps，自动 num_frames=81/121/241/441）；精确控制用 `--frames --fps` |
+| `--frames` / `--fps` | `num_frames ≤ 441` 且满足 `8n+1`（脚本会校验）；`frame_rate` 1-60 |
+| `--image` | 图生视频：**单张可公网访问的图片 URL** |
+| `--keyframes` | 关键帧动画：≥2 张 URL（或本地路径），重复传多次；自动 `extra_body.mode="keyframes"` |
+| `--width`/`--height` | 会被标准化到 480p/720p/1080p；竖向 9:16 内容可用 `--width 672 --height 1152` 之类后看 `metadata.size_mapping` |
+| `--seed` | 固定种子可复现 |
+| `--negative-prompt` | 反向提示词 |
+| `--interval` / `--timeout` | 轮询间隔（默认 8s）/ 最大等待（默认 300s，即 5 分钟） |
 
-| 类别 | 要写什么 | 示例 |
-|------|----------|------|
-| 表情 | 自然的情绪描写，不能只写"beautiful" | `a subtle natural half-smile`, `warm flirtatious gaze`, `soft gentle expression` |
-| 动作/姿态 | 具体的身体动作，不是站立的正面照 | `one hand gently touching her collarbone`, `head slightly tilted`, `hair flowing in breeze`, `elegant contrapposto stance` |
-| 氛围/光线 | 让角色活起来的光影 | `cinematic side lighting`, `warm golden rim light`, `soft dreamy bokeh` |
+**耗时提示**：5 秒视频通常需 1-3 分钟轮询，属正常；若轮询超时，用 `fetch` 续查不要重新创建任务。
 
-**常见错误**：只写 `beautiful girl with gold jewelry` → 结果是僵硬的正面证件照感。
-**正确写法**：主体 + 表情 + 动作 + 场景 + 光线 + 风格，全部写全。
+### `fetch` — 调试：按 `--video-id`（推荐）或 `--task-id` 查询任务状态
 
-英文写生图的参考结构：
-```
-[主体外观] + [表情] + [动作/姿态] + [配饰/服装细节] + [背景/场景] + [光线/氛围] + [艺术风格]
-```
+## 产物与日志（脚本自动完成）
+
+- 图片：`<skill_dir>/output/YYYYMMDD/img_XXXX.png`
+- 视频：`<skill_dir>/output/YYYYMMDD/video_XXXX.mp4`
+- 日志：`<skill_dir>/output/YYYYMMDD/log.md`，每次成功产物追加一条：
+
+```markdown
+## 2026-09-07 10:12:33
+
+**Prompt**: <完整提示词>
+
+**Model**: agnes-image-2.5-flash
+**Size**: 2K
+**Ratio**: 3:4
+**URL**: https://…
+
+**File**: …/output/20260907/img_0003.png
 
 ---
-
-# 视频生成
-
-## 基本信息
-
-- **创建任务**: `POST https://api.agnes-ai.cn/v1/videos`
-- **查询结果（推荐）**: `GET https://api.agnes-ai.cn/agnesapi?video_id=<VIDEO_ID>`
-- **认证**: `Authorization: Bearer <your_api_key>`（从 `<skill_dir>/keys.json` 读取）
-  **⚠️** 视频是**异步任务**，需轮询
-
-## 视频模型
-
-当前唯一支持的模型是 `agnes-video-v2.0`，需要手动指定分辨率和帧数。
-
-### agnes-video-v2.0 参数（旧版）
-
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| model | string | ✅ | `agnes-video-v2.0` |
-| prompt | string | ✅ | 视频内容描述 |
-| height | integer | ❌ | 视频高度（默认 768） |
-| width | integer | ❌ | 视频宽度（默认 1152） |
-| num_frames | integer | ❌ | 帧数（必须 ≤ 441 且满足 8n+1） |
-| frame_rate | number | ❌ | 帧率（1-60，默认 24） |
-| image | string | ❌ | 图生视频使用的图片 URL |
-| extra_body.image | array | ❌ | 多图/关键帧图片数组 |
-| extra_body.mode | string | ❌ | 模式：`"keyframes"` |
-| negative_prompt | string | ❌ | 反向提示词 |
-| seed | integer | ❌ | 随机种子 |
-| num_inference_steps | integer | ❌ | 推理步数 |
-
-## 调用示例
-
-### Text-to-Video（文生视频）
-
-```json
-{
-  "model": "agnes-video-v2.0",
-  "prompt": "A cat walking on the beach at sunset, soft ocean waves, warm golden lighting, realistic motion",
-  "height": 768,
-  "width": 1152,
-  "num_frames": 121,
-  "frame_rate": 24
-}
 ```
 
-### Image-to-Video（图生视频）
+> `output/` 与 `keys.json` 已在技能目录 `.gitignore` 忽略，不会入库。
 
-```json
-{
-  "model": "agnes-video-v2.0",
-  "prompt": "The woman slowly turns around, natural facial expression, cinematic camera movement",
-  "height": 768,
-  "width": 1152,
-  "num_frames": 121,
-  "image": "https://example.com/image.png"
-}
-```
+## 避坑清单（来自线上事故复盘）
 
-## 调用流程
+1. **绝不硬编码 API Key / 绝不手写生成脚本**：key 由 `media.py` 从 `keys.json` 读；prompt 与参数通过命令行传给 `media.py`。
+2. **命令失败先读 stderr**：`HTTP 4xx` 会打印响应体（参数错/未授权/无 URL 权限等）。定位并修正后再重试；**同一命令不要原样重试 3 次**——会触发会话熔断。
+3. 参考图：图片接口本地路径/URL 均可；**视频（image/keyframes）要求可公网访问的 URL**，本地文件需先上传。
+4. `num_frames` 上限 441 且必须 8n+1；`response_format`/参考图数组都在 `extra_body` 内（`media.py` 已按官方文档处理，不要手工再包一层）。
+5. 视频完成标志是 `status=completed` 且 URL 取 `metadata.url`（旧脚本取顶层 `url` 是错的——已修复）。
+6. 图生图不需要 `tags: ["img2img"]`。
+7. 生成给用户看的结果时，回话附上 `FILE=` 本地路径（可展示），不要把整段 base64 贴进对话。
 
-1. **创建任务**: POST 到 `/v1/videos`，获取 `video_id`
-2. **轮询查询**: 每 8 秒 GET `/agnesapi?video_id=<ID>`（避免 429 限速）
-3. **等待完成**: 状态 `queued` → `processing` → `completed` / `failed`
-4. **获取视频**: 从顶层 `url` 字段提取视频 URL
-5. **发送到飞书**: 下载到 `<skill_dir>/output/` 后用 `MEDIA:/路径` 发送
+## 参考素材
 
-## 响应格式
-
-### 创建返回（v2.0）
-```json
-{
-  "id": "task_xxxxxx",
-  "video_id": "video_xxxxxx",
-  "task_id": "task_xxxxxx",
-  "object": "video",
-  "model": "agnes-video-v2.0",
-  "status": "queued",
-  "progress": 0,
-  "created_at": 1788493348,
-  "seconds": "5.0",
-  "size": "1088x832"
-}
-```
-
-### 查询返回（完成时，v2.0）
-```json
-{
-  "status": "completed",
-  "url": "https://cos-platform-outputs.agnes-ai.cn/videos/agnes-video-v2.0/video_xxxxxx.mp4",
-  "progress": 100,
-  "error": null
-}
-```
-
-> **注意**：v2.0 使用顶层 `url` 字段，2.5-flash 可能使用 `remixed_from_video_id`
-
-## 响应状态
-
-| status | 说明 |
-|--------|------|
-| queued | 排队中 |
-| in_progress | 生成中 |
-| completed | 完成，`url` 含视频 URL |
-| failed | 失败，`error` 字段含错误信息 |
-
-## 轮询代码
-
-```python
-import time, requests
-
-video_id = "<video_id>"
-while True:
-    resp = requests.get(
-        "https://api.agnes-ai.cn/agnesapi",
-        params={"video_id": video_id},
-        headers={"Authorization": "Bearer <KEY>"}
-    )
-    data = resp.json()
-    if data.get("status") == "completed":
-        video_url = data.get("url")
-        break
-    elif data.get("status") == "failed":
-        raise Exception(f"Video failed: {data.get('error')}")
-    time.sleep(8)  # ≥8s to avoid 429 rate limit
-```
-
-## 参数说明
-
-### agnes-video-v2.0 参数
-
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| model | string | ✅ | 模型名称，使用 `agnes-video-v2.0` |
-| prompt | string | ✅ | 视频内容的文本描述 |
-| image | string | ❌ | 图生视频使用的图片 URL |
-| mode | string | ❌ | 生成模式，例如 `ti2vid` 或 `keyframes` |
-| height | integer | ❌ | 视频高度，默认 768 |
-| width | integer | ❌ | 视频宽度，默认 1152 |
-| num_frames | integer | ❌ | 视频帧数，必须 ≤ 441 且遵循 8n + 1 规则 |
-| frame_rate | number | ❌ | 视频帧率，支持范围 1–60 |
-| num_inference_steps | integer | ❌ | 推理步数 |
-| seed | integer | ❌ | 随机种子 |
-| negative_prompt | string | ❌ | 反向提示词 |
-| extra_body.image | array | ❌ | 关键帧模式下的输入图片 URL 数组 |
-| extra_body.mode | string | ❌ | 附加模式设置，例如 `keyframes` |
-
-## 注意事项
-
-- **图片**: `response_format` 必须放 `extra_body` 里，不能放请求体顶层，否则 400
-- **视频**: 异步任务，耗时 30-120 秒，需轮询
-- **发送文件**: 下载到 `<skill_dir>/output/` 后用 `MEDIA:/路径` 发飞书
-- **API key**: 从 `<skill_dir>/keys.json` 读取（`json.load`），键名为 `"agnes"`，不要再硬编码 key
-- **发送文件**: 下载到 `<skill_dir>/output/` 后用 `MEDIA:/路径` 发飞书
----
-
-## 🐍 Python SDK
-
-已提供两个 Python 脚本简化调用：
-- `image_generator.py` — 文生图 / 图生图
-- `video_generator.py` — 文生视频 / 图生视频 / 关键帧动画
-
-参数字典格式，不常用参数有默认值可省略。详见脚本文件。
+- 角色/风格化示例提示词：`references/yae_miko_prompt_examples.md`
+- 官方接口速查与尺寸表：`references/agnes-api-quickref.md`
+- API Key 配置说明：`references/api-keys-config.md`

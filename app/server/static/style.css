@@ -1636,3 +1636,34 @@ input, textarea { font-family: inherit; }
   border: 1px solid rgba(255, 107, 107, 0.3);
   border-radius: 8px; padding: 7px 10px;
 }
+
+/* ==================== 工具轮"思考过程"段 ==================== */
+/* 模型在调用工具前输出的过程性文本，由前端折叠为灰色小段（默认收起，点击展开） */
+.proc-text {
+  margin: 6px 0 8px;
+  padding: 3px 10px 3px 12px;
+  border-left: 3px solid var(--border);
+  background: color-mix(in srgb, var(--bg-hover) 55%, transparent);
+  border-radius: 0 8px 8px 0;
+  cursor: pointer;
+  user-select: none;
+}
+.proc-label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--text-faint);
+  font-weight: 600;
+}
+.proc-body {
+  font-size: 12px;
+  color: var(--text-soft);
+  line-height: 1.55;
+  margin-top: 2px;
+}
+.proc-text .proc-body p { margin: 4px 0; }
+.proc-text .proc-body > :first-child { margin-top: 0; }
+.proc-text .proc-body > :last-child { margin-bottom: 0; }
+.proc-text.collapsed .proc-body { display: none; }
+.proc-text:hover { border-left-color: var(--accent-2); }
