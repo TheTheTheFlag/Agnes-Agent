@@ -32,31 +32,31 @@ class AgnesVideoGenerator:
         self,
         prompt: str,
         model: str = "agnes-video-v2.0",
-        height: int = 768,
-        width: int = 1152,
-        num_frames: int = 121,
-        frame_rate: int = 24,
+        ratio: str = "16:9",
+        duration: str = "5",
         image: Optional[str] = None,
         mode: Optional[str] = None,
-        extra_images: Optional[List[str]] = None,
-        negative_prompt: Optional[str] = None,
         seed: Optional[int] = None,
         num_inference_steps: Optional[int] = None,
+        # v2.0 参数
+        height: Optional[int] = None,
+        width: Optional[int] = None,
+        num_frames: Optional[int] = None,
+        frame_rate: Optional[int] = None,
+        # 2.5-flash 参数
+        size: Optional[str] = None,
+        seconds: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Create a video generation task.
 
         Args:
             prompt: Video description prompt
-            model: Model name (agnes-video-v2.0)
-            height: Video height (default 768)
-            width: Video width (default 1152)
-            num_frames: Number of frames (must follow 8n+1 rule, max 441)
-            frame_rate: Frame rate (1-60, default 24)
+            model: Model name (agnes-video-2.5-flash or agnes-video-v2.0)
+            ratio: Aspect ratio (21:9, 16:9, 4:3, 1:1, 3:4, 9:16) - for 2.5-flash
+            duration: Duration in seconds ("4" to "12") - for 2.5-flash
             image: Single image URL for image-to-video
             mode: Generation mode ("ti2vid" or "keyframes")
-            extra_images: List of image URLs for multi-image/keyframe video
-            negative_prompt: Negative prompt
             seed: Random seed for reproducibility
             num_inference_steps: Number of inference steps
 
@@ -69,29 +69,34 @@ class AgnesVideoGenerator:
             "Content-Type": "application/json",
         }
 
-        payload: Dict[str, Any] = {
-            "model": model,
-            "prompt": prompt,
-            "height": height,
-            "width": width,
-            "num_frames": num_frames,
-            "frame_rate": frame_rate,
-        }
+        # agnes-video-2.5-flash 参数
+        if model == "agnes-video-2.5-flash":
+            payload: Dict[str, Any] = {
+                "model": model,
+                "prompt": prompt,
+                "size": size or "720P",
+                "seconds": seconds or int(duration),
+            }
+        else:
+            # agnes-video-v2.0 旧参数（兼容）
+            payload = {
+                "model": model,
+                "prompt": prompt,
+                "height": height or 768,
+                "width": width or 1152,
+                "num_frames": num_frames or 121,
+                "frame_rate": frame_rate or 24,
+            }
 
         # Add single image for image-to-video
         if image:
             payload["image"] = image
 
-        # Add extra images and mode for keyframe/multi-image video
-        if extra_images:
-            payload["extra_body"] = {
-                "image": extra_images,
-                "mode": mode or "keyframes",
-            }
+        # Add mode for ti2vid or keyframes
+        if mode:
+            payload["mode"] = mode
 
         # Add optional parameters
-        if negative_prompt:
-            payload["negative_prompt"] = negative_prompt
         if seed is not None:
             payload["seed"] = seed
         if num_inference_steps is not None:
@@ -119,7 +124,7 @@ class AgnesVideoGenerator:
         Returns:
             Dictionary containing video URL and metadata when completed
         """
-        query_url = f"https://api.agnes-ai.cn/agnesapi"
+        query_url = "https://api.agnes-ai.cn/agnesapi"
         headers = {"Authorization": f"Bearer {self.api_key}"}
 
         while True:
@@ -132,7 +137,7 @@ class AgnesVideoGenerator:
             status = data.get("status")
             if status == "completed":
                 return {
-                    "url": data.get("remixed_from_video_id"),
+                    "url": data.get("url") or data.get("remixed_from_video_id"),
                     "progress": data.get("progress"),
                     "error": None,
                 }
@@ -156,8 +161,6 @@ class AgnesVideoGenerator:
         Returns:
             Dictionary containing video URL and metadata
         """
-        import time
-
         # Create the video task
         task_result = self.create(prompt, **kwargs)
         print(f"Video created: {task_result['video_id']}, status: {task_result['status']}")
@@ -178,9 +181,7 @@ if __name__ == "__main__":
     generator = AgnesVideoGenerator()
     result = generator.generate(
         prompt="A cat walking on the beach at sunset, soft ocean waves, warm golden lighting, realistic motion",
-        height=768,
-        width=1152,
-        num_frames=121,
-        frame_rate=24,
+        ratio="16:9",
+        duration="5",
     )
     print(f"Video URL: {result['url']}")

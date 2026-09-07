@@ -17,10 +17,10 @@ triggers:
 config:
   keys_file: keys.json
   base_url: https://api.agnes-ai.cn
-  model_image_default: agnes-image-2.1-flash
+  model_image_default: agnes-image-2.5-flash
   model_image_legacy: agnes-image-2.0-flash
   model_video: agnes-video-v2.0
-  size_default: "2K"
+  size_default: "720P"
   ratio_default: "16:9"
 ---
 
@@ -33,8 +33,9 @@ config:
 
 | 类型 | 默认模型 | 说明 |
 |------|----------|------|
-| 图片 | `agnes-image-2.1-flash` | 用户说「2.0」时用 `agnes-image-2.0-flash` |
-| 视频 | `agnes-video-v2.0` | 视频生成专用模型 |
+| 图片 | `agnes-image-2.5-flash` | 用户说「2.0」时用 `agnes-image-2.0-flash` |
+| 视频 | `agnes-video-2.5-flash` | 默认视频生成模型，支持 720p 固定分辨率 |
+| 视频（旧版） | `agnes-video-v2.0` | 需指定 height/width/num_frames |
 
 ## 判断类型
 
@@ -56,7 +57,7 @@ config:
 
 | 用户说法 | 使用模型 |
 |----------|----------|
-| 生成图片（默认） | `agnes-image-2.1-flash` |
+| 生成图片（默认） | `agnes-image-2.5-flash` |
 | 用 2.0 / Agnes Image 2.0 Flash | `agnes-image-2.0-flash` |
 
 ## 请求格式
@@ -287,16 +288,65 @@ with ThreadPoolExecutor(max_workers=5) as executor:
 - **认证**: `Authorization: Bearer <your_api_key>`（从 `<skill_dir>/keys.json` 读取）
   **⚠️** 视频是**异步任务**，需轮询
 
-## 四种模式
+## 视频模型对比
 
-| 模式 | 说明 | 关键参数 |
+| 模型 | 说明 | 参数方式 |
 |------|------|----------|
-| Text-to-Video | 文生视频 | `prompt` + `height`/`width` + `num_frames`/`frame_rate` |
-| Image-to-Video | 图生视频 | `prompt` + `image`（单图URL） |
-| Multi-Image Video | 多图视频 | `prompt` + `extra_body.image`（多图URL数组） |
-| Keyframe Animation | 关键帧动画 | `prompt` + `extra_body.image` + `extra_body.mode: "keyframes"` |
+| `agnes-video-2.5-flash` | 默认模型，固定 720p，支持 ratio + duration | 推荐 |
+| `agnes-video-v2.0` | 旧模型，需手动指定分辨率和帧数 | 兼容 |
 
-### 1. Text-to-Video（文生视频）
+### agnes-video-2.5-flash 参数
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| model | string | ✅ | `agnes-video-v2.5-flash`（推荐）或 `agnes-video-v2.0`（旧版） |
+| prompt | string | ✅ | 视频内容描述 |
+| size | string | ✅ | 固定 `"720P"`（2.5-flash 专用） |
+| seconds | integer | ✅ | 时长（秒），2.5-flash 专用 |
+| ratio | string | ❌ | 宽高比：`21:9`, `16:9`, `4:3`, `1:1`, `3:4`, `9:16`（2.5-flash 专用） |
+| duration | string | ❌ | 时长字符串，兼容旧格式 |
+| image | string/array | ❌ | 图片 URL，单图或数组（最多 5 张） |
+| mode | string | ❌ | 生成模式：`"ti2vid"`（图生视频）、`"keyframes"`（关键帧） |
+| seed | integer | ❌ | 随机种子 |
+| num_inference_steps | integer | ❌ | 推理步数 |
+
+**固定规格**：
+- 分辨率：720p（固定）
+- 各比例对应像素：`16:9`=1280×720, `9:16`=720×1280, `1:1`=720×720, `21:9`=1680×720, `4:3`=960×720, `3:4`=720×960
+
+### agnes-video-v2.0 参数（旧版）
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| model | string | ✅ | `agnes-video-v2.0` |
+| prompt | string | ✅ | 视频内容描述 |
+| height | integer | ❌ | 视频高度（默认 768） |
+| width | integer | ❌ | 视频宽度（默认 1152） |
+| num_frames | integer | ❌ | 帧数（必须 ≤ 441 且满足 8n+1） |
+| frame_rate | number | ❌ | 帧率（1-60，默认 24） |
+| image | string | ❌ | 图生视频使用的图片 URL |
+| extra_body.image | array | ❌ | 多图/关键帧图片数组 |
+| extra_body.mode | string | ❌ | 模式：`"keyframes"` |
+| negative_prompt | string | ❌ | 反向提示词 |
+| seed | integer | ❌ | 随机种子 |
+| num_inference_steps | integer | ❌ | 推理步数 |
+
+## 调用示例
+
+### Text-to-Video（文生视频）
+
+#### agnes-video-2.5-flash（推荐）
+
+```json
+{
+  "model": "agnes-video-2.5-flash",
+  "prompt": "A cat walking on the beach at sunset, soft ocean waves, warm golden lighting, realistic motion",
+  "size": "720P",
+  "seconds": 5
+}
+```
+
+#### agnes-video-v2.0（旧版）
 
 ```json
 {
@@ -309,105 +359,90 @@ with ThreadPoolExecutor(max_workers=5) as executor:
 }
 ```
 
-### 2. Image-to-Video（图生视频）
+### Image-to-Video（图生视频）
 
 ```json
 {
   "model": "agnes-video-v2.0",
   "prompt": "The woman slowly turns around, natural facial expression, cinematic camera movement",
+  "height": 768,
+  "width": 1152,
+  "num_frames": 121,
+  "image": "https://example.com/image.png"
+}
+```
+
+### Image-to-Video（图生视频）- 2.5-flash
+
+```json
+{
+  "model": "agnes-video-2.5-flash",
+  "prompt": "The woman slowly turns around, natural facial expression, cinematic camera movement",
+  "size": "720P",
+  "seconds": 5,
   "image": "https://example.com/image.png",
-  "num_frames": 121,
-  "frame_rate": 24
+  "mode": "ti2vid"
 }
 ```
 
-### 3. Multi-Image Video（多图视频）
+### Keyframe Animation（关键帧动画）- 2.5-flash
 
 ```json
 {
-  "model": "agnes-video-v2.0",
-  "prompt": "Smooth transformation scene between the two images, cinematic lighting, consistent identity",
-  "extra_body": {
-    "image": ["https://example.com/1.png", "https://example.com/2.png"]
-  },
-  "num_frames": 121,
-  "frame_rate": 24
-}
-```
-
-### 4. Keyframe Animation（关键帧动画）
-
-```json
-{
-  "model": "agnes-video-v2.0",
+  "model": "agnes-video-2.5-flash",
   "prompt": "Smooth cinematic transition between keyframes, natural camera movement",
-  "extra_body": {
-    "image": ["https://example.com/kf1.png", "https://example.com/kf2.png"],
-    "mode": "keyframes"
-  },
-  "num_frames": 121,
-  "frame_rate": 24
+  "size": "720P",
+  "seconds": 8,
+  "image": ["https://example.com/kf1.png", "https://example.com/kf2.png"],
+  "mode": "keyframes"
 }
 ```
-
-## 分辨率与帧数限制（实测）
-
-| 分辨率 | 最大 num_frames | 17秒参数（24fps） |
-|--------|-----------------|-------------------|
-| 720p | 409 | height=720, width=1280, num_frames=409, frame_rate=24 |
-| 480p | 961 | height=480, width=840, num_frames=441, frame_rate=24 |
-
-**⚠️ num_frames 限制规则：**
-- 必须 ≤ 分辨率对应的最大值
-- 必须满足 `8n + 1`（即 1, 9, 17, 25, 33, 41, 49...）
-- 超出限制返回 400 错误：`num_frames 441 exceeds maximum 409 for 720p`
-
-**常用帧数速查（24fps）：**
-
-| 时长 | num_frames | 适用分辨率 |
-|------|------------|-----------|
-| ~5秒 | 121 | 任意 |
-| ~10秒 | 241 | 480p |
-| ~17秒 | 409 | 720p |
-| ~18秒 | 441 | 480p |
 
 ## 调用流程
 
 1. **创建任务**: POST 到 `/v1/videos`，获取 `video_id`
 2. **轮询查询**: 每 8 秒 GET `/agnesapi?video_id=<ID>`（避免 429 限速）
 3. **等待完成**: 状态 `queued` → `processing` → `completed` / `failed`
-4. **获取视频**: 从 `remixed_from_video_id` 提取视频 URL
+4. **获取视频**: 从顶层 `url` 字段提取视频 URL（v2.0）或使用 `remixed_from_video_id`（2.5-flash，如需要）
 5. **发送到飞书**: 下载到 `<skill_dir>/output/` 后用 `MEDIA:/路径` 发送
 
 ## 响应格式
 
-创建返回:
+### 创建返回（v2.0）
 ```json
 {
+  "id": "task_xxxxxx",
   "video_id": "video_xxxxxx",
+  "task_id": "task_xxxxxx",
+  "object": "video",
+  "model": "agnes-video-v2.0",
   "status": "queued",
+  "progress": 0,
+  "created_at": 1788493348,
   "seconds": "5.0",
-  "size": "1152x768"
+  "size": "1088x832"
 }
 ```
 
-查询返回（完成时）:
+### 查询返回（完成时，v2.0）
 ```json
 {
   "status": "completed",
+  "url": "https://cos-platform-outputs.agnes-ai.cn/videos/agnes-video-v2.0/video_xxxxxx.mp4",
   "progress": 100,
-  "remixed_from_video_id": "https://storage.googleapis.com/agnes-aigc/.../video_xxxxxx.mp4",
   "error": null
 }
 ```
+
+> **注意**：v2.0 使用顶层 `url` 字段，2.5-flash 可能使用 `remixed_from_video_id`
 
 ## 响应状态
 
 | status | 说明 |
 |--------|------|
 | queued | 排队中 |
-| processing | 生成中 |
-| completed | 完成，`remixed_from_video_id` 含视频 URL |
+| in_progress | 生成中 |
+| completed | 完成，`url` 含视频 URL |
 | failed | 失败，`error` 字段含错误信息 |
 
 ## 轮询代码
@@ -424,7 +459,8 @@ while True:
     )
     data = resp.json()
     if data.get("status") == "completed":
-        video_url = data["remixed_from_video_id"]
+        # v2.0 使用顶层 url，2.5-flash 可能用 remixed_from_video_id
+        video_url = data.get("url") or data.get("remixed_from_video_id")
         break
     elif data.get("status") == "failed":
         raise Exception(f"Video failed: {data.get('error')}")
@@ -432,6 +468,21 @@ while True:
 ```
 
 ## 参数说明
+
+### agnes-video-2.5-flash 参数
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| model | string | ✅ | 模型名称，使用 `agnes-video-2.5-flash` |
+| prompt | string | ✅ | 视频内容的文本描述 |
+| ratio | string | ✅ | 宽高比：`21:9`, `16:9`, `4:3`, `1:1`, `3:4`, `9:16` |
+| duration | string | ✅ | 时长：`"4"` 到 `"12"`（秒） |
+| image | string/array | ❌ | 图片 URL，单图或数组（最多 5 张） |
+| mode | string | ❌ | 生成模式：`"ti2vid"`（图生视频）、`"keyframes"`（关键帧） |
+| seed | integer | ❌ | 随机种子 |
+| num_inference_steps | integer | ❌ | 推理步数 |
+
+### agnes-video-v2.0 参数（旧版，兼容）
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
@@ -444,8 +495,8 @@ while True:
 | num_frames | integer | ❌ | 视频帧数，必须 ≤ 441 且遵循 8n + 1 规则 |
 | frame_rate | number | ❌ | 视频帧率，支持范围 1–60 |
 | num_inference_steps | integer | ❌ | 推理步数 |
-| seed | integer | ❌ | 随机种子，用于可复现结果 |
-| negative_prompt | string | ❌ | 反向提示词，描述需要避免的内容 |
+| seed | integer | ❌ | 随机种子 |
+| negative_prompt | string | ❌ | 反向提示词 |
 | extra_body.image | array | ❌ | 关键帧模式下的输入图片 URL 数组 |
 | extra_body.mode | string | ❌ | 附加模式设置，例如 `keyframes` |
 

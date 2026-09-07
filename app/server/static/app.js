@@ -344,7 +344,7 @@ function addUserBubble(text) {
   const inner = messagesInner();
   const wrap = document.createElement("div");
   wrap.className = "msg user";
-  wrap.innerHTML = `<div class="msg-body"><div class="msg-text">${escapeHtml(text)}</div></div>`;
+  wrap.innerHTML = `<div class="msg-body"><div class="msg-text">${renderMarkdown(text)}</div></div>`;
   inner.appendChild(wrap);
   scrollToBottom();
   return wrap;
@@ -518,6 +518,47 @@ function resetTodoPanel() {
   renderTodoPanel();
 }
 
+/* ==================== 移动端适配（<768px，与 CSS 断点一致） ==================== */
+function isMobile() {
+  return window.matchMedia("(max-width: 767.98px)").matches;
+}
+
+/* 左侧会话栏：桌面用 side-collapsed 内联折叠，手机用 side-open 抽屉+遮罩，两套状态互不干扰 */
+function openSidebar() {
+  const app = $("#app");
+  if (isMobile()) {
+    app.classList.remove("side-collapsed");
+    app.classList.add("side-open");
+    const mask = $("#sidebarMask");
+    mask.classList.remove("hidden");
+    requestAnimationFrame(() => mask.classList.add("show"));
+  } else {
+    app.classList.remove("side-collapsed");
+  }
+}
+
+function closeSidebar() {
+  const app = $("#app");
+  if (isMobile()) {
+    app.classList.remove("side-open");
+    const mask = $("#sidebarMask");
+    mask.classList.remove("show");
+    setTimeout(() => mask.classList.add("hidden"), 240);
+  } else {
+    app.classList.add("side-collapsed");
+  }
+}
+
+/* 移动端：键盘弹出时按 visualViewport 收缩根高度，避免输入框被遮挡 */
+function syncViewportHeight() {
+  const app = $("#app");
+  if (isMobile() && window.visualViewport) {
+    app.style.height = window.visualViewport.height + "px";
+  } else {
+    app.style.height = "";
+  }
+}
+
 /* ==================== 审批模式（每次询问 / 本次会话允许 / 永久允许） ==================== */
 function setApprovalMode(mode) {
   $$(".approval-mode-btn").forEach((b) => b.classList.toggle("active", b.dataset.mode === mode));
@@ -540,7 +581,20 @@ function initApprovalMode() {
   const bar = $("#approvalModeBar");
   if (!bar) return;
   $$(".approval-mode-btn", bar).forEach((b) => {
-    b.addEventListener("click", () => setApprovalMode(b.dataset.mode));
+    b.addEventListener("click", () => {
+      // 桌面：三个按钮常显，直接切换；手机：默认只显示当前模式胶囊，点击弹出三选
+      if (!isMobile()) { setApprovalMode(b.dataset.mode); return; }
+      if (bar.classList.contains("open")) {
+        setApprovalMode(b.dataset.mode);
+        bar.classList.remove("open");
+      } else {
+        bar.classList.add("open");
+      }
+    });
+  });
+  // 移动端：点击弹层以外区域时收起
+  document.addEventListener("click", (e) => {
+    if (isMobile() && !bar.contains(e.target)) bar.classList.remove("open");
   });
   refreshApprovalMode();
 }
@@ -827,7 +881,7 @@ function renderHistory(msgs) {
     if (m.role === "user") {
       const wrap = document.createElement("div");
       wrap.className = "msg user";
-      wrap.innerHTML = `<div class="msg-body"><div class="msg-text">${escapeHtml(m.content)}</div></div>`;
+      wrap.innerHTML = `<div class="msg-body"><div class="msg-text">${renderMarkdown(m.content)}</div></div>`;
       inner.appendChild(wrap);
       assistantWrap = null;
     } else if (m.role === "assistant") {
@@ -1052,6 +1106,7 @@ async function bulkDeleteThreads() {
 }
 
 async function selectThread(tid) {
+  if (isMobile()) closeSidebar();  // 手机端选择会话后自动收起边栏抽屉
   if (State.streaming) stopChat();
   State.threadId = tid;
   await loadHistory(tid);
@@ -1991,12 +2046,12 @@ function bindEvents() {
   });
   $("#btnStop").addEventListener("click", stopChat);
   $("#btnToggleTheme").addEventListener("click", cycleTheme);
-  $("#btnCollapseSidebar").addEventListener("click", () => {
-    $("#app").classList.add("side-collapsed");
-  });
-  $("#btnSidebar").addEventListener("click", () => {
-    $("#app").classList.remove("side-collapsed");
-  });
+  $("#btnCollapseSidebar").addEventListener("click", closeSidebar);
+  $("#btnSidebar").addEventListener("click", openSidebar);
+  $("#sidebarMask").addEventListener("click", closeSidebar);
+  // 移动端：键盘弹出/收起及窗口尺寸变化时同步根高度
+  window.addEventListener("resize", syncViewportHeight);
+  if (window.visualViewport) window.visualViewport.addEventListener("resize", syncViewportHeight);
   $("#threadSearch").addEventListener("input", () => loadThreads());
   $("#btnDrawer").addEventListener("click", openDrawer);
   $("#btnDrawerClose").addEventListener("click", closeDrawer);
@@ -2018,6 +2073,8 @@ function bindEvents() {
     }
     if (e.key === "Escape") {
       if (!$("#drawer").classList.contains("hidden") && $("#drawer").classList.contains("show")) closeDrawer();
+      else if ($("#approvalModeBar").classList.contains("open")) $("#approvalModeBar").classList.remove("open");
+      else if ($("#app").classList.contains("side-open")) closeSidebar();
       else hideCmdMenu();
     }
   });

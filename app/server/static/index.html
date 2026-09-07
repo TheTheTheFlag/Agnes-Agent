@@ -52,6 +52,9 @@
     </div>
   </aside>
 
+  <!-- 手机端：会话边栏抽屉打开时的遮罩（点击收起） -->
+  <div id="sidebarMask" class="sidebar-mask hidden"></div>
+
   <!-- ==================== 主对话区 ==================== -->
   <main id="chat">
     <header id="topbar">
@@ -64,7 +67,7 @@
       </div>
       <div class="topbar-actions">
         <span id="liveBadge" class="live-badge hidden">
-          <span class="live-dot"></span>运行中
+          <span class="live-dot"></span><span class="live-badge-text">运行中</span>
         </span>
         <div class="approval-mode-bar" id="approvalModeBar" title="命令审批模式">
           <button class="approval-mode-btn" data-mode="per_ask">🔔 每次询问</button>

@@ -126,6 +126,7 @@ input, textarea { font-family: inherit; }
 #app {
   display: flex;
   height: 100vh;
+  height: 100dvh; /* 移动端地址栏收起/弹出时保持全高（不支持 dvh 时自动回退 100vh） */
   width: 100vw;
 }
 
@@ -1396,11 +1397,95 @@ input, textarea { font-family: inherit; }
 .toast.success { border-color: var(--success); color: var(--success); }
 .toast.error { border-color: var(--danger); color: var(--danger); }
 
-/* ==================== 响应式 ==================== */
-@media (max-width: 720px) {
-  #sidebar { position: fixed; left: 0; top: 0; bottom: 0; margin-left: -268px; }
-  #app.side-collapsed #sidebar { margin-left: 0; }
-  .msg-body { max-width: 94%; }
+/* ==================== 移动端响应式（手机 / 窄窗口 <768px） ====================
+   会话列表栏改为"抽屉式"：默认隐藏在屏幕左侧外，点顶栏汉堡(#btnSidebar)滑出，
+   带半透明遮罩(#sidebarMask)，点遮罩 / 选择会话 / Esc 均会收起。
+   桌面端保留原有 side-collapsed 内联折叠逻辑，两套状态互不干扰。 */
+@media (max-width: 767.98px) {
+  /* ---- 左侧会话栏 → 抽屉 ---- */
+  #sidebar {
+    position: fixed;
+    top: 0; left: 0; bottom: 0;
+    width: min(84vw, 330px);
+    margin-left: 0;
+    transform: translateX(-105%);
+    transition: transform 0.24s ease;
+    box-shadow: 8px 0 28px rgba(0, 0, 0, 0.35);
+    z-index: 190;
+  }
+  #app.side-open #sidebar { transform: translateX(0); }
+  #app.side-collapsed #sidebar { margin-left: 0 !important; transform: translateX(-105%); }
+
+  .sidebar-mask {
+    position: fixed; inset: 0;
+    background: var(--mask);
+    z-index: 180;
+    opacity: 0;
+    transition: opacity 0.22s;
+    pointer-events: none;
+  }
+  .sidebar-mask.show { opacity: 1; pointer-events: auto; }
+
+  /* ---- 顶栏 ---- */
+  #topbar { height: 50px; padding: 0 8px; gap: 8px; }
+  .topbar-meta { display: none; }          /* 手机不显示元信息 */
+  #liveBadge .live-badge-text { display: none; }  /* 运行中 → 仅圆点 */
+  .btn-ghost { width: 32px; height: 32px; padding: 0; justify-content: center; }
+  .btn-ghost span { display: none; }       /* 交付物 / 设置 → 纯图标 */
+  .topbar-actions { position: relative; }
+  #chatTitle { font-size: 13.5px; }
+
+  /* ---- 审批模式：只显示"当前生效"胶囊，点击弹出三选菜单 ---- */
+  .approval-mode-btn { display: none; }
+  .approval-mode-btn.active { display: inline-flex; }
+  .approval-mode-bar.open {
+    position: absolute;
+    right: 0; top: calc(100% + 6px);
+    z-index: 150;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: 5px;
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: var(--shadow);
+  }
+  .approval-mode-bar.open .approval-mode-btn { display: inline-flex; width: 100%; }
+
+  /* ---- 任务待办面板 ---- */
+  .todo-panel { padding: 0 12px; }
+  .todo-summary { gap: 8px; font-size: 12.5px; }
+
+  /* ---- 消息区 ---- */
+  .messages-inner { max-width: 100%; padding: 14px 12px 8px; }
+  .msg { margin-bottom: 16px; }
+  .msg-body { max-width: 100%; }
+  .msg.user .msg-body, .msg.assistant .msg-body { padding: 10px 13px; }
+  .msg-actions { opacity: 1; }             /* 无 hover，操作常显 */
+  .msg-text table { font-size: 12px; }
+  .d-table td { max-width: 140px; }
+
+  /* ---- 输入区 ---- */
+  #composer { padding: 8px 10px calc(8px + env(safe-area-inset-bottom, 0px)); }
+  .composer-hint { display: none; }
+  .composer-box { border-radius: 16px; padding: 6px 6px 6px 12px; }
+  #chatInput { font-size: 16px; }          /* ≥16px 避免 iOS 聚焦自动缩放 */
+  .btn-send { width: 38px; height: 38px; }
+  .btn-attach { width: 38px; height: 38px; }
+  .btn-stop { height: 38px; }
+  .attach-item { max-width: 110px; }
+  .cmd-menu { width: calc(100vw - 20px); left: 10px; transform: none; }
+  .code-copy { opacity: 1; }
+
+  /* ---- 会话列表触控优化 ---- */
+  .thread-item { padding: 11px 10px; }
+  .thread-item .t-del { visibility: visible; }
+  .btn-new, .model-pill, .icon-btn { min-height: 38px; }
+
+  /* ---- 其它 ---- */
+  .toast { max-width: 90vw; }
+  .welcome { min-height: 44vh; }
 }
 
 /* ==================== 技能 tab ==================== */
@@ -1410,10 +1495,12 @@ input, textarea { font-family: inherit; }
 
 /* ==================== 消息内图片渲染 ==================== */
 .msg-text img, .msg-body img {
-  max-width: min(560px, 100%);
+  max-width: 200px;
+  max-height: 200px;
   border-radius: 10px;
   margin: 6px 0;
   display: block;
+  object-fit: cover;
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.25);
 }
 

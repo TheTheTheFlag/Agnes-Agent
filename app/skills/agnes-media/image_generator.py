@@ -19,6 +19,8 @@ class AgnesImageGenerator:
         self.keys_file = os.path.expanduser(keys_file)
         self.api_key = self._load_api_key()
         self.base_url = "https://api.agnes-ai.cn/v1"
+        # 超时设为180秒，图片生成是重计算任务需要更长时间
+        self.timeout = 180
 
     def _load_api_key(self) -> str:
         """Load API key from config file."""
@@ -31,25 +33,23 @@ class AgnesImageGenerator:
     def generate(
         self,
         prompt: str,
-        model: str = "agnes-image-2.1-flash",
-        size: str = "1K",
-        ratio: str = "1:1",
+        model: str = "agnes-image-2.5-flash",
+        size: str = "2K",
+        ratio: str = "4:5",
         image: Optional[List[str]] = None,
         response_format: str = "url",
         extra_params: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Generate an image.
-
         Args:
             prompt: Image description prompt
-            model: Model name (agnes-image-2.1-flash or agnes-image-2.0-flash)
+            model: Model name (default agnes-image-2.5-flash)
             size: Output size (1K, 2K, 3K, 4K or exact like 1024x1024)
-            ratio: Aspect ratio (1:1, 16:9, 9:16, etc.)
+            ratio: Aspect ratio (1:1, 4:5, 16:9, etc.)
             image: Base64 data URIs for image-to-image (optional)
             response_format: "url" or "b64_json"
             extra_params: Additional parameters to pass to API
-
         Returns:
             Dictionary containing image URL and metadata
         """
@@ -76,7 +76,7 @@ class AgnesImageGenerator:
             extra_body.update(extra_params)
         payload["extra_body"] = extra_body
 
-        response = requests.post(url, headers=headers, json=payload, timeout=60)
+        response = requests.post(url, headers=headers, json=payload, timeout=self.timeout)
         response.raise_for_status()
 
         data = response.json()
@@ -90,9 +90,9 @@ class AgnesImageGenerator:
     def generate_batch(
         self,
         prompts: List[str],
-        model: str = "agnes-image-2.1-flash",
-        size: str = "1K",
-        ratio: str = "1:1",
+        model: str = "agnes-image-2.5-flash",
+        size: str = "2K",
+        ratio: str = "4:5",
         max_workers: int = 5,
     ) -> List[Dict[str, Any]]:
         """Generate multiple images in parallel."""
