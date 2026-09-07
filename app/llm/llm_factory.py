@@ -177,6 +177,7 @@ class RotatingKeyChatOpenAI:
                 self.current_index = i
                 try:
                     client = self._create_client()
+                    self.attempt_count = 0  # 成功后复位，防止上次耗尽导致后续调用全部直接失败
                     return client.invoke(messages, **kwargs)
                 except _RETRYABLE as e:
                     if self._is_non_retryable(e):
@@ -191,7 +192,13 @@ class RotatingKeyChatOpenAI:
                     raise
             # 一轮全部失败 → 退避重试
             self._reset_from_start()
-        raise last_exception or RateLimitError("所有 API Key 均已失败")
+        # openai>=2 的 RateLimitError 等 APIStatusError 子类构造必须携带 response/body，
+        # 不能手工 RateLimitError("...")——否则构造时即抛 TypeError。
+        # last_exception 为 None 说明 keys 为空或轮换次数已耗尽，抛语义明确的运行时错误。
+        if last_exception is not None:
+            raise last_exception
+        raise RuntimeError(
+            f"所有 {len(self.api_keys)} 个 API Key 均无具体异常可用（Key 未配置或 {self.max_rounds} 轮重试已耗尽）")
 
     def _stream_with_retry(self, stream_method_name: str, messages, **kwargs):
         """流式调用：启动失败时换 key 重试一次（不重试 token 中途，避免重复推）。
@@ -219,6 +226,7 @@ class RotatingKeyChatOpenAI:
                         key_short = self.api_keys[i][:10] + "..." + self.api_keys[i][-4:]
                         print(f"[API Key] Stream Key {i + 1}/{len(self.api_keys)} ({key_short}) 中途失败: {type(e).__name__}，不重试（避免 token 重复）")
                         raise
+                self.attempt_count = 0  # 流建立成功即复位轮换计数
                 return _wrapped()
             except _RETRYABLE as e:
                 if self._is_non_retryable(e):
@@ -227,7 +235,10 @@ class RotatingKeyChatOpenAI:
                 key_short = self.api_keys[i][:10] + "..." + self.api_keys[i][-4:]
                 print(f"[API Key] Stream Key {i + 1}/{len(self.api_keys)} ({key_short}) 启动失败: {type(e).__name__}: {str(e)[:120]}，换下一个")
                 continue
-        raise last_exception or RateLimitError("所有 API Key 均已失败（stream 启动）")
+        if last_exception is not None:
+            raise last_exception
+        raise RuntimeError(
+            f"所有 {len(self.api_keys)} 个 API Key 均无具体异常可用（stream 启动；Key 未配置或重试已耗尽）")
 
     def stream(self, messages, **kwargs):
         return self._stream_with_retry("stream", messages, **kwargs)

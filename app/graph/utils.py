@@ -210,22 +210,27 @@ def strip_degenerate_replies(messages):
 
 
 def apply_reply_guard(history, content):
-    """连续异常回复熔断（业界：错误不进上下文）。规则：
-      - 正常回答永不抑制；
-      - 首次异常文案照常落库（用户需要知道模型没答上来）；
-      - 上一条 assistant 已是异常文案 → 本条替换为一次性提示 STUCK_REPLY_HINT；
-      - 上一条已是该提示 → 返回 (None, True)：调用方跳过写入，历史停止膨胀。
-    返回 (final_content, skip)。skip=True 时不应把回复写入历史/记忆。"""
+    """连续异常/错误回复的可见性治理（业界：错误必须对用户可见，但不能无限刷屏）。
+    规则：
+      - 正常回复、以及"新的（与上一条不同）"错误/兜底文案 → 原样返回，让用户看到真实原因；
+      - 与上一条 assistant 逐字相同 且 命中兜底/错误标记（同一句反复出现）→ 替换为一次性
+        STUCK_REPLY_HINT（提示连续异常）；
+      - 上一条已是 STUCK_REPLY_HINT 且本条仍为异常文案 → 返回 (None, True)，跳过写入，历史停止膨胀。
+    返回 (final_content, skip)。skip=True 时调用方不应把回复写入历史/记忆。"""
     txt = str(content or "").strip()
-    if not is_degenerate_text(txt):
+    if not txt:
         return content, False
     prev = None
     for m in reversed(history):
         if _is_ai_message(m) and not getattr(m, "tool_calls", None):
             prev = _message_text(m).strip()
             break
-    if prev and (is_degenerate_text(prev) or prev == STUCK_REPLY_HINT):
-        return (None, True) if prev == STUCK_REPLY_HINT else (STUCK_REPLY_HINT, False)
+    if prev == STUCK_REPLY_HINT and is_degenerate_text(txt):
+        # 已提示过熔断：后续异常文案（兜底/报错）不再重复写入
+        return None, True
+    if prev and prev == txt and is_degenerate_text(txt):
+        # 与上一条完全相同的异常文案 → 用一次性提示替换，避免刷屏（错误信息本身不吞）
+        return STUCK_REPLY_HINT, False
     return content, False
 
 

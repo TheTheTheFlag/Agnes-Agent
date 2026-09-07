@@ -139,6 +139,20 @@ class ReplyGuardTest(unittest.TestCase):
         self.assertIsNone(content)
         self.assertTrue(skip)
 
+    def test_different_error_message_still_shown(self):
+        """与上一条不同的错误文案（如 LLM 调用失败: TypeError…）必须原样展示，不能吞。"""
+        err = "LLM 调用失败: TypeError: APIStatusError.__init__() missing 2 required keyword-only arguments: 'response' and 'body' | 当前消息约 3300 tokens"
+        content, skip = apply_reply_guard([H("q"), A(DEG)], err)
+        self.assertEqual(content, err)
+        self.assertFalse(skip)
+
+    def test_different_fallback_variant_still_shown(self):
+        """长/短两种兜底变体交替出现（内容不同）时也各自展示一次。"""
+        long_deg = "[模型未返回内容] 请检查模型配置或 API 额度（网关可能已耗尽配额或返回空响应）。"
+        content, skip = apply_reply_guard([H("q"), A(DEG)], long_deg)
+        self.assertEqual(content, long_deg)
+        self.assertFalse(skip)
+
     def test_marker_detection(self):
         self.assertTrue(is_degenerate_text("[模型未返回内容] " + DEG + "（网关可能已耗尽配额）。"))
         self.assertFalse(is_degenerate_text("一切正常"))
