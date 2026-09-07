@@ -312,13 +312,21 @@ def chatbot(state: State, config: RunnableConfig):
     if triggered_goal:
         content = f"🚀 正在为你规划并执行：{triggered_goal[:80]}"
 
-    # 摘要更新
+    # 摘要更新（节流：最近对话新增 ≥4 条或距上次 ≥120s 才调用一次 LLM 摘要）。
+    # 目的：update_summary 每次都会同步发起一次 LLM 调用，若每轮都跑，会形成
+    # "回复文本早已输出完、但 SSE 迟迟不结束，前端一直显示运行中/工具名"的空窗。
     if len(state["messages"]) > 0:
         try:
-            new_summary = mm.update_summary(thread_id, state.get("recent_summary", "无"), state["messages"][-5:], llm)
-            mm.save_summary(thread_id, new_summary)
-            state["recent_summary"] = new_summary
-        except Exception as e:
+            import time as _time
+            _now = _time.time()
+            _mlen = len(state["messages"])
+            _gate = globals().setdefault("_summary_gate", {"ts": 0.0, "msgs": 0})
+            if (_mlen - _gate["msgs"] >= 4) or (_now - _gate["ts"] >= 120):
+                new_summary = mm.update_summary(thread_id, state.get("recent_summary", "无"), state["messages"][-5:], llm)
+                mm.save_summary(thread_id, new_summary)
+                state["recent_summary"] = new_summary
+                _gate.update(ts=_now, msgs=_mlen)
+        except Exception:
             pass
 
     # 连续异常回复熔断：异常兜底文案首次照常落库、第二次替换为提示、其后跳过写入，

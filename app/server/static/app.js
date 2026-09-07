@@ -759,6 +759,11 @@ function handleChatEvent(evt) {
       State.streamBuffer = evt.text;
       endStreaming();
     }
+    // 内容已完整送达：立即复位"工具名 / 运行中"指示。
+    // （后端随后还会做记忆摘要/git 快照等收尾，done 事件会晚到，
+    //   若等 done 才复位，内容输出完后命令栏会继续挂着工具名一段时间。）
+    setLiveStatusIdle();
+    setLiveBadge(false);
   } else if (step === "done") {
     endStreaming();
     setLiveBadge(false);
