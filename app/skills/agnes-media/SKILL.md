@@ -115,6 +115,13 @@ python <skill_dir>/media.py video --prompt "在两张关键帧之间平滑转场
 
 > `output/` 与 `keys.json` 已在技能目录 `.gitignore` 忽略，不会入库。
 
+## 执行与收尾铁律（防"能出图却不收敛"）
+
+1. **成功即停**：`media.py` 的 stdout 出现 `FILE=`（本地文件）与 `URL=` 即为生成完成。此时**立即停止调用任何工具**，把文件/链接展示给用户并结束回复。不要为了"多生成几张/确认效果"再次执行相同或相似命令，也不要再去 `ls`、`read_file` 反复确认——系统会自动拦截重复成功命令。
+2. 若确需再多张不同图片：**修改参数**（prompt / size / seed / --extra）后发一条新命令，而不是原样重跑。
+3. **默认 `--size 1K`**：1K 生成较快（约几十秒内）。`2K`/`4K` 单张耗时更长，可能超过命令执行上限（约 60 秒）而超时——确需大图时，给 `execute_command` 显式传较长 `timeout`（如 180 秒）并耐心等待；若仍超时，改回 1K 或换更短 prompt。
+4. **Windows 环境命令**：本机 `execute_command` 走 Windows cmd——用 `dir` / `type` / `echo`，**不要用** `ls` / `cat` / `pwd` / `grep` / `rm` / `mv`（会报"不是内部或外部命令"）。需要看文件就用 `type`，列目录就用 `dir`（或 `python -c "import os;print(os.listdir('...'))"`）。
+
 ## 避坑清单（来自线上事故复盘）
 
 1. **绝不硬编码 API Key / 绝不手写生成脚本**：key 由 `media.py` 从 `keys.json` 读；prompt 与参数通过命令行传给 `media.py`。

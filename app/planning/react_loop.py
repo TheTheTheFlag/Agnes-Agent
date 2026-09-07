@@ -25,6 +25,8 @@ class ReActLoop:
         self._trace_thread_id = None
         # 纪律：连续被拒工具计数（ReActLoop 层强制终止）
         self._reject_count = 0
+        # 已成功执行的 (工具名|规范化参数)：用于拦截"同一条命令反复执行"的浪费/死循环
+        self._done_cmds = set()
 
     def run(self, messages, tools, on_tool_before=None, on_tool_after=None,
             interrupt_handler=None, state=None, on_before_llm=None, verbose=True):
@@ -97,9 +99,28 @@ class ReActLoop:
                     final_answer = self._extract_final_answer(response)
                     break
 
-            # 检测连续相同工具调用
-            current_calls = [(tc.get("name"), str(tc.get("args", {}))) for tc in tool_calls]
-            if current_calls == last_tool_calls:
+            current_calls = [(tc.get("name"), tc.get("args", {}) or {}) for tc in tool_calls]
+
+            # 已成功执行过的同参调用（如同一生成命令被反复发起）→ 不再执行，
+            # 提示模型基于已有结果直接收尾，避免"能出图却不收敛"的循环。
+            repeated_done = []
+            for _n, _a in current_calls:
+                _key = f"{_n}|{json.dumps(_a, sort_keys=True, ensure_ascii=False)}"
+                if _key in self._done_cmds:
+                    repeated_done.append(_n)
+            if repeated_done:
+                messages.append(SystemMessage(
+                    content="[防重复执行] 你正在重复执行一条已成功完成过的调用（结果已在上文给出）："
+                            + ", ".join(sorted(set(repeated_done)))
+                            + "。请直接使用已有结果给用户最终答复并结束本轮；"
+                              "若确有新需求（如再生成一张不同的），请修改参数（prompt/size/seed）后重新发起，不要原样重复执行。"
+                ))
+                print("⚠️ 检测到已成功命令被再次执行，拦截并引导收尾", flush=True)
+                continue
+
+            # 检测连续相同工具调用（原逻辑，args 保留字符串形式供比对）
+            current_calls_str = [(n, str(a)) for n, a in current_calls]
+            if current_calls_str == last_tool_calls:
                 same_call_count += 1
                 if same_call_count >= 3:
                     print("⚠️ 连续3次相同工具调用，终止循环并报告信息不足")
@@ -109,7 +130,7 @@ class ReActLoop:
                     # 第二次发起完全相同的工具调用（参数逐字一致）：多半是模型空转/没消化结果。
                     # 不再执行该轮重复调用（避免白跑一次 + 再塞一大坨重复结果进上下文），
                     # 改为注入"防死循环"引导，让模型要么换动作、要么直接收尾。
-                    dup = "; ".join(f"{n}({str(a)[:100]})" for n, a in current_calls)
+                    dup = "; ".join(f"{n}({str(a)[:100]})" for n, a in current_calls_str)
                     messages.append(SystemMessage(
                         content="[防死循环] 你刚发起了与上一轮完全相同的工具调用：" + dup +
                                 "。该调用并未推进任务。请立即采取行动：若所需信息已掌握，"
@@ -120,7 +141,7 @@ class ReActLoop:
                     continue
             else:
                 same_call_count = 0
-                last_tool_calls = current_calls
+                last_tool_calls = current_calls_str
 
             # OpenAI 兼容 API 要求：assistant 消息带 tool_calls 时，必须为每个 tool_call_id
             # 都有对应 ToolMessage。用一个标志保证 response 只 append 一次，
@@ -222,6 +243,13 @@ class ReActLoop:
                         messages.append(response)
                         response_appended = True
                     messages.append(ToolMessage(content=result_str, tool_call_id=tool_id))
+                    # 记录成功完成的命令 → 供"防重复执行"拦截使用（成功标志：returncode 0 / 生成 URL）
+                    try:
+                        if '"returncode": 0' in result_str or 'URL=' in result_str:
+                            self._done_cmds.add(
+                                f"{tool_name}|{json.dumps(params, sort_keys=True, ensure_ascii=False)}")
+                    except Exception:
+                        pass
 
             # 纪律强制终止：连续被拒 ≥3 次 → 退出整个 ReAct 循环（保留纪律消息，不再覆盖）
             if getattr(self, "_reject_count", 0) >= 3:
