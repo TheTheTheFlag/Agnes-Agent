@@ -85,8 +85,17 @@ class ReActLoop:
                                 "写入 deliverables 目录（一次写完整），或调用 complete_subtask 声明完成 / fail_subtask 声明失败。"
                     ))
                     continue
-                final_answer = self._extract_final_answer(response)
-                break
+                # 空回复（无 tool_calls 且无正文）多为瞬时网关抖动 → 快速重试一次；
+                # 仍空则交给 _extract_final_answer 记录并兜底（连续异常由 builder 层 apply_reply_guard 熔断）。
+                if not self._response_has_text(response):
+                    try:
+                        response = self._invoke_llm(current_messages)
+                        tool_calls = self._extract_tool_calls(response)
+                    except Exception:
+                        pass  # 重试失败：保留原空响应，走统一兜底
+                if not tool_calls:
+                    final_answer = self._extract_final_answer(response)
+                    break
 
             # 检测连续相同工具调用
             current_calls = [(tc.get("name"), str(tc.get("args", {}))) for tc in tool_calls]
@@ -263,6 +272,13 @@ class ReActLoop:
             for name, pname, pvalue in re.findall(short, content, re.DOTALL | re.IGNORECASE):
                 tool_calls.append({"name": name.strip(), "args": {pname.strip(): pvalue.strip()}, "id": f"manual_{int(time.time())}_{len(tool_calls)}"})
         return tool_calls
+
+    def _response_has_text(self, response):
+        """判断响应是否含正文（content 可能为 str / list(多模态) / None）。"""
+        raw = getattr(response, "content", "")
+        if isinstance(raw, list):
+            return any(str((x.get("text", "") if isinstance(x, dict) else x) or "").strip() for x in raw)
+        return bool(str(raw or "").strip())
 
     def _extract_final_answer(self, response):
         # content 可能是 str / list（多模态）/ None，统一转成 str 再处理，避免 TypeError / 空回退

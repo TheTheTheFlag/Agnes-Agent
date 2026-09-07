@@ -299,13 +299,20 @@ def compress_messages(messages: List, llm_instance, max_tokens: int, thread_id: 
 
 
 def ensure_token_limit(messages: List, system_text: str, thread_id: str = None) -> List:
+    """把待发消息收敛到 TOKEN_LIMIT 预算内。
+
+    旧实现超预算时调用 compress_messages 需要模块级 llm 实例——utils 里并未定义，
+    一旦超长会话触发该分支就会 NameError（表现为 "LLM 调用失败: name 'llm' is not defined"）。
+    现改为：预算不足时先结构清洗、再按完整回合从最早历史裁剪（摘要压缩不再参与每轮
+    同步路径；如需摘要由 MemoryManager.update_summary 单独负责）。
+    """
     system_msg = SystemMessage(content=system_text)
     system_tokens = count_tokens([system_msg])
-    max_other_tokens = TOKEN_LIMIT - system_tokens
+    max_other_tokens = max(TOKEN_LIMIT - system_tokens, 1)
     other_messages = [msg for msg in messages if not (isinstance(msg, SystemMessage) and msg.content == system_text)]
     if count_tokens(other_messages) <= max_other_tokens:
-        return messages
-    return [system_msg] + compress_messages(other_messages, llm, max_other_tokens, thread_id)
+        return sanitize_messages(messages)
+    return sanitize_messages([system_msg] + trim_history_by_turns(other_messages, max_other_tokens, keep_recent=KEEP_RECENT))
 
 
 def sync_state_to_db(state: State, mm: MemoryManager):

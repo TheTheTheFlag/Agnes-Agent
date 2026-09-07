@@ -32,7 +32,6 @@ class AgnesVideoGenerator:
         self,
         prompt: str,
         model: str = "agnes-video-v2.0",
-        ratio: str = "16:9",
         duration: str = "5",
         image: Optional[str] = None,
         mode: Optional[str] = None,
@@ -43,22 +42,22 @@ class AgnesVideoGenerator:
         width: Optional[int] = None,
         num_frames: Optional[int] = None,
         frame_rate: Optional[int] = None,
-        # 2.5-flash 参数
-        size: Optional[str] = None,
-        seconds: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Create a video generation task.
 
         Args:
             prompt: Video description prompt
-            model: Model name (agnes-video-2.5-flash or agnes-video-v2.0)
-            ratio: Aspect ratio (21:9, 16:9, 4:3, 1:1, 3:4, 9:16) - for 2.5-flash
-            duration: Duration in seconds ("4" to "12") - for 2.5-flash
+            model: Model name (only agnes-video-v2.0 supported)
+            duration: Duration in seconds
             image: Single image URL for image-to-video
             mode: Generation mode ("ti2vid" or "keyframes")
             seed: Random seed for reproducibility
             num_inference_steps: Number of inference steps
+            height: Video height (default 768)
+            width: Video width (default 1152)
+            num_frames: Number of frames (default 121)
+            frame_rate: Frame rate (default 24)
 
         Returns:
             Dictionary containing video_id and initial status
@@ -69,24 +68,15 @@ class AgnesVideoGenerator:
             "Content-Type": "application/json",
         }
 
-        # agnes-video-2.5-flash 参数
-        if model == "agnes-video-2.5-flash":
-            payload: Dict[str, Any] = {
-                "model": model,
-                "prompt": prompt,
-                "size": size or "720P",
-                "seconds": seconds or int(duration),
-            }
-        else:
-            # agnes-video-v2.0 旧参数（兼容）
-            payload = {
-                "model": model,
-                "prompt": prompt,
-                "height": height or 768,
-                "width": width or 1152,
-                "num_frames": num_frames or 121,
-                "frame_rate": frame_rate or 24,
-            }
+        # agnes-video-v2.0 参数
+        payload = {
+            "model": model,
+            "prompt": prompt,
+            "height": height or 768,
+            "width": width or 1152,
+            "num_frames": num_frames or 121,
+            "frame_rate": frame_rate or 24,
+        }
 
         # Add single image for image-to-video
         if image:
@@ -181,7 +171,8 @@ if __name__ == "__main__":
     generator = AgnesVideoGenerator()
     result = generator.generate(
         prompt="A cat walking on the beach at sunset, soft ocean waves, warm golden lighting, realistic motion",
-        ratio="16:9",
-        duration="5",
+        height=768,
+        width=1152,
+        num_frames=121,
     )
     print(f"Video URL: {result['url']}")

@@ -34,7 +34,7 @@ config:
 | 类型 | 默认模型 | 说明 |
 |------|----------|------|
 | 图片 | `agnes-image-2.5-flash` | 用户说「2.0」时用 `agnes-image-2.0-flash` |
-| 视频 | `agnes-video-v2.0` | 视频生成唯一模型，需指定 height/width/num_frames |
+| 视频 | `agnes-video-v2.0` | 视频生成唯一支持的模型 |
 
 ## 判断类型
 
@@ -290,25 +290,6 @@ with ThreadPoolExecutor(max_workers=5) as executor:
 ## 视频模型
 
 当前唯一支持的模型是 `agnes-video-v2.0`，需要手动指定分辨率和帧数。
-
-### agnes-video-v2.0 参数
-
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| model | string | ✅ | `agnes-video-v2.5-flash`（推荐）或 `agnes-video-v2.0`（旧版） |
-| prompt | string | ✅ | 视频内容描述 |
-| size | string | ✅ | 固定 `"720P"`（2.5-flash 专用） |
-| seconds | integer | ✅ | 时长（秒），2.5-flash 专用 |
-| ratio | string | ❌ | 宽高比：`21:9`, `16:9`, `4:3`, `1:1`, `3:4`, `9:16`（2.5-flash 专用） |
-| duration | string | ❌ | 时长字符串，兼容旧格式 |
-| image | string/array | ❌ | 图片 URL，单图或数组（最多 5 张） |
-| mode | string | ❌ | 生成模式：`"ti2vid"`（图生视频）、`"keyframes"`（关键帧） |
-| seed | integer | ❌ | 随机种子 |
-| num_inference_steps | integer | ❌ | 推理步数 |
-
-**固定规格**：
-- 分辨率：720p（固定）
-- 各比例对应像素：`16:9`=1280×720, `9:16`=720×1280, `1:1`=720×720, `21:9`=1680×720, `4:3`=960×720, `3:4`=720×960
 
 ### agnes-video-v2.0 参数（旧版）
 
