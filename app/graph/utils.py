@@ -93,21 +93,21 @@ def is_degenerate_text(text: str) -> bool:
 
 
 def split_turn_blocks(messages):
-    """把消息流切成以 user/assistant 开头、含其后连续 tool 消息的回合块。
-
-    跨轮组装/截断只允许整块保留或丢弃，绝不从中切断，保证
-    assistant(tool_calls) 与其 ToolMessage 的配对不被拆散。
-    游离的 tool 消息独立成块，交由 sanitize_messages 丢弃。
-    """
+    """把消息流按"用户回合"分块：每条 user 消息与其后（直到下一条 user 前）的
+    assistant / tool / system 消息同属一个回合块。上下文裁剪只允许整块保留或丢弃，
+    保证 assistant(tool_calls) 与其 ToolMessage 的配对不被拆散。
+    游离在回合外的孤儿消息（如孤立 tool / system）独立成块，由 sanitize_messages 处理。"""
     blocks = []
     cur = []
     for m in messages:
-        if _is_tool_message(m):
+        if type(m).__name__ == "HumanMessage":
+            if cur:
+                blocks.append(cur)
+            cur = [m]
+        elif cur:
             cur.append(m)
-            continue
-        if cur:
-            blocks.append(cur)
-        cur = [m]
+        else:
+            blocks.append([m])
     if cur:
         blocks.append(cur)
     return blocks
@@ -116,23 +116,36 @@ def split_turn_blocks(messages):
 def sanitize_messages(messages):
     """（幂等）发送给 LLM 前的结构清洗：
       1. 丢弃孤儿 ToolMessage（前方无对应 assistant tool_calls）；
-      2. 丢弃"带 tool_calls 却无 ToolMessage 收尾"的半截回合（截断/压缩产物）；
-      3. 序列不以 tool 消息结尾（OpenAI 兼容 API 禁止）。
+      2. 丢弃"带 tool_calls 却无 ToolMessage 收尾"的半截 assistant 残块（截断/压缩产物）；
+      3. 序列不以 tool 消息 / 半截 tool_calls assistant 结尾（OpenAI 兼容 API 禁止）。
     结构正常的历史消息原样保留。"""
     out = []
-    for blk in split_turn_blocks(messages):
-        head = blk[0]
-        if _is_tool_message(head):
-            continue  # 孤儿 tool 消息块 → 丢弃
-        if _is_ai_message(head) and getattr(head, "tool_calls", None):
-            tools = [m for m in blk[1:] if _is_tool_message(m)]
-            if not tools and not _message_text(head).strip():
-                continue  # 半截 tool 回合（无 ToolMessage 也无正文）→ 整块丢弃
-            out.append(head)
-            out.extend(tools)
+    pending = set()  # 期待被 ToolMessage 回填的 assistant tool_call id
+    for m in messages:
+        if _is_tool_message(m):
+            tid = getattr(m, "tool_call_id", None)
+            if tid is not None and str(tid) in pending:
+                out.append(m)
+                pending.discard(str(tid))
+            # 无主/重复 tool 消息 → 丢弃
             continue
-        out.extend(blk)
-    # 结尾收尾：不得以 tool 消息 / 半截 tool_calls assistant 结束
+        if pending:
+            # 上一个 assistant(tool_calls) 没等到 ToolMessage 就出现新消息 → 回删其残块
+            while out and _is_ai_message(out[-1]) and getattr(out[-1], "tool_calls", None) \
+                    and not _message_text(out[-1]).strip():
+                out.pop()
+            pending = set()
+        out.append(m)
+        if _is_ai_message(m):
+            tcs = getattr(m, "tool_calls", None) or []
+            pending = set()
+            for tc in tcs:
+                i = tc.get("id") or tc.get("tool_call_id") if isinstance(tc, dict) else getattr(tc, "id", None)
+                if i is not None:
+                    pending.add(str(i))
+        else:
+            pending = set()
+    # 结尾收尾：不得以 tool 消息、或"挂了未回填 tool_calls 且无正文"的 assistant 残块结束
     while out and (_is_tool_message(out[-1])
                    or (_is_ai_message(out[-1]) and getattr(out[-1], "tool_calls", None)
                        and not _message_text(out[-1]).strip())):
@@ -153,33 +166,43 @@ def trim_history_by_turns(messages, max_tokens, keep_recent=KEEP_RECENT):
     return sanitize_messages([m for b in blocks for m in b])
 
 
-def strip_degenerate_tail(messages):
-    """清理历史尾部的"退化尾巴"（异常兜底文案反复刷屏的那一段）：
-    从结尾往前弹出退化/重复的 assistant 文本与残留 tool 残块，
-    让已卡死的会话在下一轮请求时拿到干净上下文、实现自愈。
-    判定保守：仅当文本命中兜底标记、或同一文本在全历史重复出现 >=3 次才移除，
-    避免误删正常回答。"""
+def strip_degenerate_replies(messages):
+    """清理历史中"模型异常"类回复（业界：错误/兜底文案不是有效对话内容，不进上下文）。
+
+    两段式清理：
+      1. 全局移除命中断言标记的退化 assistant 文本（空回复兜底 / LLM 调用失败等）——
+         这类文案不属于对话内容，留在历史里只会继续污染上下文；
+      2. 保守清理：仅当同一正常文本在全历史重复 >=3 次（刷屏特征）时，从尾部移除重复，
+         避免误删恰好重复的正常回答。
+    只删纯文本 assistant 消息，不动 user / tool 消息与 assistant tool_calls，
+    不会破坏消息配对与顺序。"""
     if not messages:
         return messages
-    counts = {}
+    # 1) 全局移除退化兜底/错误文案
+    filtered = []
     for m in messages:
+        if _is_ai_message(m) and not getattr(m, "tool_calls", None):
+            t = _message_text(m).strip()
+            if t and is_degenerate_text(t):
+                continue
+        filtered.append(m)
+    # 2) 保守：正常文本重复 >=3 时清理尾部（防"无意义重复回答"刷屏）
+    counts = {}
+    for m in filtered:
         if _is_ai_message(m) and not getattr(m, "tool_calls", None):
             t = _message_text(m).strip()
             if t:
                 counts[t] = counts.get(t, 0) + 1
-    out = list(messages)
+    out = list(filtered)
     while out:
         m = out[-1]
         if _is_tool_message(m):
             out.pop()
             continue
-        if _is_ai_message(m):
-            if getattr(m, "tool_calls", None):
-                break  # 工具调用回合 = 正常历史边界
+        if _is_ai_message(m) and not getattr(m, "tool_calls", None):
             t = _message_text(m).strip()
-            if is_degenerate_text(t) or (t and counts.get(t, 0) >= 3):
-                if t:
-                    counts[t] = max(counts.get(t, 0) - 1, 0)
+            if t and counts.get(t, 0) >= 3:
+                counts[t] = max(counts.get(t, 0) - 1, 0)
                 out.pop()
                 continue
         break
@@ -201,15 +224,15 @@ def apply_reply_guard(history, content):
         if _is_ai_message(m) and not getattr(m, "tool_calls", None):
             prev = _message_text(m).strip()
             break
-    if prev and is_degenerate_text(prev):
+    if prev and (is_degenerate_text(prev) or prev == STUCK_REPLY_HINT):
         return (None, True) if prev == STUCK_REPLY_HINT else (STUCK_REPLY_HINT, False)
     return content, False
 
 
 def prepare_context_messages(messages, system_text, keep_recent=KEEP_RECENT):
     """组装发给 LLM 的上下文（业界组合拳）：
-    尾部退化清理 → 结构清洗 → 按完整回合裁剪到 token 预算 → 前置 system。"""
-    cleaned = sanitize_messages(strip_degenerate_tail(messages))
+    退化文案清理 → 结构清洗 → 按完整回合裁剪到 token 预算 → 前置 system。"""
+    cleaned = sanitize_messages(strip_degenerate_replies(messages))
     system_tokens = count_tokens([SystemMessage(content=system_text)])
     max_other = max(TOKEN_LIMIT - system_tokens, 1)
     history = trim_history_by_turns(cleaned, max_other, keep_recent=keep_recent)
