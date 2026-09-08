@@ -409,6 +409,22 @@ _MEMORY_TABLES = {
         "pk": "id",
         "columns": ["id", "source", "query", "content", "hit_count", "last_accessed_at", "created_at", "expires_at"],
     },
+    # ----- 新规划器 (DAG) 表：与 task_plans / subtasks 共存于过渡期 -----
+    "dag_plans": {
+        "label": "DAG 计划 (新规划器)",
+        "pk": "id",
+        "columns": ["id", "thread_id", "goal", "replan_count", "status", "checkpoint", "created_at", "updated_at"],
+    },
+    "dag_nodes": {
+        "label": "DAG 节点",
+        "pk": "id",
+        "columns": ["id", "plan_id", "node_id", "description", "tool", "params", "status", "result", "artifacts", "updated_at"],
+    },
+    "dag_edges": {
+        "label": "DAG 边",
+        "pk": "id",
+        "columns": ["id", "plan_id", "from_id", "to_id", "soft"],
+    },
 }
 
 import re as _re
