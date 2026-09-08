@@ -427,6 +427,11 @@ _MEMORY_TABLES = {
     },
 }
 
+# MemoryDB 浏览器里要隐藏的表（仍在 DB 中存在、仍可被其他模块使用，
+# 只是不让面板看到/操作）。当前为旧规划器时代的表：已经被新 DAG 替代，
+# 不再被写入，仅保留为历史数据。如需恢复展示，从这里移除即可。
+_MDB_HIDDEN = {"task_plans", "subtasks", "task_summaries"}
+
 import re as _re
 _SAFE_IDENT = _re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -435,6 +440,9 @@ def _mdb_check_table(name: str):
     if not name or not _SAFE_IDENT.match(name) or name not in _MEMORY_TABLES:
         from fastapi import HTTPException
         raise HTTPException(status_code=400, detail=f"表名不合法或不在白名单: {name}")
+    if name in _MDB_HIDDEN:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=403, detail=f"表 {name} 已在面板中隐藏")
 
 
 def _mdb_check_col(table: str, col: str):
@@ -450,6 +458,7 @@ async def mdb_tables():
         "tables": [
             {"name": t, "label": meta["label"], "pk": meta["pk"], "columns": meta["columns"]}
             for t, meta in _MEMORY_TABLES.items()
+            if t not in _MDB_HIDDEN
         ]
     }
 
@@ -458,10 +467,8 @@ async def mdb_tables():
 async def mdb_schema(table: str):
     """返回表的真实结构（PRAGMA table_info）：字段名/类型/是否必填/默认值。"""
     import sqlite3 as _sqlite
-    try:
-        _mdb_check_table(table)
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=400)
+    from fastapi import HTTPException
+    _mdb_check_table(table)  # HTTPException(403 hidden / 400 not-in-whitelist) 透传
     with _sqlite.connect(DB_PATH) as conn:
         conn.row_factory = _sqlite.Row
         cols = [dict(r) for r in conn.execute(f"PRAGMA table_info({table})")]
