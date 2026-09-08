@@ -25,10 +25,9 @@ from app.graph.utils import (count_tokens, retry_llm_call, parse_tool_calls_from
 from app.tools import tools, request_planning
 from app.llm import create_llm
 from app.memory import MemoryManager
-from app.planning.planner import create_planner_node
-from app.planning.executor import create_executor_node
+from app.planning.dag_planner import create_dag_planner_node
+from app.planning.dag_executor import create_executor
 from app.planning.summarizer import create_summarizer_node
-from app.planning.validator import create_validator_node
 from app.planning.react_loop import ReActLoop
 from app.server import update_state, update_prompt, add_log_entry, add_event
 
@@ -380,24 +379,25 @@ def route_after_chatbot(state: State) -> str:
     """
     chatbot 退出后判断下一步：
       - 如果有 pending_plan → 进入 planner
-      - 如果 DB 里有未完成的任务计划 → 进入 executor 继续执行
+      - 如果 DAG 存储里有未完成的任务计划 → 进入 executor 继续执行
       - 否则 END
     """
     if state.get("pending_plan"):
         return "planner"
-    # DB 唯一真相源：按 thread 查进行中计划，看是否有未完成子任务
+    # DAG 唯一真相源：按 thread 查进行中计划，看是否有未完成节点
     try:
-        from app.memory import MemoryManager
+        from app.planning.dag_storage import DAGStorage
         from app.config import DB_PATH
         thread_id = state.get("thread_id") or "default"
-        mm = MemoryManager(db_path=DB_PATH, thread_id=thread_id)
-        plan = mm.get_task_plan_by_thread(thread_id)
-        if plan:
-            progress = mm.get_plan_progress(plan["id"])
-            if progress['pending'] > 0 or progress['running'] > 0:
+        dag = DAGStorage(DB_PATH)
+        plan = dag.get_plan_by_thread(thread_id)
+        if plan and plan["status"] in ("planning", "executing"):
+            nodes = dag.get_nodes(plan["id"])
+            if any(n["status"] not in ("success", "skipped", "failed") for n in nodes) or \
+               any(n["status"] == "failed" for n in nodes):
                 return "executor"
     except Exception as e:
-        print(f"[Router chatbot] 读 DB 失败: {e}")
+        print(f"[Router chatbot] 读 DAG DB 失败: {e}")
     return END
 
 
@@ -406,69 +406,35 @@ def route_after_chatbot(state: State) -> str:
 # ============================================================
 
 def route_after_executor(state: State):
-    """Executor 退出后：所有决策走 DB（state 只传 thread_id/task_plan_id 标识）。
-
-    决策树（每条都有明确原因写入日志，便于排错）：
-      1) 有 pending 子任务 + 无 failed → 继续 executor（线性推进）
-      2) 有 failed → 重规划（限 2 次），让 planner 重新拆子任务
-      3) 无 pending 也无 failed → 进验证
-      4) 重规划已达上限 → 带失败进验证收敛
-    """
+    """DAG executor 退出后：所有决策走 dag_storage（唯一真相源）。
+      1) 还有未完成节点（pending/ready/running）→ 继续 executor
+      2) 全部终态（success/failed/skipped）→ 进 summarizer 汇总结论
+      局部重规划由 executor 内部先做；这里只在 DAG 彻底完成/收敛时结束。"""
     thread_id = state.get("thread_id") or "default"
-    # DB 唯一真相源：按 thread 查当前进行中计划
     try:
-        from app.memory import MemoryManager
+        from app.planning.dag_storage import DAGStorage
         from app.config import DB_PATH
-        mm = MemoryManager(db_path=DB_PATH, thread_id=thread_id)
-        plan = mm.get_task_plan_by_thread(thread_id)
+        dag = DAGStorage(DB_PATH)
+        plan = dag.get_plan_by_thread(thread_id)
         if not plan:
-            add_log_entry("info", "路由→END: 无进行中任务计划")
-            return END
-        progress = mm.get_plan_progress(plan["id"])
-        # 重规划计数从 state 读（次数必须 state 缓存——同一 thread 跨轮递增）
-        replans = state.get("_total_replans", 0)
+            add_log_entry("info", "DAG 路由→END: 无进行中计划")
+            return "summarizer"
+        nodes = dag.get_nodes(plan["id"])
     except Exception as e:
-        print(f"[Router] 读 DB 失败: {e}")
-        return END
-
-    pending = progress['pending']
-    running = progress['running']
-    failed = progress['failed']
-    # 1) 有失败 → 重规划（无论 pending/running 状态）
-    if failed > 0:
-        if replans >= 2:
-            add_log_entry("warning", f"路由→validator: 重规划已达上限（{replans}），带 {failed} 个失败进验证")
-            return "validator"
-        add_log_entry("info", f"路由→planner: 有 {failed} 个失败子任务，重规划（第 {replans + 1} 次）")
-        return "planner"
-    # 2) 有 pending（+ running 视为可恢复）→ 继续 executor
-    if pending > 0 or running > 0:
-        add_log_entry("info", f"路由→executor: pending={pending} running={running} 继续执行")
-        return "executor"
-    # 3) 全部成功 → 验证
-    add_log_entry("info", "路由→validator: 全部成功，进验证")
-    return "validator"
-
-
-def route_after_validator(state: State):
-    """验证反馈闭环：
-      1) 通过 → summarizer
-      2) 失败且修复次数 ≤2 → executor（把失败原因回喂，让 LLM 修复产出文件）
-      3) 修复耗尽 → 重规划（≤1 次）
-      4) 重规划也耗尽 → 带当前产出进 summarizer 收敛
-    """
-    if state.get("_validation_passed", False):
+        print(f"[Router DAG] 读 DB 失败: {e}")
         return "summarizer"
-    fix_attempts = state.get("_fix_attempts", 0)
-    if fix_attempts <= 2:
-        add_log_entry("info", f"路由→executor: 验证失败，反馈修复（第 {fix_attempts} 次）")
+
+    unfinished = [n for n in nodes if n["status"] in ("pending", "ready", "running")]
+    if unfinished:
+        add_log_entry("info", f"DAG 路由→executor: 还有 {len(unfinished)} 节点未完成")
         return "executor"
-    replans = state.get("_total_replans", 0)
-    if replans < 1:
-        add_log_entry("info", "路由→planner: 修复耗尽，重规划")
-        return "planner"
-    add_log_entry("warning", "路由→summarizer: 修复+重规划均耗尽，收敛")
+    # 全部终态 → 汇总结论（含失败节点也在 summarizer 兜底说明）
+    add_log_entry("info", "DAG 路由→summarizer: 全部节点终态")
     return "summarizer"
+
+
+def route_after_chatbot_fallback(state: State):
+    return "chatbot"
 
 
 def route_after_summarizer(state: State):
@@ -484,7 +450,7 @@ def build_graph():
     builder = StateGraph(State)
 
     # planner_node 需要做特殊包装：从 state["pending_plan"] 读 goal
-    planner_inner = create_planner_node(llm)
+    planner_inner = create_dag_planner_node(llm)
 
     def planner_node(state: State):
         # 把 pending_plan 包装为最后一条 human message 供 planner 使用，
@@ -497,8 +463,7 @@ def build_graph():
 
     builder.add_node("chatbot", chatbot)
     builder.add_node("planner", planner_node)
-    builder.add_node("executor", create_executor_node(llm, tools))
-    builder.add_node("validator", create_validator_node())
+    builder.add_node("executor", create_executor([llm], tools))
     builder.add_node("summarizer", create_summarizer_node(llm))
 
     builder.add_edge(START, "chatbot")
@@ -510,13 +475,9 @@ def build_graph():
     })
     # planner 之后总是进入 executor
     builder.add_edge("planner", "executor")
-    # executor 退出后根据子任务状态决定
+    # executor 退出后根据 DAG 状态决定：还有未完成 → 继续；全终态 → summarizer
     builder.add_conditional_edges("executor", route_after_executor, {
-        "executor": "executor", "planner": "planner", "validator": "validator"
-    })
-    # validator 决定通过 or 重规划
-    builder.add_conditional_edges("validator", route_after_validator, {
-        "summarizer": "summarizer", "planner": "planner"
+        "executor": "executor", "summarizer": "summarizer",
     })
     # summarizer 完成后回到 chatbot 让用户继续
     # summarizer 完成后直接结束（summary 已是最终答复）。

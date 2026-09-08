@@ -129,6 +129,23 @@ async def chat_endpoint(payload: dict):
                             # on_tool_after 里 add_log_entry 先于 add_event 调用，带 result_preview
                             d = entry.get("data") or {}
                             _pending_preview["text"] = str(d.get("result_preview", ""))[:300]
+                        elif etype in ("planner", "executor") and entry.get("thread_id") == thread_id:
+                            # DAG 前端事件：planner 事件携带完整图结构（nodes+edges），
+                            # executor 事件携带单个节点状态/全量快照。原样透传给前端渲染。
+                            _event_data = entry.get("data") or {}
+                            if etype == "planner" and _event_data.get("dag"):
+                                sync_q.put({"step": "dag_push", "dag": _event_data.get("dag"),
+                                            "goal": _event_data.get("goal", "")})
+                            elif etype == "executor" and _event_data.get("nodes"):
+                                sync_q.put({"step": "node_status",
+                                            "node_id": _event_data.get("subtask", ""),
+                                            "status": _event_data.get("status", ""),
+                                            "goal": _event_data.get("goal", ""),
+                                            "nodes": _event_data.get("nodes", [])})
+                            elif etype == "executor" and _event_data.get("subtask", "").startswith("replan"):
+                                sync_q.put({"step": "replan", "goal": _event_data.get("goal", "")})
+                        elif etype in ("node_thought",) and entry.get("thread_id") == thread_id:
+                            sync_q.put({"step": "node_thought", "data": entry.get("data") or {}})
 
                 try:
                     for mode, payload in _srv_cfg._GRAPH.stream(

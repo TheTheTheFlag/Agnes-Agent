@@ -713,6 +713,128 @@ function endStreaming(finalText) {
   scrollToBottom();
 }
 
+/* ==================== 规划执行 DAG 面板（vis-network） ==================== */
+// 实时渲染规划执行 DAG：后端 dag_push 初始化结构，node_status 更新节点状态颜色。
+// 节点状态 → 颜色映射；软依赖边用虚线表示。
+const DAG_STATUS_COLOR = {
+  pending: "#9aa0a6",
+  ready:   "#4fc3f7",
+  running: "#ffb300",
+  success: "#34c77b",
+  failed:  "#f2555a",
+  skipped: "#90a4ae",
+};
+let _dagNetwork = null;      // vis.Network 实例
+let _dagNodes = {};          // id -> node
+let _dagEdges = [];          // [{from,to}]
+let _dagPanelShown = false;
+
+function _ensureDagNetwork() {
+  const canvas = $("#dagCanvas");
+  if (!canvas) return null;
+  if (_dagNetwork) {
+    // 确保尺寸正确（面板可能刚显示）
+    _dagNetwork.setSize(canvas.clientWidth, canvas.clientHeight);
+    return _dagNetwork;
+  }
+  if (typeof vis === "undefined" || !vis.Network) return null;
+  _dagNetwork = new vis.Network(canvas, { nodes: [], edges: [] }, {
+    layout: { hierarchical: { direction: "UD", sortMethod: "directed" } },
+    physics: false,
+    nodes: { shape: "box", font: { size: 12, color: "#e8e9ec" }, margin: 8,
+             borderWidth: 1, color: { background: "#20232b", border: "#4b5160" } },
+    edges: { arrows: { to: { enabled: true, scaleFactor: 0.6 } },
+             color: { color: "#5b6270", highlight: "#7c5cff", inherit: false },
+             smooth: { enabled: true, type: "dynamic" } },
+  });
+  return _dagNetwork;
+}
+
+function _showDagPanel() {
+  const panel = $("#dagPanel");
+  if (!panel) return;
+  panel.classList.remove("hidden");
+  _dagPanelShown = true;
+  const nw = _ensureDagNetwork();
+  if (nw) setTimeout(() => nw.setSize(panel.clientWidth, (panel.clientHeight || 220)), 0);
+}
+
+function renderDagStructure(dag, goal) {
+  const panel = $("#dagPanel");
+  if (!panel) return;
+  const nodesArr = (dag.nodes || []).map((n) => ({ id: n.id, label: n.description || n.id }));
+  const edges = (dag.edges || []).map((e) => ({
+    from: e.from, to: e.to,
+    dashes: !!e.soft,  // 软依赖 → 虚线
+  }));
+  _dagNodes = {};
+  nodesArr.forEach((n) => { _dagNodes[n.id] = n; });
+  _dagEdges = edges;
+  $("#dagGoal").textContent = goal || "";
+  _showDagPanel();
+
+  const nw = _ensureDagNetwork();
+  if (!nw) return;
+  // 用各节点初始状态着色（后端 dag_push 里可能已带 status）
+  const statusMap = {};
+  (dag.nodes || []).forEach((n) => { statusMap[n.id] = n.status || "pending"; });
+  const colored = nodesArr.map((n) => {
+    const st = statusMap[n.id] || "pending";
+    return Object.assign({}, n, {
+      color: { background: DAG_STATUS_COLOR[st] || DAG_STATUS_COLOR.pending, border: "#1b1e24" },
+    });
+  });
+  nw.setData({ nodes: new vis.DataSet(colored), edges: new vis.DataSet(edges) });
+  nw.redraw();
+}
+
+function updateDagNodeStatus(nodeId, status, fullNodes) {
+  const nw = _dagNetwork;
+  const statusMap = {};
+  // 全量快照优先（executor 事件带 nodes 数组）
+  if (fullNodes && Array.isArray(fullNodes)) {
+    fullNodes.forEach((n) => { statusMap[n.id] = n.status || "pending"; });
+  } else if (nodeId) {
+    statusMap[nodeId] = status || "pending";
+  }
+  // 更新已渲染节点颜色
+  if (nw) {
+    const ds = nw.getNodesDataset ? nw.getNodesDataset() : null;
+    if (ds) {
+      const updates = [];
+      Object.keys(statusMap).forEach((id) => {
+        if (ds.get(id)) {
+          updates.push({
+            id: id,
+            color: { background: DAG_STATUS_COLOR[statusMap[id]] || DAG_STATUS_COLOR.pending, border: "#1b1e24" },
+          });
+        }
+      });
+      if (updates.length) ds.update(updates);
+    }
+  }
+}
+
+function flashDagReplan(goal) {
+  const panel = $("#dagPanel");
+  if (panel) {
+    panel.classList.add("replan-flash");
+    setTimeout(() => panel.classList.remove("replan-flash"), 600);
+  }
+  if (goal) $("#dagGoal").textContent = goal + "（局部重规划）";
+}
+
+// 收起按钮
+document.addEventListener("DOMContentLoaded", () => {
+  const closeBtn = $("#dagClose");
+  if (closeBtn) {
+    closeBtn.addEventListener("click", () => {
+      $("#dagPanel").classList.add("hidden");
+      _dagPanelShown = false;
+    });
+  }
+});
+
 /* ==================== 对话流（SSE /api/chat） ==================== */
 function handleChatEvent(evt) {
   const step = evt.step;
@@ -775,6 +897,15 @@ function handleChatEvent(evt) {
     setLiveStatusIdle();
     addErrorBubble(evt.message || "未知错误");
     State.currentAssistantEl = null;
+  } else if (step === "dag_push") {
+    // 规划开始时：用结构初始化（或重建）DAG 图
+    renderDagStructure(evt.dag || {}, evt.goal || "");
+  } else if (step === "node_status") {
+    // 执行中：更新单个/全量节点状态与颜色
+    updateDagNodeStatus(evt.node_id || "", evt.status || "", evt.nodes || null);
+  } else if (step === "replan") {
+    // 局部重规划提醒（节点动画闪烁提示即可）
+    flashDagReplan(evt.goal || "");
   } else if (step === "heartbeat" || step === "__close__") {
     // 忽略
   }
