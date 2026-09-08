@@ -273,7 +273,7 @@ class ReActLoop:
         # trace：记录本次 LLM 调用的输入输出（thread_id 从调用方 state 传入，这里用 on_before 的兜底）
         thread_id = getattr(self, "_trace_thread_id", None) or "default"
         _t0 = time.time()
-        @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=10),
+        @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=15, min=15, max=60),
                retry=retry_if_exception(lambda e: not isinstance(e, (RateLimitError, GraphInterrupt))))
         def _wrapper():
             return self.llm_with_tools.invoke(messages)

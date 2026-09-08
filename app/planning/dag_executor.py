@@ -90,8 +90,13 @@ def _run_node(thread_id: str, task_plan_id: int, node: Dict, goal: str,
     _written: List[str] = []
     _usage = {"explore": 0, "write": 0}
 
-    @tool
-    def complete_node(description: str, files: List[str]) -> str:
+    # 不要用 @tool 装饰器：langchain 1.6 对嵌套闭包函数上的 @tool 装饰有兼容问题
+    # （会抛 "Function must have a docstring" 或 "first argument must be string or callable"）。
+    # 改用 StructuredTool.from_function 显式包装，绕开装饰器问题。
+    from langchain_core.tools import StructuredTool
+
+    def complete_node_plain(description: str, files: List[str]) -> str:
+        """声明子任务完成。files 列出本节点产出的实际文件路径（写入 deliverables/）。"""
         existed, missing = [], []
         for f in files or []:
             p = str(f).replace("\\", "/")
@@ -104,11 +109,25 @@ def _run_node(thread_id: str, task_plan_id: int, node: Dict, goal: str,
         _outcome["files"] = list(dict.fromkeys(existed + _written))
         return f"已声明完成，文件校验通过: {existed or '无'}; 缺失: {missing or '无'}"
 
-    @tool
-    def fail_node(reason: str) -> str:
+    def fail_node_plain(reason: str) -> str:
+        """声明子任务失败。"""
         _outcome["status"] = "failed"
         _outcome["reason"] = reason or ""
         return f"已声明失败: {reason}"
+
+    complete_node_tool = StructuredTool.from_function(
+        func=complete_node_plain,
+        name="complete_node",
+        description="声明子任务完成并列出产出文件路径（写入 deliverables/）。框架会校验文件存在后把节点置 success。",
+    )
+    fail_node_tool = StructuredTool.from_function(
+        func=fail_node_plain,
+        name="fail_node",
+        description="声明子任务失败并给出原因（API 错误 / 工具受限 / 资料缺失等），框架会跳过强依赖该节点的下游并触发局部重规划。",
+    )
+    # 替换闭包内 @tool 装饰过的同名引用为新工具（向后兼容旧代码中 complete_node / fail_node 的引用）
+    complete_node = complete_node_tool
+    fail_node = fail_node_tool
 
     def _on_tool_before(name, params):
         if name == "execute_command":
@@ -170,34 +189,38 @@ def _run_node(thread_id: str, task_plan_id: int, node: Dict, goal: str,
     final_result = None
     status = core.STATUS_FAILED
     artifacts: List[str] = []
-    for attempt in range(3):
-        try:
-            r = loop.run(messages=[
-                SystemMessage(content=system_prompt),
-                HumanMessage(content=f"执行子任务：{description}"),
-            ], tools=node_tools, state={}, on_tool_before=_on_tool_before,
-                on_tool_after=_on_tool_after, interrupt_handler=_interrupt_handler)
-            final_result = r["final_answer"]
-            if _outcome["status"] == "failed":
-                status = core.STATUS_FAILED
-                final_result = f"节点失败（fail_node）: {_outcome['reason'] or final_result}"
-            elif _outcome["status"] == "success" or _written:
-                status = core.STATUS_SUCCESS
-                artifacts = list(dict.fromkeys(_written + _outcome["files"] + _extract_artifacts(final_result or "")))
-            else:
-                status = core.STATUS_FAILED
-                final_result = (final_result or "") + "\n[自动判定] 未调用任何写入工具且未声明完成/失败。"
-            break
-        except Exception as e:
-            from langgraph.errors import GraphInterrupt
-            if isinstance(e, GraphInterrupt):
-                raise
-            final_result = f"执行异常: {e}"
+    # 去掉外层 for attempt in range(3)：内层 tenacity 已自带 3 次重试（15/30/60s 退避），
+    # 外层再 3 次会撞 LangGraph 节点超时并导致 set_node_status 跑不到、节点卡 running。
+    # 这里只调一次 loop.run，任何异常（LLM 失败/工具异常）都走 except 走 failed。
+    try:
+        r = loop.run(messages=[
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=f"执行子任务：{description}"),
+        ], tools=node_tools, state={}, on_tool_before=_on_tool_before,
+            on_tool_after=_on_tool_after, interrupt_handler=_interrupt_handler)
+        final_result = r["final_answer"]
+        if _outcome["status"] == "failed":
             status = core.STATUS_FAILED
-            artifacts = []
+            final_result = f"节点失败（fail_node）: {_outcome['reason'] or final_result}"
+        elif _outcome["status"] == "success" or _written:
+            status = core.STATUS_SUCCESS
+            artifacts = list(dict.fromkeys(_written + _outcome["files"] + _extract_artifacts(final_result or "")))
+        else:
+            status = core.STATUS_FAILED
+            final_result = (final_result or "") + "\n[自动判定] 未调用任何写入工具且未声明完成/失败。"
+    except Exception as e:
+        from langgraph.errors import GraphInterrupt
+        if isinstance(e, GraphInterrupt):
+            raise  # 审批中断必须冒泡
+        final_result = f"执行异常: {type(e).__name__}: {str(e)[:300]}"
+        status = core.STATUS_FAILED
+        artifacts = []
 
     if status == core.STATUS_SUCCESS and not artifacts:
         status = core.STATUS_FAILED  # done 但无产出 → 失败，触发反馈
+    # finally 兜底：无论如何都把 status 写回 DB，避免节点卡在 running。
+    # 注意：GraphInterrupt 必须冒泡（外层 langgraph 状态机要 resume），
+    # 所以 finally 写在 except-GraphInterrupt 之后。
     dag.set_node_status(task_plan_id, node_id, status, result=final_result, artifacts=artifacts)
     dag.save_checkpoint(task_plan_id)
     on_event("executor", {"subtask": node_id, "status": status, "goal": goal[:80],
@@ -254,8 +277,17 @@ def create_executor(llm_builder, tools_list):
         # 计算 ready 批（本批并行）
         ready = core.compute_ready_batch(node_map, edges)
         if not ready:
-            record_node_end(thread_id, "executor", "无可执行节点")
-            return {"thread_id": thread_id}
+            # 防 trace 里几百次"无可执行节点"死循环：连续空批 3 次说明任务真的卡住了
+            # （要么所有节点终态、要么全卡在 running 超过 5 分钟），直接跳出进 summarizer
+            empty_streak = int(state.get("_empty_streak", 0)) + 1
+            record_node_end(thread_id, "executor",
+                            f"无可执行节点 (连续 {empty_streak}/3 次)")
+            if empty_streak >= 3:
+                add_log_entry("info", f"[DAG] 连续 3 次无可执行节点，结束执行进 summarizer")
+                return {"thread_id": thread_id, "_empty_streak": empty_streak}
+            return {"thread_id": thread_id, "_empty_streak": empty_streak}
+        # 本批有 ready，把 empty_streak 清零
+        state_for_return = {"thread_id": thread_id, "_empty_streak": 0}
 
         goal = plan["goal"]
         # 并发执行 ready 批
@@ -289,7 +321,7 @@ def create_executor(llm_builder, tools_list):
         dag.save_checkpoint(plan["id"])
         dag.set_plan_status(plan["id"], "executing")
         record_node_end(thread_id, "executor", f"本批 {len(ready)} 节点")
-        return {"thread_id": thread_id}
+        return state_for_return
     return executor_node
 
 
