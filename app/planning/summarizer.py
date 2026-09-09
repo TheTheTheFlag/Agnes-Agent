@@ -32,34 +32,33 @@ def create_summarizer_node(llm):
         results = [f"子任务 {s['id']}（{s['description']}）结果：{s.get('result') or ''}" for s in db_subs]
         combined = "\n".join(results)
 
-        if any(s['status'] == "failed" for s in db_subs):
-            summary = f"部分失败：\n{combined}"
-        else:
-            system_prompt = (
-                "请根据以下子任务的执行结果，生成一个简洁、完整的最终回答，直接满足用户的原始需求。"
-                "如果用户要求开发一个游戏或应用，请先确认文件已生成，然后简要说明如何使用。"
-                "不要重复生成完整的代码（除非用户明确要求），而是告诉用户文件已存在，并提供使用说明。"
-            )
-            # trace：记录 summarizer LLM 调用
-            import time as _t
-            from app.trace import record_llm
-            _t0 = _t.time()
-            _msgs = [SystemMessage(content=system_prompt),
-                     HumanMessage(content=f"目标：{goal}\n结果：\n{combined}")]
-            response = llm.invoke(_msgs)
-            record_llm(thread_id, "summarizer", _msgs, response, duration_ms=(_t.time() - _t0) * 1000)
-            # 推前端：summarizer 的模型输入/输出作为独立气泡
-            try:
-                from app.planning.react_loop import _llm_messages_to_text as _llm2txt
-                add_event("llm_call", {
-                    "node": "summarizer",
-                    "input": _llm2txt(_msgs),
-                    "output": _llm2txt([response]),
-                    "duration_ms": int((_t.time() - _t0) * 1000),
-                }, thread_id)
-            except Exception:
-                pass
-            summary = response.content
+        # 无论是否失败，都调用 LLM 生成友好回复
+        system_prompt = (
+            "请根据以下子任务的执行结果，生成一个简洁、完整的最终回答，直接满足用户的原始需求。"
+            "如果部分子任务失败，请说明哪些完成了、哪些失败了，并告诉用户如何继续。"
+            "如果用户要求开发一个游戏或应用，请先确认文件已生成，然后简要说明如何使用。"
+            "不要重复生成完整的代码（除非用户明确要求），而是告诉用户文件已存在，并提供使用说明。"
+        )
+        # trace：记录 summarizer LLM 调用
+        import time as _t
+        from app.trace import record_llm
+        _t0 = _t.time()
+        _msgs = [SystemMessage(content=system_prompt),
+                 HumanMessage(content=f"目标：{goal}\n结果：\n{combined}")]
+        response = llm.invoke(_msgs)
+        record_llm(thread_id, "summarizer", _msgs, response, duration_ms=(_t.time() - _t0) * 1000)
+        # 推前端：summarizer 的模型输入/输出作为独立气泡
+        try:
+            from app.planning.react_loop import _llm_messages_to_text as _llm2txt
+            add_event("llm_call", {
+                "node": "summarizer",
+                "input": _llm2txt(_msgs),
+                "output": _llm2txt([response]),
+                "duration_ms": int((_t.time() - _t0) * 1000),
+            }, thread_id)
+        except Exception:
+            pass
+        summary = response.content
 
         from app.trace import record_node_end as _rnd
         _rnd(thread_id, "summarizer", str(summary)[:200])

@@ -355,12 +355,28 @@ def _reinstall_state(nodes: List[Dict], edges: List[Dict]):
 
 
 def _parent_artifacts(node_map, edges, nid) -> List[str]:
+    """获取当前节点的所有上下文 artifacts：
+    - 直接父节点（强依赖）的 artifacts
+    - 同批已完成的并行节点的 artifacts（通过检查所有成功节点并过滤掉当前节点自身）
+    """
     out = []
+
+    # 1. 直接父节点的 artifacts（强依赖）
     parents = [e["from"] for e in edges if e["to"] == nid]
     for p in parents:
         pn = node_map.get(p, {})
         if pn.get("status") == core.STATUS_SUCCESS:
             out.extend(pn.get("artifacts") or [])
+
+    # 2. 同批并行节点中已完成的 artifacts（避免并行节点间信息孤岛）
+    #    逻辑：所有成功节点的 artifacts，排除当前节点自身（因为还没执行）
+    for other_nid, other_node in node_map.items():
+        if other_nid != nid and other_node.get("status") == core.STATUS_SUCCESS:
+            other_artifacts = other_node.get("artifacts") or []
+            for art in other_artifacts:
+                if art not in out:
+                    out.append(art)
+
     return list(dict.fromkeys(out))
 
 
