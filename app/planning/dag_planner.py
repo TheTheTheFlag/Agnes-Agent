@@ -19,22 +19,13 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.config import DB_PATH
 from app.graph.state import State
+from app.graph._agent_prompt import build_dag_planner_system_prompt
 from app.memory import MemoryManager
 from app.planning import dag_core as core
 from app.planning.dag_storage import DAGStorage
 from app.server import add_event, add_log_entry
 
-_SYS = """你是一个 DAG 任务规划器。把用户目标拆成"有依赖关系"的执行图，输出 JSON：
-{
-  "nodes": [{"id": "1", "description": "步骤说明", "tool": "优选工具名(可省略)", "params": {} }],
-  "edges": [{"from": "1", "to": "2", "soft": false}]
-}
-规则：
-- 节点数 2-6 个；能并行的步骤分开成节点（同层会在执行期并行）。
-- edges 表达依赖：from 完成后 to 才能执行。无依赖的可不连（= 同层并行）。
-- 软依赖：某依赖"缺失不阻塞、只是结果不完整"时，该边 soft 置 true。
-- 严禁成环（不能出现 1→2→3→1）或引用不存在的节点 id。
-只输出 JSON，不要多余文字。"""
+_SYS = build_dag_planner_system_prompt()
 
 
 def _extract_goal(state: State) -> str:

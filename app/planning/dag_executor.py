@@ -34,6 +34,7 @@ from app.planning import dag_core as core
 from app.planning.dag_storage import DAGStorage
 from app.planning.react_loop import ReActLoop
 from app.server import add_event, add_log_entry
+from app.graph._agent_prompt import build_dag_executor_system_prompt
 
 # 工具调用硬约束（沿用旧 executor）：探索 ≤2、写入 ≤8、路径必须 deliverables/
 _EXPLORE_TOOLS = ("ls", "glob_files", "read_file", "execute_command")
@@ -72,21 +73,12 @@ def _run_node(thread_id: str, task_plan_id: int, node: Dict, goal: str,
         artifacts_context += "\n\n【提示】以下软依赖节点未能成功，其结果缺失（本次不阻塞，但结论可能不完整）：\n" + \
                              "\n".join(f"- {m}" for m in missing_soft)
 
-    system_prompt = (
-        f"你是执行 DAG 子任务 {node_id} 的执行器。整体目标：{goal}\n"
-        f"当前子任务：{description}\n"
-        f"可用工具：{', '.join(t.name for t in tools_list)}\n"
-        f"也可调用 complete_node / fail_node 声明完成或失败。\n"
-        f"{artifacts_context}\n"
-        f"执行纪律：\n"
-        f"1. 探索类工具（ls/glob/read_file/execute_command）最多 2 次，之后直接产出。\n"
-        f"2. 产物【必须】写入 'deliverables/xxx' 路径（例：'deliverables/snake/index.html'、"
-        f"'deliverables/snake/style.css'、'deliverables/snake/app.js'）。"
-        f"写入其他路径（app/、app/server/static/、/tmp/、根目录等）会被安全策略直接拒，"
-        f"且错误信息会明确告诉你正确路径——请收到错误后立刻改成 deliverables/ 前缀重试。\n"
-        f"3. 不要重复写入同一文件，不要为凑工具调用而调用工具。\n"
-        f"4. 完成后调用 complete_node 声明（files 列出实际产出路径）；只用文字不算完成。\n"
-        f"5. 无法完成时调用 fail_node 声明失败（reason 写原因），不要多次重试。\n"
+    system_prompt = build_dag_executor_system_prompt(
+        node_id=node_id,
+        description=description,
+        goal=goal,
+        tool_names=", ".join(t.name for t in tools_list),
+        artifacts_context=artifacts_context,
     )
 
     _outcome = {"status": None, "reason": "", "files": []}
@@ -201,7 +193,11 @@ def _run_node(thread_id: str, task_plan_id: int, node: Dict, goal: str,
         return True, None
 
     node_tools = list(tools_list) + [complete_node, fail_node]
-    loop = ReActLoop(llm_builder[0].bind_tools(node_tools), max_iterations=5, node="executor",
+    # max_iterations=12：executor 单子任务需要"探索+写入+校验+complete_node"多轮，
+    # 历史 5 太紧，模型会卡在最后一两次没机会收尾；reactive_loop 内还有
+    # _NO_PROGRESS_LIMIT 强制收尾兜底（连续 3 轮无 tool_calls 直接 break），
+    # 不会因 12 而显著增加 LLM 调用——只在模型真正有动作时跑满。
+    loop = ReActLoop(llm_builder[0].bind_tools(node_tools), max_iterations=12, node="executor",
                      require_final_marker=True, terminate_tools={"complete_node", "fail_node"})
 
     final_result = None

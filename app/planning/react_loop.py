@@ -50,6 +50,12 @@ def _llm_messages_to_text(messages):
         return ""
 
 
+# 连续无进展轮数上限：超过此值仍未产生任何 tool_calls → 强制 break 并给 fail_node 引导。
+# - executor 节点（require_final_marker=True）走这条路径。设 3 平衡"给模型补救机会"和"别空转"。
+# - chatbot 节点不依赖这个计数器（有 apply_reply_guard 兜底）。
+_NO_PROGRESS_LIMIT = 3
+
+
 class ReActLoop:
     def __init__(self, llm_with_tools, max_iterations: int = 15, node: str = "agent",
                  require_final_marker: bool = False, terminate_tools: set = None):
@@ -84,6 +90,12 @@ class ReActLoop:
         iteration = 0
         last_tool_calls = None
         same_call_count = 0
+        # 连续无进展计数器：每轮若既没产生有效 tool_calls 也没产生新写入，记一次。
+        # 达到 _NO_PROGRESS_LIMIT（按节点类型区分）→ 强制 break，避免空转/死循环。
+        # 历史教训：executor 节点曾因模型反复空 output 但不调 complete_node/fail_node，
+        # 把 max_iterations 跑满也收不了尾（dag_executor.py:79 _run_node 拿到
+        # "[自动判定] 未调用..." 才最终收尾，但 LLM 调用次数已经爆炸）。
+        no_progress_streak = 0
 
         while iteration < self.max_iterations:
             iteration += 1
@@ -124,7 +136,25 @@ class ReActLoop:
                 if self._require_final_marker:
                     # executor 等执行器节点：纯文本（无工具调用）不算完成——
                     # 完成必须有实际动作：调用 write_file 写入产出，或调用
-                    # complete_subtask/fail_subtask 声明结果。引导后继续（受 max_iterations 约束）。
+                    # complete_subtask/fail_subtask 声明结果。
+                    # 连续 _NO_PROGRESS_LIMIT 轮仍无 tool_calls → 注入"立即 fail_node"
+                    # 引导并强制 break，不再 continue 空转（曾经跑到 max_iterations 才收尾）。
+                    no_progress_streak += 1
+                    if no_progress_streak >= _NO_PROGRESS_LIMIT:
+                        messages.append(response)
+                        messages.append(SystemMessage(
+                            content=(
+                                f"[强制收尾] 你已连续 {no_progress_streak} 轮没有调用任何工具。"
+                                f"为避免无限空转，请立即调用 fail_node 声明失败（reason 写明卡在哪），"
+                                f"或调用 complete_node 列出已写文件结束本子任务；不再继续。"
+                            )
+                        ))
+                        final_answer = (
+                            f"[强制收尾] 连续 {no_progress_streak} 轮无工具调用，"
+                            f"子任务无法推进（模型空转未调用 complete_node/fail_node）。"
+                        )
+                        break
+                    # 前几轮：继续注入引导，期望模型下一轮产生动作
                     messages.append(response)
                     messages.append(SystemMessage(
                         content="[引导] 你刚才只输出了文字，没有任何实际动作。请调用 write_file 工具把完整文件"
