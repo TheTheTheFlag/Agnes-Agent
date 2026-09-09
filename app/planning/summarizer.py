@@ -13,24 +13,54 @@ def create_summarizer_node(llm):
         from app.trace import record_node_start
         record_node_start(thread_id, "summarizer")
         mm = MemoryManager(db_path=DB_PATH, thread_id=thread_id)
-        # DB 唯一来源：按 thread 查当前进行中计划
-        plan_meta = mm.get_task_plan_by_thread(thread_id)
-        if not plan_meta:
-            from app.trace import record_node_end as _rnd0
-            _rnd0(thread_id, "summarizer", "无进行中计划")
-            return {"thread_id": thread_id, "messages": state.get("messages", [])}
-        tid = plan_meta["id"]
-        # 标记计划 completed（真正完成）
-        try:
-            mm.complete_task_plan(tid)
-        except Exception:
-            pass
 
-        # ===== 数据流：所有子任务/结果从 DB 查（state 不缓存）=====
-        goal = plan_meta.get("goal", "")
-        db_subs = mm.get_subtasks(tid)
-        results = [f"子任务 {s['id']}（{s['description']}）结果：{s.get('result') or ''}" for s in db_subs]
-        combined = "\n".join(results)
+        # 优先查询新的 DAG 系统（dag_plans 表）
+        try:
+            from app.planning.dag_storage import DAGStorage
+            dag = DAGStorage(DB_PATH)
+            plan = dag.get_plan_by_thread(thread_id)
+            if plan:
+                tid = plan["id"]
+                goal = plan.get("goal", "")
+                # 获取所有节点
+                nodes = dag.get_nodes(tid)
+                results = []
+                for n in nodes:
+                    results.append(f"子任务 {n['id']}（{n['description']}）结果：{n.get('result') or ''}")
+                combined = "\n".join(results)
+            else:
+                # 回退到旧系统
+                plan_meta = mm.get_task_plan_by_thread(thread_id)
+                if not plan_meta:
+                    from app.trace import record_node_end as _rnd0
+                    _rnd0(thread_id, "summarizer", "无进行中计划")
+                    return {"thread_id": thread_id, "messages": state.get("messages", [])}
+                tid = plan_meta["id"]
+                goal = plan_meta.get("goal", "")
+                db_subs = mm.get_subtasks(tid)
+                results = [f"子任务 {s['id']}（{s['description']}）结果：{s.get('result') or ''}" for s in db_subs]
+                combined = "\n".join(results)
+                # 标记计划 completed
+                try:
+                    mm.complete_task_plan(tid)
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"[Summarizer] DAG 查询失败: {e}，回退到旧系统")
+            plan_meta = mm.get_task_plan_by_thread(thread_id)
+            if not plan_meta:
+                from app.trace import record_node_end as _rnd0
+                _rnd0(thread_id, "summarizer", "无进行中计划")
+                return {"thread_id": thread_id, "messages": state.get("messages", [])}
+            tid = plan_meta["id"]
+            goal = plan_meta.get("goal", "")
+            db_subs = mm.get_subtasks(tid)
+            results = [f"子任务 {s['id']}（{s['description']}）结果：{s.get('result') or ''}" for s in db_subs]
+            combined = "\n".join(results)
+            try:
+                mm.complete_task_plan(tid)
+            except Exception:
+                pass
 
         # 无论是否失败，都调用 LLM 生成友好回复
         system_prompt = (
