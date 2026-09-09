@@ -413,9 +413,16 @@ def route_after_chatbot(state: State) -> str:
 
 def route_after_executor(state: State):
     """DAG executor 退出后：所有决策走 dag_storage（唯一真相源）。
-      1) 还有未完成节点（pending/ready/running）→ 继续 executor
-      2) 全部终态（success/failed/skipped）→ 进 summarizer 汇总结论
+      1) 如果连续 3 次无可执行节点 → 进 summarizer（防死循环）
+      2) 还有未完成节点（pending/ready/running）→ 继续 executor
+      3) 全部终态（success/failed/skipped）→ 进 summarizer 汇总结论
       局部重规划由 executor 内部先做；这里只在 DAG 彻底完成/收敛时结束。"""
+    # 首先检查是否连续空批达到上限
+    empty_streak = int(state.get("_empty_streak", 0))
+    if empty_streak >= 3:
+        add_log_entry("info", f"DAG 路由→summarizer: 连续 {empty_streak} 次无可执行节点")
+        return "summarizer"
+
     thread_id = state.get("thread_id") or "default"
     try:
         from app.planning.dag_storage import DAGStorage

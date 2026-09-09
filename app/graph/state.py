@@ -25,3 +25,4 @@ class State(TypedDict):
     _validation_message: Optional[str]   # 验证失败原因（结构化文本，executor 修复时读取）
     _fix_attempts: Optional[int]         # 反馈修复尝试次数（validator 递增，executor 重置）
     _total_replans: Optional[int]        # 重规划次数（executor/validator 递增，路由读取）
+    _empty_streak: Optional[int]         # executor 连续空批计数（防死循环）
