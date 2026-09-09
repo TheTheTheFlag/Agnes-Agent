@@ -461,6 +461,22 @@ function setTodos(items) {
   renderTodoPanel();
 }
 
+// 把后端 DAG 节点快照（[{id, status, description}]）转成待办列表并刷新面板。
+// 保留顺序（按原节点顺序，不重排），状态映射：success→done、running→doing、其余→todo。
+// 规划任务全程由这个函数驱动"动态变化"的待办列表（替代原先的 DAG 图）。
+function updateTodoFromNodes(nodes) {
+  if (!Array.isArray(nodes) || !nodes.length) return;
+  const items = nodes.map((n, i) => {
+    const st = n.status || "todo";
+    let status = "todo";
+    if (st === "success") status = "done";
+    else if (st === "running") status = "doing";
+    const text = (n.description || n.desc || String(n.id)).trim();
+    return { id: n.id || String(i), text, status, rawStatus: st };
+  });
+  setTodos(items);
+}
+
 function renderTodoPanel() {
   const panel = $("#todoPanel");
   if (!panel) return;
@@ -713,128 +729,6 @@ function endStreaming(finalText) {
   scrollToBottom();
 }
 
-/* ==================== 规划执行 DAG 面板（vis-network） ==================== */
-// 实时渲染规划执行 DAG：后端 dag_push 初始化结构，node_status 更新节点状态颜色。
-// 节点状态 → 颜色映射；软依赖边用虚线表示。
-const DAG_STATUS_COLOR = {
-  pending: "#9aa0a6",
-  ready:   "#4fc3f7",
-  running: "#ffb300",
-  success: "#34c77b",
-  failed:  "#f2555a",
-  skipped: "#90a4ae",
-};
-let _dagNetwork = null;      // vis.Network 实例
-let _dagNodes = {};          // id -> node
-let _dagEdges = [];          // [{from,to}]
-let _dagPanelShown = false;
-
-function _ensureDagNetwork() {
-  const canvas = $("#dagCanvas");
-  if (!canvas) return null;
-  if (_dagNetwork) {
-    // 确保尺寸正确（面板可能刚显示）
-    _dagNetwork.setSize(canvas.clientWidth, canvas.clientHeight);
-    return _dagNetwork;
-  }
-  if (typeof vis === "undefined" || !vis.Network) return null;
-  _dagNetwork = new vis.Network(canvas, { nodes: [], edges: [] }, {
-    layout: { hierarchical: { direction: "UD", sortMethod: "directed" } },
-    physics: false,
-    nodes: { shape: "box", font: { size: 12, color: "#e8e9ec" }, margin: 8,
-             borderWidth: 1, color: { background: "#20232b", border: "#4b5160" } },
-    edges: { arrows: { to: { enabled: true, scaleFactor: 0.6 } },
-             color: { color: "#5b6270", highlight: "#7c5cff", inherit: false },
-             smooth: { enabled: true, type: "dynamic" } },
-  });
-  return _dagNetwork;
-}
-
-function _showDagPanel() {
-  const panel = $("#dagPanel");
-  if (!panel) return;
-  panel.classList.remove("hidden");
-  _dagPanelShown = true;
-  const nw = _ensureDagNetwork();
-  if (nw) setTimeout(() => nw.setSize(panel.clientWidth, (panel.clientHeight || 220)), 0);
-}
-
-function renderDagStructure(dag, goal) {
-  const panel = $("#dagPanel");
-  if (!panel) return;
-  const nodesArr = (dag.nodes || []).map((n) => ({ id: n.id, label: n.description || n.id }));
-  const edges = (dag.edges || []).map((e) => ({
-    from: e.from, to: e.to,
-    dashes: !!e.soft,  // 软依赖 → 虚线
-  }));
-  _dagNodes = {};
-  nodesArr.forEach((n) => { _dagNodes[n.id] = n; });
-  _dagEdges = edges;
-  $("#dagGoal").textContent = goal || "";
-  _showDagPanel();
-
-  const nw = _ensureDagNetwork();
-  if (!nw) return;
-  // 用各节点初始状态着色（后端 dag_push 里可能已带 status）
-  const statusMap = {};
-  (dag.nodes || []).forEach((n) => { statusMap[n.id] = n.status || "pending"; });
-  const colored = nodesArr.map((n) => {
-    const st = statusMap[n.id] || "pending";
-    return Object.assign({}, n, {
-      color: { background: DAG_STATUS_COLOR[st] || DAG_STATUS_COLOR.pending, border: "#1b1e24" },
-    });
-  });
-  nw.setData({ nodes: new vis.DataSet(colored), edges: new vis.DataSet(edges) });
-  nw.redraw();
-}
-
-function updateDagNodeStatus(nodeId, status, fullNodes) {
-  const nw = _dagNetwork;
-  const statusMap = {};
-  // 全量快照优先（executor 事件带 nodes 数组）
-  if (fullNodes && Array.isArray(fullNodes)) {
-    fullNodes.forEach((n) => { statusMap[n.id] = n.status || "pending"; });
-  } else if (nodeId) {
-    statusMap[nodeId] = status || "pending";
-  }
-  // 更新已渲染节点颜色
-  if (nw) {
-    const ds = nw.getNodesDataset ? nw.getNodesDataset() : null;
-    if (ds) {
-      const updates = [];
-      Object.keys(statusMap).forEach((id) => {
-        if (ds.get(id)) {
-          updates.push({
-            id: id,
-            color: { background: DAG_STATUS_COLOR[statusMap[id]] || DAG_STATUS_COLOR.pending, border: "#1b1e24" },
-          });
-        }
-      });
-      if (updates.length) ds.update(updates);
-    }
-  }
-}
-
-function flashDagReplan(goal) {
-  const panel = $("#dagPanel");
-  if (panel) {
-    panel.classList.add("replan-flash");
-    setTimeout(() => panel.classList.remove("replan-flash"), 600);
-  }
-  if (goal) $("#dagGoal").textContent = goal + "（局部重规划）";
-}
-
-// 收起按钮
-document.addEventListener("DOMContentLoaded", () => {
-  const closeBtn = $("#dagClose");
-  if (closeBtn) {
-    closeBtn.addEventListener("click", () => {
-      $("#dagPanel").classList.add("hidden");
-      _dagPanelShown = false;
-    });
-  }
-});
-
 /* ==================== 对话流（SSE /api/chat） ==================== */
 function handleChatEvent(evt) {
   const step = evt.step;
@@ -876,9 +770,29 @@ function handleChatEvent(evt) {
   } else if (step === "approval") {
     renderApprovalCard(evt.data || {});
   } else if (step === "final") {
-    if (evt.text && !State.streamBuffer) {
+    // 最终答复：chatbot 节点通常已通过 token 流实时显示，final 只是兜底（避免重复覆盖，
+    // 故仅在 streamBuffer 为空时应用）。但 summarizer 节点（规划任务收尾）的总结文本
+    // 是 llm.invoke 一次性生成，不经 token 流到达，前端这里只收到 final 事件；
+    // 若沿用 `!State.streamBuffer` 判断，会被执行过程中残留的缓冲（如
+    // "🚀 正在为你规划并执行"）挡住，导致"任务完成了但前端看不到总结回复"。
+    // 故 summarizer 的 final 必须无条件覆盖显示。
+    const _isSummarizer = evt.node === "summarizer";
+    if (evt.text && (!State.streamBuffer || _isSummarizer)) {
       if (!State.currentAssistantEl) State.currentAssistantEl = addAssistantBubble("");
+      // summarizer：用其总结文本取代当前气泡内容（清掉执行过程残留），展示最终答复
       State.streamBuffer = evt.text;
+      // 若当前是计划执行期间的气泡，移除残留的流式文本节点，避免旧文本残留
+      if (_isSummarizer) {
+        const _host = State.currentAssistantEl;
+        const _box = _host && $(".msg-text", _host);
+        if (_box) {
+          const _old = $("#stream-text", _box);
+          if (_old) _old.remove();
+          const _tn = document.createElement("div");
+          _tn.id = "stream-text";
+          _box.prepend(_tn);
+        }
+      }
       endStreaming();
     }
     // 内容已完整送达：立即复位"工具名 / 运行中"指示。
@@ -898,14 +812,28 @@ function handleChatEvent(evt) {
     addErrorBubble(evt.message || "未知错误");
     State.currentAssistantEl = null;
   } else if (step === "dag_push") {
-    // 规划开始时：用结构初始化（或重建）DAG 图
-    renderDagStructure(evt.dag || {}, evt.goal || "");
+    // 规划开始时：用后端传来的节点结构初始化待办列表（替代原 DAG 图）
+    updateTodoFromNodes((evt.dag || {}).nodes || []);
   } else if (step === "node_status") {
-    // 执行中：更新单个/全量节点状态与颜色
-    updateDagNodeStatus(evt.node_id || "", evt.status || "", evt.nodes || null);
+    // 执行中：用全量节点快照刷新待办状态（动态变化）；无全量快照时用单节点状态更新
+    if (evt.nodes && evt.nodes.length) {
+      updateTodoFromNodes(evt.nodes);
+    } else if (evt.node_id) {
+      State.todos = (State.todos || []).map((t) => {
+        if (String(t.id) === String(evt.node_id)) {
+          let status = "todo";
+          if (evt.status === "success") status = "done";
+          else if (evt.status === "running") status = "doing";
+          return Object.assign({}, t, { status, rawStatus: evt.status });
+        }
+        return t;
+      });
+      renderTodoPanel();
+    }
   } else if (step === "replan") {
-    // 局部重规划提醒（节点动画闪烁提示即可）
-    flashDagReplan(evt.goal || "");
+    // 局部重规划提示：把待办面板重新展开，让用户看到新拆的子任务
+    State.todosExpanded = true;
+    renderTodoPanel();
   } else if (step === "heartbeat" || step === "__close__") {
     // 忽略
   }
@@ -2174,8 +2102,12 @@ function handleLiveEvent(evt) {
   } else if (eType === "event") {
     if (State.drawerTab === "events") renderEventsTab(drawerBody);
   } else if (eType === "planner" || eType === "executor") {
-    // 任务计划/子任务状态变化 → 刷新待办面板
-    if (eData.subtasks && Array.isArray(eData.subtasks)) {
+    // 任务计划/子任务状态变化 → 刷新待办面板。
+    // 后端事件负载有两种形态：executor 全量快照用 `nodes`（[{id,status,description}]），
+    // 旧版 subtasks 结构也兼容。统一转成待办列表驱动（替代 DAG 图）。
+    if (eData.nodes && Array.isArray(eData.nodes) && eData.nodes.length) {
+      updateTodoFromNodes(eData.nodes);
+    } else if (eData.subtasks && Array.isArray(eData.subtasks)) {
       const items = eData.subtasks.map((s) => ({
         id: s.id,
         text: s.desc || s.description || String(s.id),

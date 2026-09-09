@@ -96,15 +96,7 @@
       <div class="todo-list" id="todoList"></div>
     </div>
 
-    <!-- 规划执行 DAG 面板（实时渲染执行图，vis-network；由 dag_push/node_status 事件驱动） -->
-    <div id="dagPanel" class="dag-panel hidden">
-      <div class="dag-head">
-        <span class="dag-title">🧭 规划执行图</span>
-        <span class="dag-goal" id="dagGoal"></span>
-        <button class="dag-close" id="dagClose" title="收起">×</button>
-      </div>
-      <div id="dagCanvas" class="dag-canvas"></div>
-    </div>
+    <!-- 规划执行 DAG 面板已移除（改为上方待办列表动态展示节点状态） -->
 
     <div id="messages" class="messages"></div>
 
@@ -170,7 +162,6 @@
 </div>
 
 <script src="/static/marked.min.js"></script>
-<script src="/static/vis-network.min.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>
