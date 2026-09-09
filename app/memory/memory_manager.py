@@ -87,6 +87,8 @@ class MemoryManager:
                     content TEXT,
                     tool_calls TEXT,
                     tool_call_id TEXT,
+                    kind TEXT NOT NULL DEFAULT 'chat',
+                    meta TEXT,
                     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
                 CREATE INDEX IF NOT EXISTS idx_messages_thread_id ON messages(thread_id);
@@ -121,6 +123,22 @@ class MemoryManager:
                 CREATE INDEX IF NOT EXISTS idx_semantic_cache_query ON semantic_cache(query);
                 CREATE INDEX IF NOT EXISTS idx_semantic_cache_expires ON semantic_cache(expires_at);
             """)
+
+            # ---- messages 表结构迁移：旧库补 kind/meta 列（事件气泡持久化用）----
+            # 新库由上方 CREATE TABLE 直接带列；旧库（CREATE TABLE IF NOT EXISTS 不生效）
+            # 用 PRAGMA 检测缺列后 ALTER 补上，避免历史 DB 升级后列不存在。
+            try:
+                _cols = {r[1] for r in conn.execute("PRAGMA table_info(messages)").fetchall()}
+                if "kind" not in _cols:
+                    conn.execute("ALTER TABLE messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'chat'")
+                if "meta" not in _cols:
+                    conn.execute("ALTER TABLE messages ADD COLUMN meta TEXT")
+                try:
+                    conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_kind ON messages(thread_id, kind)")
+                except Exception:
+                    pass
+            except Exception:
+                pass
 
     # -------------------- 用户信息 --------------------
     def get_profile(self) -> Dict[str, Any]:
@@ -178,10 +196,80 @@ class MemoryManager:
         except Exception:
             pass
 
+    def add_event(self, thread_id: str, kind: str, content: str = None,
+                  meta: Dict[str, Any] = None):
+        """持久化一条页面"事件气泡"（节点开始/结束、模型调用、工具、思考、审批卡）。
+
+        与 add_message 的对话记录区分：role='event'，kind 表示事件类型
+        （node_start/node_end/llm_call/tool_call/thought/approval），meta 存结构化详情，
+        按真实发生逐条落库（不做对话的 60s 幂等去重——事件天然逐次不同）。
+        仅对同 thread+kind+content 在 2 秒内重复（listener 桥与 updates 兜底双写、
+        interrupt/resume 重放）做轻量去重，避免同一事件落两条。
+        """
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                if content:
+                    _dup = conn.execute(
+                        """SELECT timestamp FROM messages
+                           WHERE thread_id=? AND role='event' AND kind=? AND content=?
+                           ORDER BY id DESC LIMIT 1""",
+                        (thread_id, kind, content)
+                    ).fetchone()
+                    if _dup:
+                        try:
+                            from datetime import datetime as _dt
+                            _ts = _dt.fromisoformat(_dup[0])
+                            if (datetime.now() - _ts).total_seconds() < 2:
+                                return
+                        except Exception:
+                            pass
+                conn.execute(
+                    """INSERT INTO messages (thread_id, role, content, kind, meta, timestamp)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (thread_id, "event", content, kind,
+                     json.dumps(meta, ensure_ascii=False, default=str) if meta is not None else None,
+                     datetime.now())
+                )
+        except Exception:
+            pass
+
+    def set_last_approval_decision(self, thread_id: str, allow: bool, mode: str = "") -> bool:
+        """把最近一条未决策的审批提问（kind='approval'）回填用户选择（allow/mode）。
+
+        审批卡提问在 interrupt 时落库（meta.allow=None）；用户在 resume 请求里给出
+        allow/mode 后调用本方法，把决定写回同一条记录，重启回放时审批卡显示完整
+        （问题 + 最终决定）。返回是否命中。
+        """
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                row = conn.execute(
+                    """SELECT id, meta FROM messages
+                       WHERE thread_id=? AND role='event' AND kind='approval'
+                       ORDER BY id DESC LIMIT 1""",
+                    (thread_id,)
+                ).fetchone()
+                if not row:
+                    return False
+                meta = {}
+                if row[1]:
+                    try:
+                        meta = json.loads(row[1])
+                    except Exception:
+                        meta = {}
+                meta["allow"] = bool(allow)
+                meta["mode"] = mode or meta.get("mode", "")
+                conn.execute(
+                    "UPDATE messages SET meta=? WHERE id=?",
+                    (json.dumps(meta, ensure_ascii=False, default=str), row[0])
+                )
+                return True
+        except Exception:
+            return False
+
     def get_thread_messages(self, thread_id: str, limit: int = 100) -> List[Dict]:
         with sqlite3.connect(self.db_path) as conn:
             cur = conn.execute(
-                """SELECT role, content, tool_calls, tool_call_id, timestamp
+                """SELECT role, content, tool_calls, tool_call_id, kind, meta, timestamp
                    FROM messages WHERE thread_id = ?
                    ORDER BY timestamp ASC LIMIT ?""",
                 (thread_id, limit)
@@ -191,7 +279,9 @@ class MemoryManager:
                 "content": row[1],
                 "tool_calls": json.loads(row[2]) if row[2] else None,
                 "tool_call_id": row[3],
-                "timestamp": row[4]
+                "kind": row[4] or "chat",
+                "meta": json.loads(row[5]) if row[5] else None,
+                "timestamp": row[6]
             } for row in cur.fetchall()]
 
     # -------------------- 任务计划管理（软删除） --------------------

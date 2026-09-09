@@ -61,7 +61,8 @@ function fmtTime(ts) {
 
 function fmtClock(ts) {
   if (!ts) return "";
-  const d = new Date(ts);
+  // SQLite datetime 默认存 "YYYY-MM-DD HH:MM:SS.ffffff"，非 ISO；补 T 使其可被 new Date 解析
+  const d = new Date(String(ts).replace(" ", "T"));
   if (isNaN(d)) return "";
   const p = (n) => String(n).padStart(2, "0");
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
@@ -737,11 +738,11 @@ function wrapCollapsible(label, bodyHtml, startOpen) {
 }
 
 // 通用独立气泡：icon 图标 + title 标题行 + (可选 meta) + body（可能含可展开内容）
-function addEventBubble(kind, icon, title, metaHtml, bodyHtml) {
+function addEventBubble(kind, icon, title, metaHtml, bodyHtml, ts) {
   const inner = messagesInner();
   const wrap = document.createElement("div");
   wrap.className = `msg assistant evtb evtb-${kind}`;
-  const now = new Date().toISOString();
+  const now = ts ? new Date(ts).toISOString() : new Date().toISOString();
   wrap.innerHTML = `
     <div class="msg-body">
       <div class="msg-head evtb-head">
@@ -767,41 +768,61 @@ function prettyText(obj) {
 }
 
 // 节点变化气泡
-function renderNodeEvent(evt) {
+function renderNodeEvent(evt, ts) {
   const name = evt.name || "";
   const phase = evt.phase === "start" ? "▶ 开始" : "■ 结束";
-  addEventBubble("node", "🧩", `节点 ${name} ${phase}`, "", "");
+  addEventBubble("node", "🧩", `节点 ${name} ${phase}`, "", "", ts);
 }
 
 // 模型调用气泡：输入（可展开完整）+ 输出（可展开完整）+ 耗时
-function renderLlmCall(data) {
+function renderLlmCall(data, ts) {
   const node = data.node || "";
   const duration = data.duration_ms != null ? ` · ${data.duration_ms}ms` : "";
   addEventBubble("llm", "🧠", `模型调用(${node})${duration}`,
     `<span class="evtb-chip">输入 ${(data.input || "").length} 字符 · 输出 ${(data.output || "").length} 字符</span>`,
     wrapCollapsible("📥 模型输入（点击展开/收起）", `<pre class="evt-pre">${escapeHtml(data.input || "")}</pre>`, false) +
-    wrapCollapsible("📤 模型输出（点击展开/收起）", `<pre class="evt-pre">${escapeHtml(data.output || "")}</pre>`, false));
+    wrapCollapsible("📤 模型输出（点击展开/收起）", `<pre class="evt-pre">${escapeHtml(data.output || "")}</pre>`, false), ts);
 }
 
 // 工具调用气泡：工具名 + 参数 + 结果（可展开完整）
-function renderToolEvent(evt) {
+function renderToolEvent(evt, ts) {
   const name = evt.name || "tool";
   const node = evt.node ? ` · 子任务 ${evt.node}` : "";
   const argsText = prettyText(evt.params != null ? evt.params : evt.args);
   const resultText = evt.result != null ? evt.result : (evt.output_preview || "");
   addEventBubble("tool", "🔧", `工具 ${name}${node}`, "",
     wrapCollapsible("输入参数（点击展开/收起）", `<pre class="evt-pre">${escapeHtml(argsText)}</pre>`, false) +
-    wrapCollapsible("执行结果（点击展开/收起）", `<pre class="evt-pre">${escapeHtml(String(resultText))}</pre>`, false));
+    wrapCollapsible("执行结果（点击展开/收起）", `<pre class="evt-pre">${escapeHtml(String(resultText))}</pre>`, false), ts);
 }
 
 // 节点思考气泡（planner/executor/summarizer 的 node_thought）
-function renderThoughtEvent(data) {
+function renderThoughtEvent(data, ts) {
   const role = data.role || "";
   const title = data.title || "思考";
   const text = data.text || "";
   addEventBubble("thought", "💭", String(title),
     `<span class="evtb-chip">${escapeHtml(String(role))}</span>`,
-    wrapCollapsible("内容（点击展开/收起）", `<pre class="evt-pre">${escapeHtml(String(text))}</pre>`, false));
+    wrapCollapsible("内容（点击展开/收起）", `<pre class="evt-pre">${escapeHtml(String(text))}</pre>`, false), ts);
+}
+
+// 历史回放：审批卡（只读，展示提问/命令/最终决定；不做交互）
+function renderHistoryApproval(m, meta) {
+  const decision = meta.allow == null ? "待用户确认（会话中断于此）"
+    : meta.allow ? "✅ 已允许执行" : "⛔ 已拒绝";
+  const mode = meta.mode || "";
+  addEventBubble("approval", "🛂", "审批请求",
+    `<span class="evtb-chip">${escapeHtml(decision)}${mode ? " · " + escapeHtml(mode) : ""}</span>`,
+    `<div class="approval-q">${escapeHtml(meta.question || "是否允许执行该操作？")}</div>` +
+    (meta.command ? `<div class="approval-cmd">${escapeHtml(meta.command)}</div>` : ""), m.timestamp);
+}
+
+// 历史回放：未知 kind 事件兜底（只展示类型与摘要，不丢内容）
+function renderHistoryRawEvent(m, meta) {
+  const label = m.kind || "event";
+  addEventBubble("event", "•", label,
+    `<span class="evtb-chip">${escapeHtml(String(m.role || ""))}</span>`,
+    wrapCollapsible("内容（点击展开/收起）",
+      `<pre class="evt-pre">${escapeHtml(m.content || JSON.stringify(meta) || "")}</pre>`, false), m.timestamp);
 }
 
 /* ==================== 对话流（SSE /api/chat） ==================== */
@@ -1041,6 +1062,32 @@ function renderHistory(msgs) {
   let pendingToolIds = {};
 
   for (const m of msgs) {
+    // 事件气泡（持久化回放）：node / llm_call / tool_call / thought / approval
+    if (m.kind && m.kind !== "chat" && m.role === "event") {
+      const meta = m.meta || {};
+      if (m.kind === "node_start" || m.kind === "node_end") {
+        renderNodeEvent({ name: meta.node || m.content || "", phase: m.kind === "node_start" ? "start" : "end" }, m.timestamp);
+      } else if (m.kind === "llm_call") {
+        renderLlmCall(meta, m.timestamp);
+      } else if (m.kind === "tool_call") {
+        renderToolEvent({
+          name: meta.name || m.content || "",
+          node: meta.node || "",
+          params: meta.params,
+          args: meta.params,
+          result: meta.result,
+          output_preview: meta.result,
+        }, m.timestamp);
+      } else if (m.kind === "thought") {
+        renderThoughtEvent(meta, m.timestamp);
+      } else if (m.kind === "approval") {
+        renderHistoryApproval(m, meta);
+      } else {
+        renderHistoryRawEvent(m, meta);
+      }
+      assistantWrap = null;
+      continue;
+    }
     if (m.role === "user") {
       const wrap = document.createElement("div");
       wrap.className = "msg user";

@@ -10,9 +10,13 @@ from app.memory import MemoryManager
 router = APIRouter()
 
 @router.get("/api/messages")
-async def get_messages(thread_id: str = Query("default"), limit: int = Query(200, ge=1, le=1000)):
-    """读取某 thread 的完整消息流（user / assistant / tool），按时间正序。
-    每条附加 token 估算 + tool_call→tool_result 耗时（ms）。"""
+async def get_messages(thread_id: str = Query("default"), limit: int = Query(200, ge=1, le=1000),
+                       type: str = Query("all")):
+    """读取某 thread 的完整消息流（user / assistant / tool / 事件气泡），按时间正序。
+    每条附加 token 估算 + tool_call→tool_result 耗时（ms）。
+    type：消息类型筛选（默认 all=全部；可选 chat / node_start / node_end / llm_call /
+    tool_call / thought / approval；chat 覆盖 role=user/assistant/tool 的对话文本，
+    事件类对应页面事件气泡；可用逗号分隔传多个，如 type=llm_call,tool_call）。"""
     import sqlite3 as _sqlite
     try:
         import tiktoken
@@ -21,11 +25,31 @@ async def get_messages(thread_id: str = Query("default"), limit: int = Query(200
         _enc = None
     db = _sqlite.connect(DB_PATH)
     db.row_factory = _sqlite.Row
+
+    # type 可能是 FastAPI Query 对象（直接函数调用时）——归一化为纯字符串
+    _type = type if isinstance(type, str) else getattr(type, "default", "all") or "all"
+    # type 过滤：all → 不过滤；chat → 对话文本（kind='chat' 或角色在 user/assistant/tool 的旧行）；
+    # 事件类型 → 匹配 kind 列（历史无 kind 的旧行为 NULL，按角色归类为 chat）
+    params: list = [thread_id]
+    sql_where = "WHERE thread_id = ?"
+    if _type and _type.lower() != "all":
+        conds = []
+        for t in _type.split(","):
+            t = t.strip().lower()
+            if not t:
+                continue
+            if t == "chat":
+                conds.append("(kind='chat' OR kind IS NULL)")
+            else:
+                conds.append("kind=?")
+                params.append(t)
+        if conds:
+            sql_where += " AND (" + " OR ".join(conds) + ")"
     cur = db.execute(
-        """SELECT role, content, tool_calls, tool_call_id, timestamp
-           FROM messages WHERE thread_id = ?
-           ORDER BY timestamp ASC LIMIT ?""",
-        (thread_id, limit)
+        f"""SELECT role, content, tool_calls, tool_call_id, kind, meta, timestamp
+            FROM messages {sql_where}
+            ORDER BY timestamp ASC LIMIT ?""",
+        (*params, limit)
     )
     rows = []
     for r in cur.fetchall():
@@ -36,6 +60,8 @@ async def get_messages(thread_id: str = Query("default"), limit: int = Query(200
             "content": content,
             "tool_calls": json.loads(r["tool_calls"]) if r["tool_calls"] else None,
             "tool_call_id": r["tool_call_id"],
+            "kind": r["kind"] or "chat",
+            "meta": json.loads(r["meta"]) if r["meta"] else None,
             "timestamp": r["timestamp"],
             "tokens": tokens,
         }

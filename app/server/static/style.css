@@ -1699,10 +1699,25 @@ input, textarea { font-family: inherit; }
   padding: 8px 10px; border-top: 1px dashed var(--border-soft);
   max-height: 320px; overflow: auto;
 }
-.evt-pre {
+.evtb-approval .approval-q {
+  font-size: 12.5px; color: var(--text); line-height: 1.5; margin-bottom: 6px;
+}
+.evtb-approval .approval-cmd {
+  font-family: var(--mono); font-size: 12px; color: var(--text);
+  background: var(--bg-input); border-radius: 8px; padding: 8px 10px;
+  max-height: 120px; overflow: auto; white-space: pre-wrap; word-break: break-all;
+}
+.evt-collapse .evt-pre {
   white-space: pre-wrap; word-break: break-word;
   font-family: var(--mono, monospace); font-size: 12px; line-height: 1.5;
   margin: 0; color: var(--text);
+  /* 事件气泡展开区不用代码块黑底：显式复位被 .msg-text pre 命中的
+     background/border/padding，跟随 .evt-collapse 的 --bg-elev 底色，
+     保证亮色主题下文字不是黑字黑底。 */
+  background: transparent;
+  border: none;
+  padding: 0;
+  overflow: visible;
 }
 
 /* 规划执行 DAG 面板（vis-network）样式已移除——改为上方动态待办列表展示节点状态 */

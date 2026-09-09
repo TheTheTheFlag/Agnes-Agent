@@ -82,6 +82,19 @@ async def chat_endpoint(payload: dict):
     thread_id = (payload or {}).get("thread_id") or (_srv_cfg._CONFIG or {}).get("configurable", {}).get("thread_id", "default")
     config = {"configurable": {"thread_id": thread_id}}
 
+    # resume 即审批决策：把 allow/mode 回填到最近一条审批提问记录（重启后可完整回放审批卡）
+    if is_resume:
+        try:
+            from app.memory import MemoryManager as _MM
+            _mm0 = _MM(db_path=DB_PATH, thread_id=thread_id)
+            _mm0.set_last_approval_decision(
+                thread_id,
+                bool((payload or {}).get("allow", False)),
+                str((payload or {}).get("mode") or ""),
+            )
+        except Exception:
+            pass
+
     queue: asyncio.Queue = asyncio.Queue()
 
     async def run_graph():
@@ -107,6 +120,24 @@ async def chat_endpoint(payload: dict):
                 _pending_preview = {"text": ""}
                 _store._event_listeners.append(_listen_q)
 
+                # 页面事件持久化：把节点/模型调用/工具/思考/审批落 messages 表（kind+meta），
+                # 重启后 /api/messages 可回放。一次请求复用一个 MemoryManager。
+                _ev_mm = None
+                try:
+                    from app.memory import MemoryManager as _MM
+                    _ev_mm = _MM(db_path=DB_PATH, thread_id=thread_id)
+                except Exception:
+                    _ev_mm = None
+
+                def _persist_event(kind, content=None, meta=None):
+                    """把一条页面事件落库；DB 不可用时静默降级（不阻断对话）。"""
+                    if _ev_mm is None:
+                        return
+                    try:
+                        _ev_mm.add_event(thread_id, kind, content, meta)
+                    except Exception:
+                        pass
+
                 def _drain_listener():
                     """把监听队列里的事件转成 SSE 事件（同一线程，无锁竞争）。"""
                     while True:
@@ -129,6 +160,10 @@ async def chat_endpoint(payload: dict):
                                             "node": data.get("node") or "",
                                             "phase": "end",
                                             "output_preview": data.get("result") or preview or ""})
+                                _persist_event("tool_call", content=name,
+                                               meta={"name": name, "node": data.get("node") or "",
+                                                     "params": params,
+                                                     "result": data.get("result") or preview or ""})
                         elif etype == "log" and str(entry.get("message", "")).startswith("工具: "):
                             # on_tool_after 里 add_log_entry 先于 add_event 调用，带 result_preview
                             d = entry.get("data") or {}
@@ -149,7 +184,11 @@ async def chat_endpoint(payload: dict):
                             elif etype == "executor" and _event_data.get("subtask", "").startswith("replan"):
                                 sync_q.put({"step": "replan", "goal": _event_data.get("goal", "")})
                         elif etype in ("node_thought",) and entry.get("thread_id") == thread_id:
-                            sync_q.put({"step": "node_thought", "data": entry.get("data") or {}})
+                            _t_data = entry.get("data") or {}
+                            sync_q.put({"step": "node_thought", "data": _t_data})
+                            _persist_event("thought",
+                                           content=str(_t_data.get("title") or "思考"),
+                                           meta=_t_data)
                         elif etype in ("node_start", "node_end") and entry.get("thread_id") == thread_id:
                             # 节点真实进入/退出时的实时事件（record_node_start/end 桥接），
                             # 与 llm_call 同一通道、按真实时刻排序 → 保证"▶ 开始"先于模型调用气泡。
@@ -159,10 +198,16 @@ async def chat_endpoint(payload: dict):
                                 sync_q.put({"step": "node", "name": name,
                                             "phase": "start" if etype == "node_start" else "end",
                                             "info": {}})
+                                _persist_event("node_start" if etype == "node_start" else "node_end",
+                                               content=name,
+                                               meta={"node": name})
                         elif etype == "llm_call" and entry.get("thread_id") == thread_id:
                             # 每次 LLM 调用的完整输入/输出 → 前端独立"模型调用"气泡
                             d = entry.get("data") or {}
                             sync_q.put({"step": "llm_call", "data": d})
+                            _persist_event("llm_call",
+                                           content=str(d.get("node") or "llm"),
+                                           meta=d)
 
                 try:
                     for mode, payload in _srv_cfg._GRAPH.stream(
@@ -221,11 +266,18 @@ async def chat_endpoint(payload: dict):
                                             int_list = upd if isinstance(upd, (list, tuple)) else (upd.get("__interrupt__") or ())
                                             for int_info in int_list:
                                                 val = getattr(int_info, "value", int_info) if not isinstance(int_info, dict) else int_info
+                                                q_text = val.get("question", "") if isinstance(val, dict) else str(val)
+                                                c_text = val.get("command", "") if isinstance(val, dict) else ""
+                                                m_mode = val.get("mode", "per_ask") if isinstance(val, dict) else "per_ask"
                                                 sync_q.put({"step": "approval", "data": {
-                                                    "question": val.get("question", "") if isinstance(val, dict) else str(val),
-                                                    "command": val.get("command", "") if isinstance(val, dict) else "",
-                                                    "mode": val.get("mode", "per_ask") if isinstance(val, dict) else "per_ask",
+                                                    "question": q_text,
+                                                    "command": c_text,
+                                                    "mode": m_mode,
                                                 }})
+                                                _persist_event("approval",
+                                                               content=(q_text or c_text or "审批请求")[:200],
+                                                               meta={"question": q_text, "command": c_text,
+                                                                     "mode": m_mode, "allow": None})
                                         except Exception as ex:
                                             sync_q.put({"step": "approval", "data": {"question": str(ex), "command": "", "mode": "per_ask"}})
                                         # interrupt 后 graph 暂停，本流到此结束（用户操作后走 /api/chat resume）
@@ -289,6 +341,10 @@ async def chat_endpoint(payload: dict):
                                                 if isinstance(tc_content, list):
                                                     tc_content = "".join(str(x.get("text", "")) if isinstance(x, dict) else str(x) for x in tc_content)
                                                 sync_q.put({"step": "tool", "name": tc_name, "args": str(tc_args)[:200], "phase": "end", "output_preview": str(tc_content)[:300]})
+                                                # 兜底通道落库（listener 通道未覆盖时）；_persist_event 有 2s 幂等，双写只落一条
+                                                _persist_event("tool_call", content=tc_name,
+                                                               meta={"name": tc_name, "node": node,
+                                                                     "params": tc_args, "result": str(tc_content)[:300]})
                         finally:
                             # 每次流事件后排空监听队列：工具完成事件在两次流 yield 之间到达
                             _drain_listener()
