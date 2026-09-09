@@ -63,6 +63,12 @@ def chatbot(state: State, config: RunnableConfig):
         pass
 
     if not state.get("messages"):
+        # 保持 trace 对称：节点进入即有开始，无消息直接结束也记录结束
+        try:
+            from app.trace import record_node_end
+            record_node_end(thread_id, "chatbot", "无消息")
+        except Exception:
+            pass
         return {"messages": []}
 
     last_msg = state["messages"][-1]

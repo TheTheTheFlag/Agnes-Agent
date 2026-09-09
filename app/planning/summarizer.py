@@ -10,10 +10,14 @@ from app.config import DB_PATH
 def create_summarizer_node(llm):
     def summarizer_node(state: State):
         thread_id = state.get("thread_id") or state.get("_thread_id") or "default"
+        from app.trace import record_node_start
+        record_node_start(thread_id, "summarizer")
         mm = MemoryManager(db_path=DB_PATH, thread_id=thread_id)
         # DB 唯一来源：按 thread 查当前进行中计划
         plan_meta = mm.get_task_plan_by_thread(thread_id)
         if not plan_meta:
+            from app.trace import record_node_end as _rnd0
+            _rnd0(thread_id, "summarizer", "无进行中计划")
             return {"thread_id": thread_id, "messages": state.get("messages", [])}
         tid = plan_meta["id"]
         # 标记计划 completed（真正完成）
@@ -38,8 +42,7 @@ def create_summarizer_node(llm):
             )
             # trace：记录 summarizer LLM 调用
             import time as _t
-            from app.trace import record_llm, record_node_start, record_node_end
-            record_node_start(thread_id, "summarizer")
+            from app.trace import record_llm
             _t0 = _t.time()
             _msgs = [SystemMessage(content=system_prompt),
                      HumanMessage(content=f"目标：{goal}\n结果：\n{combined}")]

@@ -65,6 +65,28 @@ class FakeGraph:
         })
 
 
+class FakeNodeOrderGraph:
+    """模拟真实时序：节点进入（record_node_start）→ LLM 调用（add_event llm_call）
+    → 节点退出（record_node_end）。用于断言 SSE 气泡顺序为 start < llm_call < end。"""
+
+    def stream(self, inputs, config, **kwargs):
+        tid = config["configurable"]["thread_id"]
+        from app.trace import record_node_start, record_node_end
+        record_node_start(tid, "chatbot")
+        add_event("llm_call", {"node": "chatbot", "input": "你好", "output": "回复", "duration_ms": 1}, tid)
+        yield ("updates", {"chatbot": {"messages": []}})
+        yield ("messages", (AIMessageChunk(content="回复"), {"langgraph_node": "chatbot", "run_id": "r1"}))
+        record_node_end(tid, "chatbot", "回复")
+        yield ("updates", {"chatbot": {"messages": [AIMessage(content="回复")]}})
+        return
+
+    def get_state(self, config):
+        tid = config["configurable"]["thread_id"]
+        return type("StateSnapshot", (), {
+            "values": {"thread_id": tid, "messages": [{"type": "human", "content": "hi"}]},
+        })
+
+
 async def _collect(payload: dict) -> list:
     """调用真实 chat_endpoint，消费流式响应，返回事件 dict 列表。"""
     resp = await chat_endpoint(payload)
@@ -139,6 +161,28 @@ class ChatToolEventsTest(unittest.TestCase):
         snap = _store._state_snapshots.get("test-tid")
         self.assertTrue(snap, "应写入 test-tid 的 state 快照")
         self.assertTrue(snap.get("messages"), "快照中 messages 应非空")
+
+    def test_node_events_ordered_by_real_timing(self):
+        """节点气泡应按真实时序排布：▶ 开始 < 模型调用 < ■ 结束（不再由 updates 补发滞后）。
+
+        背景：曾经 node start/end 由 updates 分支在节点跑完后补发，晚于节点内部
+        add_event("llm_call") 的实时事件 → 前端出现"模型调用"排在"节点开始"前。
+        修复后 start/end 走同一实时 listener 通道（app/trace.record_node_start/end 桥接），
+        本测试断言 SSE 中三类事件相对顺序正确且各只出现一次。
+        """
+        from app.server import set_graph
+        with mock.patch("app.trace._TRACE_DIR", tempfile.mkdtemp()):
+            set_graph(FakeNodeOrderGraph(), {"configurable": {"thread_id": "test-tid"}})
+            events = asyncio.run(_collect({"message": "你好", "thread_id": "test-tid"}))
+
+        starts = [i for i, e in enumerate(events) if e.get("step") == "node" and e.get("phase") == "start"]
+        ends = [i for i, e in enumerate(events) if e.get("step") == "node" and e.get("phase") == "end"]
+        llm_idx = [i for i, e in enumerate(events) if e.get("step") == "llm_call"]
+        self.assertEqual(len(starts), 1, f"节点开始气泡应恰一次: {events}")
+        self.assertEqual(len(ends), 1, f"节点结束气泡应恰一次: {events}")
+        self.assertEqual(len(llm_idx), 1, f"模型调用气泡应恰一次: {events}")
+        self.assertLess(starts[0], llm_idx[0], "▶ 开始 应排在 模型调用 之前")
+        self.assertLess(llm_idx[0], ends[0], "模型调用 应排在 ■ 结束 之前")
 
 
 if __name__ == "__main__":

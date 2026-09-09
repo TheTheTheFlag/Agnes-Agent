@@ -150,6 +150,15 @@ async def chat_endpoint(payload: dict):
                                 sync_q.put({"step": "replan", "goal": _event_data.get("goal", "")})
                         elif etype in ("node_thought",) and entry.get("thread_id") == thread_id:
                             sync_q.put({"step": "node_thought", "data": entry.get("data") or {}})
+                        elif etype in ("node_start", "node_end") and entry.get("thread_id") == thread_id:
+                            # 节点真实进入/退出时的实时事件（record_node_start/end 桥接），
+                            # 与 llm_call 同一通道、按真实时刻排序 → 保证"▶ 开始"先于模型调用气泡。
+                            d = entry.get("data") or {}
+                            name = d.get("node", "")
+                            if name:
+                                sync_q.put({"step": "node", "name": name,
+                                            "phase": "start" if etype == "node_start" else "end",
+                                            "info": {}})
                         elif etype == "llm_call" and entry.get("thread_id") == thread_id:
                             # 每次 LLM 调用的完整输入/输出 → 前端独立"模型调用"气泡
                             d = entry.get("data") or {}
@@ -221,10 +230,10 @@ async def chat_endpoint(payload: dict):
                                             sync_q.put({"step": "approval", "data": {"question": str(ex), "command": "", "mode": "per_ask"}})
                                         # interrupt 后 graph 暂停，本流到此结束（用户操作后走 /api/chat resume）
                                         break
-                                    # node 事件附带具体信息（state 不再含 task_plan 业务对象，事件不携带子任务信息；
-                                    # 前端从 events 流 + DB 重放重建）
-                                    sync_q.put({"step": "node", "name": node, "phase": "start", "info": {}})
                                     # 提取节点返回的最终 AIMessage（最可靠的"本轮最终回复"，用于兜底）
+                                    # 注：节点"▶ 开始 / ■ 结束"气泡不再在此补发——
+                                    # 已由 record_node_start/end 走实时 listener 通道（app/trace.py
+                                    # _broadcast_node_event → chat.py 监听桥），保证与 llm_call 真实时序一致。
                                     if isinstance(upd, dict) and isinstance(upd.get("messages"), list):
                                         # 先收集 AIMessage 的 tool_calls 映射（tool_call_id -> 工具名）
                                         call_names = {}
@@ -280,7 +289,6 @@ async def chat_endpoint(payload: dict):
                                                 if isinstance(tc_content, list):
                                                     tc_content = "".join(str(x.get("text", "")) if isinstance(x, dict) else str(x) for x in tc_content)
                                                 sync_q.put({"step": "tool", "name": tc_name, "args": str(tc_args)[:200], "phase": "end", "output_preview": str(tc_content)[:300]})
-                                    sync_q.put({"step": "node", "name": node, "phase": "end"})
                         finally:
                             # 每次流事件后排空监听队列：工具完成事件在两次流 yield 之间到达
                             _drain_listener()

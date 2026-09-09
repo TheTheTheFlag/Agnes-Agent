@@ -264,6 +264,7 @@ def create_executor(llm_builder, tools_list):
 
         plan = dag.get_plan_by_thread(thread_id)
         if not plan:
+            record_node_end(thread_id, "executor", "无进行中计划")
             return {"thread_id": thread_id}
 
         # 局部重规划：存在 failed 节点 → 摘出受影响子图重规划（④）

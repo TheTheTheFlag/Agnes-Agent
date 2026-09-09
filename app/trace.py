@@ -110,12 +110,33 @@ def truncate_text(text: Any, limit: int = 600) -> str:
 
 # ---- 便捷记录函数 ----
 
+def _broadcast_node_event(thread_id: str, phase: str, node: str, result_summary: str = "") -> None:
+    """把节点进入/退出实时推给前端（与 llm_call 同一 listener 通道）。
+
+    所有节点（chatbot/planner/executor/summarizer/DAG）都在 record_node_start/end
+    里调用本函数；惰性 import app.server.store 避免模块加载期循环依赖，
+    且脱离 server 环境（纯 trace 场景）时静默跳过。
+    """
+    if not thread_id or not node:
+        return
+    try:
+        from app.server.store import add_event
+        data = {"node": node}
+        if phase == "end":
+            data["result"] = truncate_text(result_summary, 300)
+        add_event(f"node_{phase}", data, thread_id)
+    except Exception:
+        pass
+
+
 def record_node_start(thread_id: str, node: str) -> None:
     add(thread_id, "node_start", {"node": node})
+    _broadcast_node_event(thread_id, "start", node)
 
 
 def record_node_end(thread_id: str, node: str, result_summary: str = "") -> None:
     add(thread_id, "node_end", {"node": node, "result": truncate_text(result_summary, 300)})
+    _broadcast_node_event(thread_id, "end", node, result_summary)
 
 
 def record_llm(thread_id: str, node: str, messages: Any, response: Any,
