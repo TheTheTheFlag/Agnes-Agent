@@ -3,3 +3,9 @@
 {"type": "llm_call", "ts": "2026-09-09T19:51:43.798", "ts_ms": 1788954703798.331, "data": {"node": "chatbot", "model": "", "duration_ms": 1527.9, "input": "[system] 当前操作系统是 Windows。\n当前时间：2026-09-09 19:51:36。\n当前工作目录：C:\\Users\\17625\\Agnes-Agent。\n所有生成的文件必须保存到交付物目录：`C:\\Users\\17625\\Agnes-Agent\\deliverables`。\n【禁止】严禁向以下核心目录/文件写入或修改：app/server/static（前端面板）、data/（数据库与配置）、.env、.model_config、.git/、pyproject.toml、uv.lock、checkpoints.db、memory.db。所有产出（代码、文档、资源）只能写入 `C:\\Users…(+6870)\n[human] 规划一下，开发一个网页版贪吃蛇\n[ai] 🚀 正在为你规划并执行：开发一个网页版贪吃蛇游戏（HTML + JavaScript + Canvas），包含基础游戏功能、得分系统、难度选择、暂停/重启等交互，并保存到 delive\n[human] 规划一下，开发一个网页版贪吃蛇游戏，要好玩", "output": ""}}
 {"type": "error", "ts": "2026-09-09T19:51:43.836", "ts_ms": 1788954703836.8362, "data": {"node": "chatbot", "message": "模型返回空内容（无 tool_calls）"}}
 {"type": "node_end", "ts": "2026-09-09T19:51:44.839", "ts_ms": 1788954704839.1128, "data": {"node": "chatbot", "result": "[模型未返回内容] 请检查模型配置或 API 额度（网关可能已耗尽配额或返回空响应）。"}}
+{"type": "node_start", "ts": "2026-09-09T19:51:45.328", "ts_ms": 1788954705328.813, "data": {"node": "planner"}}
+{"type": "node_end", "ts": "2026-09-09T19:51:45.980", "ts_ms": 1788954705980.438, "data": {"node": "planner", "result": "1 节点 DAG"}}
+{"type": "node_start", "ts": "2026-09-09T19:51:46.064", "ts_ms": 1788954706064.9004, "data": {"node": "executor"}}
+{"type": "node_end", "ts": "2026-09-09T19:52:35.438", "ts_ms": 1788954755438.5586, "data": {"node": "executor", "result": "本批 1 节点"}}
+{"type": "node_start", "ts": "2026-09-09T19:52:35.511", "ts_ms": 1788954755511.8572, "data": {"node": "summarizer"}}
+{"type": "node_end", "ts": "2026-09-09T19:52:35.558", "ts_ms": 1788954755558.069, "data": {"node": "summarizer", "result": "无进行中计划"}}
