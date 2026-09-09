@@ -154,16 +154,24 @@ class ReActLoop:
                 params = tc.get("args", {})
                 tool_id = tc.get("id", "unknown")
 
-                # 1) 安全策略拦截：补 ToolMessage（拒绝原因），response 不重复 append
-                if on_tool_before and not on_tool_before(tool_name, params):
+                # 1) 安全策略拦截：on_tool_before 返回 (allow, reason)
+                #    - True/False 旧形态也兼容
+                #    - (False, "...") 新形态：把 reason 写进 ToolMessage 让 LLM 知道怎么改
+                _gate = on_tool_before(tool_name, params) if on_tool_before else None
+                if _gate is False or (isinstance(_gate, tuple) and _gate[0] is False):
+                    _reason = _gate[1] if isinstance(_gate, tuple) and len(_gate) > 1 else "[安全策略] 该工具调用被拒绝执行"
                     if not response_appended:
                         messages.append(response)
                         response_appended = True
-                    messages.append(ToolMessage(content="[安全策略] 该工具调用被拒绝执行", tool_call_id=tool_id))
+                    messages.append(ToolMessage(content=_reason, tool_call_id=tool_id))
                     # 连续被拒 3 次 → 强制终止（LLM 反复尝试违规工具 = 纪律失控）
                     self._reject_count = getattr(self, "_reject_count", 0) + 1
                     if self._reject_count >= 3:
-                        final_answer = "[纪律] 连续 3 次工具调用被拒绝（探索/写入超限或路径违规），终止本轮。"
+                        final_answer = (
+                            f"[纪律] 连续 3 次工具调用被拒绝。"
+                            f"最近一次被拒原因: {_reason}"
+                            f"请调整参数后重试或调用 fail_node 声明无法完成。"
+                        )
                         break
                     continue
 

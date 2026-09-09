@@ -80,7 +80,10 @@ def _run_node(thread_id: str, task_plan_id: int, node: Dict, goal: str,
         f"{artifacts_context}\n"
         f"执行纪律：\n"
         f"1. 探索类工具（ls/glob/read_file/execute_command）最多 2 次，之后直接产出。\n"
-        f"2. 产物写入 deliverables 目录（或已有交付文件），内容完整且大小>0。\n"
+        f"2. 产物【必须】写入 'deliverables/xxx' 路径（例：'deliverables/snake/index.html'、"
+        f"'deliverables/snake/style.css'、'deliverables/snake/app.js'）。"
+        f"写入其他路径（app/、app/server/static/、/tmp/、根目录等）会被安全策略直接拒，"
+        f"且错误信息会明确告诉你正确路径——请收到错误后立刻改成 deliverables/ 前缀重试。\n"
         f"3. 不要重复写入同一文件，不要为凑工具调用而调用工具。\n"
         f"4. 完成后调用 complete_node 声明（files 列出实际产出路径）；只用文字不算完成。\n"
         f"5. 无法完成时调用 fail_node 声明失败（reason 写原因），不要多次重试。\n"
@@ -130,23 +133,38 @@ def _run_node(thread_id: str, task_plan_id: int, node: Dict, goal: str,
     fail_node = fail_node_tool
 
     def _on_tool_before(name, params):
+        """工具调用前置校验。返回 (allow, reason)：
+          - allow=True, reason=""     → 放行
+          - allow=False, reason="..." → 拒因，react_loop 会把它写进 ToolMessage 让 LLM 看到并改正
+        """
         if name == "execute_command":
             cmd = params.get("command", "")
             for d in ("rm -rf /", "dd ", "mkfs", "format", "shutdown"):
                 if d in cmd:
-                    return False
+                    return False, f"[安全策略] execute_command 命令 '{cmd[:80]}' 包含危险关键字 '{d}'，已被拒绝。"
         if name in _EXPLORE_TOOLS:
             if _usage["explore"] >= 2:
-                return False
+                return False, (
+                    f"[安全策略] 探索类工具（{name}）调用次数已达上限（2 次）。"
+                    f"请直接调用写文件或 execute_command 产出结果，不要再调用 read_file/glob/ls 等探索工具。"
+                )
             _usage["explore"] += 1
         if name in _WRITE_TOOLS:
-            if _usage["write"] >= 8:
-                return False
+            if _usage["write"] >= 99:
+                return False, (
+                    f"[安全策略] 写文件类工具（{name}）调用次数已达上限（99 次）。"
+                    f"请合并到更少的文件里或直接调用 complete_node 声明完成，不要再调写工具。"
+                )
             _usage["write"] += 1
             path = str(params.get("path", "") or "").replace("\\", "/")
             if not path.startswith("deliverables/"):
-                return False
-        return True
+                return False, (
+                    f"[安全策略] 写文件路径必须以 'deliverables/' 开头（产出统一归档），"
+                    f"当前路径 '{path}' 不符合。"
+                    f"请把文件路径改成 'deliverables/xxx' 形式（例如 'deliverables/snake/index.html'、"
+                    f"'deliverables/snake/style.css'、'deliverables/snake/app.js'）。"
+                )
+        return True, ""
 
     def _on_tool_after(name, params, result):
         try:
