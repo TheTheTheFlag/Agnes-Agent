@@ -314,8 +314,7 @@ def chatbot(state: State, config: RunnableConfig):
                 except Exception:
                     pass
                 break
-    if triggered_goal:
-        content = f"🚀 正在为你规划并执行：{triggered_goal[:80]}"
+    # 不再显示过渡消息"🚀 正在为你规划并执行"，直接让后续节点处理
 
     # 摘要更新（节流：最近对话新增 ≥4 条或距上次 ≥120s 才调用一次 LLM 摘要）。
     # 目的：update_summary 每次都会同步发起一次 LLM 调用，若每轮都跑，会形成

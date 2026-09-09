@@ -1134,6 +1134,13 @@ function renderHistory(msgs) {
       inner.appendChild(wrap);
       assistantWrap = null;
     } else if (m.role === "assistant") {
+      // 跳过：以"🚀 正在为你规划并执行"开头的消息是触发规划时的过渡文案，
+      // 在流式期间已经实时显示过，不需要在历史中重复显示。
+      const _isPlanningPrompt = /^🚀\s*正在为你规划并执行/.test(m.content || "");
+      if (_isPlanningPrompt) {
+        assistantWrap = null;
+        continue;
+      }
       // 跳过：同 thread 已有 llm_call 事件承载同一段文本（与前端流式播放期间显示的
       // "🧠 模型调用 → 📤 模型输出"内容一致），不重复画 Agnes 气泡。
       if (_isDupOfLlmCall(m.content)) {
