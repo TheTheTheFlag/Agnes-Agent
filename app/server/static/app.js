@@ -834,10 +834,10 @@ function handleChatEvent(evt) {
     setLiveBadge(evt.phase === "start");
     // 节点结束时应清空流式状态，避免旧气泡残留
     if (evt.phase === "end" && evt.name === "chatbot") {
-      // chatbot 节点结束后，如果已经没有流式内容，清空状态
-      if (!State.streamBuffer) {
-        State.currentAssistantEl = null;
-      }
+      // chatbot 节点结束后，立即清空状态，等待下一个节点开始
+      endStreaming();
+      State.currentAssistantEl = null;
+      State.streamBuffer = "";
     }
   } else if (step === "token") {
     // 模型输出已由 llm_call 独立气泡完整承载，这里不再逐字追加进气泡，避免重复。
