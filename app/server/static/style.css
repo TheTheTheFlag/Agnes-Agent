@@ -1668,4 +1668,41 @@ input, textarea { font-family: inherit; }
 .proc-text.collapsed .proc-body { display: none; }
 .proc-text:hover { border-left-color: var(--accent-2); }
 
+/* ==================== 独立事件气泡（节点/模型/工具/思考） ==================== */
+.evtb { }
+.evtb .evtb-head { opacity: .92; }
+.evtb .msg-label { font-size: 12px; font-weight: 700; }
+.evtb .msg-time { margin-left: 8px; }
+.evtb-meta { margin: 2px 0 4px; font-size: 11px; color: var(--text-soft); }
+.evtb-chip {
+  display: inline-block; padding: 1px 8px; margin-right: 6px;
+  border-radius: 9px; background: var(--bg-hover); color: var(--text-soft);
+  font-size: 11px; white-space: nowrap;
+}
+.evtb-llm .msg-label { color: var(--accent-2); }
+.evtb-tool .msg-label { color: var(--accent); }
+.evtb-node .msg-label { color: var(--text-soft); }
+.evtb-thought .msg-label { color: var(--text-soft); }
+.evtb-text { font-size: 13px; }
+.evt-collapse {
+  margin: 6px 0; border: 1px solid var(--border-soft); border-radius: 8px;
+  background: var(--bg-elev); overflow: hidden;
+}
+.evt-collapse > summary {
+  cursor: pointer; padding: 6px 10px; font-size: 12px; color: var(--accent-2);
+  user-select: none; list-style: none;
+}
+.evt-collapse > summary::-webkit-details-marker { display: none; }
+.evt-collapse > summary::before { content: "▸ "; }
+.evt-collapse[open] > summary::before { content: "▾ "; }
+.evt-collapse > .evt-body {
+  padding: 8px 10px; border-top: 1px dashed var(--border-soft);
+  max-height: 320px; overflow: auto;
+}
+.evt-pre {
+  white-space: pre-wrap; word-break: break-word;
+  font-family: var(--mono, monospace); font-size: 12px; line-height: 1.5;
+  margin: 0; color: var(--text);
+}
+
 /* 规划执行 DAG 面板（vis-network）样式已移除——改为上方动态待办列表展示节点状态 */

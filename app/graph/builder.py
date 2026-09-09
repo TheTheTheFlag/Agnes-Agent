@@ -205,7 +205,7 @@ def chatbot(state: State, config: RunnableConfig):
         except Exception:
             pass
         add_log_entry("info", f"工具: {name}", {"params": params, "result_preview": str(result)[:200]})
-        add_event("tool_call", {"name": name, "params": params}, thread_id)
+        add_event("tool_call", {"name": name, "params": params, "result": str(result)}, thread_id)
         # trace：chatbot 节点工具调用
         try:
             from app.trace import record_tool

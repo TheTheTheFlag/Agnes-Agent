@@ -6,6 +6,50 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 from openai import RateLimitError
 from app.server import add_log_entry, add_event
 
+
+def _llm_msg_to_text(m):
+    """把单条 message 序列化为可读文本（content 可能为 str/list/None）。"""
+    role = getattr(m, "type", None) or (m.get("type") if isinstance(m, dict) else "?")
+    raw = None
+    if isinstance(m, dict):
+        raw = m.get("content")
+    else:
+        raw = getattr(m, "content", "")
+    if isinstance(raw, list):
+        parts = []
+        for x in raw:
+            if isinstance(x, dict):
+                parts.append(str(x.get("text", "") or ""))
+            else:
+                parts.append(str(x))
+        content = "".join(parts)
+    else:
+        content = str(raw or "")
+    # 补充工具调用信息，便于展示"模型调了什么工具"
+    tool_calls = None
+    if isinstance(m, dict):
+        tool_calls = m.get("tool_calls")
+    else:
+        tool_calls = getattr(m, "tool_calls", None)
+    if tool_calls:
+        try:
+            content += ("\n[tool_calls] " + json.dumps(
+                [{"name": tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", ""),
+                  "args": (tc.get("args") if isinstance(tc, dict) else getattr(tc, "args", {})) or {}}
+                 for tc in tool_calls], ensure_ascii=False))
+        except Exception:
+            pass
+    return f"--- {role} ---\n{content}\n"
+
+
+def _llm_messages_to_text(messages):
+    """把所有输入消息序列化为一段完整文本（含 system/user/history），供前端独立气泡展示。"""
+    try:
+        return "\n".join(_llm_msg_to_text(m) for m in messages)
+    except Exception:
+        return ""
+
+
 class ReActLoop:
     def __init__(self, llm_with_tools, max_iterations: int = 15, node: str = "agent",
                  require_final_marker: bool = False, terminate_tools: set = None):
@@ -291,6 +335,16 @@ class ReActLoop:
             record_llm(thread_id, getattr(self, "_trace_node", "llm"),
                        messages, resp, duration_ms=(time.time() - _t0) * 1000,
                        model=getattr(getattr(self, "llm_with_tools", None), "model_name", "") or "")
+            # 把本次 LLM 调用的完整输入/输出推到前端，作为独立气泡展示
+            try:
+                add_event("llm_call", {
+                    "node": getattr(self, "_trace_node", "llm"),
+                    "input": _llm_messages_to_text(messages),
+                    "output": _llm_messages_to_text([resp]),
+                    "duration_ms": int((time.time() - _t0) * 1000),
+                }, thread_id)
+            except Exception:
+                pass
             return resp
         except Exception as e:
             from app.trace import record_error

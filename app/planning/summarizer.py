@@ -45,6 +45,17 @@ def create_summarizer_node(llm):
                      HumanMessage(content=f"目标：{goal}\n结果：\n{combined}")]
             response = llm.invoke(_msgs)
             record_llm(thread_id, "summarizer", _msgs, response, duration_ms=(_t.time() - _t0) * 1000)
+            # 推前端：summarizer 的模型输入/输出作为独立气泡
+            try:
+                from app.planning.react_loop import _llm_messages_to_text as _llm2txt
+                add_event("llm_call", {
+                    "node": "summarizer",
+                    "input": _llm2txt(_msgs),
+                    "output": _llm2txt([response]),
+                    "duration_ms": int((_t.time() - _t0) * 1000),
+                }, thread_id)
+            except Exception:
+                pass
             summary = response.content
 
         from app.trace import record_node_end as _rnd

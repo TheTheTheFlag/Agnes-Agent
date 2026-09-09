@@ -53,11 +53,22 @@ def _extract_goal(state: State) -> str:
     return "执行当前请求"
 
 
-def _ask_graph(llm, goal: str) -> Dict:
-    resp = llm.invoke([
-        SystemMessage(content=_SYS),
-        HumanMessage(content=f"目标：{goal}"),
-    ])
+def _ask_graph(llm, goal: str, thread_id: str = "default") -> Dict:
+    import time as _t
+    from app.server import add_event as _a_event
+    from app.planning.react_loop import _llm_messages_to_text as _llm2txt
+    _msgs = [SystemMessage(content=_SYS), HumanMessage(content=f"目标：{goal}")]
+    _t0 = _t.time()
+    resp = llm.invoke(_msgs)
+    try:
+        _a_event("llm_call", {
+            "node": "planner",
+            "input": _llm2txt(_msgs),
+            "output": _llm2txt([resp]),
+            "duration_ms": int((_t.time() - _t0) * 1000),
+        }, thread_id)
+    except Exception:
+        pass
     raw = resp.content.strip()
     if raw.startswith("```json"):
         raw = raw[7:].strip()
@@ -78,7 +89,7 @@ def create_dag_planner_node(llm):
 
         nodes, edges, warnings = [], [], []
         try:
-            data = _ask_graph(llm, goal)
+            data = _ask_graph(llm, goal, thread_id)
             nodes, edges, warnings = core.normalize_nodes(data.get("nodes", []), data.get("edges", []))
         except Exception as e:
             add_log_entry("warning", f"[DAG-Planner] 结构化解析失败({e})，降级为单节点计划")
@@ -88,7 +99,7 @@ def create_dag_planner_node(llm):
         if cycle:
             add_log_entry("warning", f"[DAG-Planner] 检测到环 {cycle}，请求重规划")
             try:
-                data2 = _ask_graph(llm, goal + "（注意：不能有依赖循环）")
+                data2 = _ask_graph(llm, goal + "（注意：不能有依赖循环）", thread_id)
                 nodes, edges, warnings = core.normalize_nodes(data2.get("nodes", []), data2.get("edges", []))
                 if core.detect_cycle(nodes, edges):
                     nodes, edges = [{"id": "1", "description": f"执行目标：{goal}"}], []

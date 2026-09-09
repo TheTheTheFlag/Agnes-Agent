@@ -174,7 +174,7 @@ def _run_node(thread_id: str, task_plan_id: int, node: Dict, goal: str,
             pass
         if name in ("write_file", "edit_file") and str(params.get("path", "") or ""):
             _written.append(str(params["path"]).replace("\\", "/"))
-        add_event("tool_call", {"name": name, "params": params, "node": node_id}, thread_id)
+        add_event("tool_call", {"name": name, "params": params, "node": node_id, "result": str(result)}, thread_id)
         on_event(None, None)  # no-op keep signature
 
     def _interrupt_handler(name, params):
@@ -455,7 +455,19 @@ def _do_local_replan(plan: Dict, failed_ids: List[str], dag: DAGStorage,
     ]
     llm = llm_builder[0]
     try:
+        import time as _t
+        from app.planning.react_loop import _llm_messages_to_text as _llm2txt
+        _t0 = _t.time()
         resp = llm.invoke(prompt_msgs)
+        try:
+            add_event("llm_call", {
+                "node": "executor(replan)",
+                "input": _llm2txt(prompt_msgs),
+                "output": _llm2txt([resp]),
+                "duration_ms": int((_t.time() - _t0) * 1000),
+            }, thread_id)
+        except Exception:
+            pass
         raw = resp.content.strip()
         if raw.startswith("```json"):
             raw = raw[7:].strip()

@@ -123,8 +123,12 @@ async def chat_endpoint(payload: dict):
                             _pending_preview["text"] = ""
                             if name:
                                 sync_q.put({"step": "tool", "name": name,
-                                            "args": str(params)[:200], "phase": "end",
-                                            "output_preview": preview})
+                                            "args": str(params)[:500],
+                                            "params": params,
+                                            "result": data.get("result") or preview or "",
+                                            "node": data.get("node") or "",
+                                            "phase": "end",
+                                            "output_preview": data.get("result") or preview or ""})
                         elif etype == "log" and str(entry.get("message", "")).startswith("工具: "):
                             # on_tool_after 里 add_log_entry 先于 add_event 调用，带 result_preview
                             d = entry.get("data") or {}
@@ -146,6 +150,10 @@ async def chat_endpoint(payload: dict):
                                 sync_q.put({"step": "replan", "goal": _event_data.get("goal", "")})
                         elif etype in ("node_thought",) and entry.get("thread_id") == thread_id:
                             sync_q.put({"step": "node_thought", "data": entry.get("data") or {}})
+                        elif etype == "llm_call" and entry.get("thread_id") == thread_id:
+                            # 每次 LLM 调用的完整输入/输出 → 前端独立"模型调用"气泡
+                            d = entry.get("data") or {}
+                            sync_q.put({"step": "llm_call", "data": d})
 
                 try:
                     for mode, payload in _srv_cfg._GRAPH.stream(

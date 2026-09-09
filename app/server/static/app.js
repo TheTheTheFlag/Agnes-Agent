@@ -729,43 +729,112 @@ function endStreaming(finalText) {
   scrollToBottom();
 }
 
+/* ==================== 独立事件气泡渲染（节点/模型/工具/思考） ==================== */
+// 把任意长文本包进 <details>，超长默认收起、点击展开查看全部。
+function wrapCollapsible(label, bodyHtml, startOpen) {
+  const openAttr = startOpen ? " open" : "";
+  return `<details class="evt-collapse"${openAttr}><summary>${label}</summary><div class="evt-body">${bodyHtml}</div></details>`;
+}
+
+// 通用独立气泡：icon 图标 + title 标题行 + (可选 meta) + body（可能含可展开内容）
+function addEventBubble(kind, icon, title, metaHtml, bodyHtml) {
+  const inner = messagesInner();
+  const wrap = document.createElement("div");
+  wrap.className = `msg assistant evtb evtb-${kind}`;
+  const now = new Date().toISOString();
+  wrap.innerHTML = `
+    <div class="msg-body">
+      <div class="msg-head evtb-head">
+        <span class="msg-avatar">A</span>
+        <span class="msg-label">${icon} ${escapeHtml(title)}</span>
+        <span class="msg-time">${fmtClock(now)}</span>
+      </div>
+      ${metaHtml ? `<div class="evtb-meta">${metaHtml}</div>` : ""}
+      <div class="msg-text evtb-text">${bodyHtml || ""}</div>
+    </div>`;
+  inner.appendChild(wrap);
+  scrollToBottom();
+  return wrap;
+}
+
+// 把对象安全转成可读多行文本（用于展示参数/结果）
+function prettyText(obj) {
+  if (obj == null) return "";
+  if (typeof obj === "string") return obj;
+  try {
+    return typeof obj === "object" ? JSON.stringify(obj, null, 2) : String(obj);
+  } catch (e) { return String(obj); }
+}
+
+// 节点变化气泡
+function renderNodeEvent(evt) {
+  const name = evt.name || "";
+  const phase = evt.phase === "start" ? "▶ 开始" : "■ 结束";
+  addEventBubble("node", "🧩", `节点 ${name} ${phase}`, "", "");
+}
+
+// 模型调用气泡：输入（可展开完整）+ 输出（可展开完整）+ 耗时
+function renderLlmCall(data) {
+  const node = data.node || "";
+  const duration = data.duration_ms != null ? ` · ${data.duration_ms}ms` : "";
+  addEventBubble("llm", "🧠", `模型调用(${node})${duration}`,
+    `<span class="evtb-chip">输入 ${(data.input || "").length} 字符 · 输出 ${(data.output || "").length} 字符</span>`,
+    wrapCollapsible("📥 模型输入（点击展开/收起）", `<pre class="evt-pre">${escapeHtml(data.input || "")}</pre>`, false) +
+    wrapCollapsible("📤 模型输出（点击展开/收起）", `<pre class="evt-pre">${escapeHtml(data.output || "")}</pre>`, false));
+}
+
+// 工具调用气泡：工具名 + 参数 + 结果（可展开完整）
+function renderToolEvent(evt) {
+  const name = evt.name || "tool";
+  const node = evt.node ? ` · 子任务 ${evt.node}` : "";
+  const argsText = prettyText(evt.params != null ? evt.params : evt.args);
+  const resultText = evt.result != null ? evt.result : (evt.output_preview || "");
+  addEventBubble("tool", "🔧", `工具 ${name}${node}`, "",
+    wrapCollapsible("输入参数（点击展开/收起）", `<pre class="evt-pre">${escapeHtml(argsText)}</pre>`, false) +
+    wrapCollapsible("执行结果（点击展开/收起）", `<pre class="evt-pre">${escapeHtml(String(resultText))}</pre>`, false));
+}
+
+// 节点思考气泡（planner/executor/summarizer 的 node_thought）
+function renderThoughtEvent(data) {
+  const role = data.role || "";
+  const title = data.title || "思考";
+  const text = data.text || "";
+  addEventBubble("thought", "💭", String(title),
+    `<span class="evtb-chip">${escapeHtml(String(role))}</span>`,
+    wrapCollapsible("内容（点击展开/收起）", `<pre class="evt-pre">${escapeHtml(String(text))}</pre>`, false));
+}
+
 /* ==================== 对话流（SSE /api/chat） ==================== */
 function handleChatEvent(evt) {
   const step = evt.step;
   if (step === "node") {
-    // 节点流转：chatbot start 表示 LLM 开始生成
-    if (evt.phase === "start" && evt.name === "chatbot" && !State.currentAssistantEl) {
-      State.currentAssistantEl = addAssistantBubble("");
-    } else if (evt.phase === "end") {
-      // 节点结束：收尾当前气泡。否则 planner/executor 的 token 会持续堆进同一个气泡
-      // （表现为规划 JSON 与执行文本连成一大段乱码）
-      // 关键：chatbot 节点的 end 不在这里收尾——它可能是 interrupt 触发的"挂起"，
-      // 也可能是 done 的"完成"，两种情况都由后续 done/error 事件统一收尾。
-      // 只有 planner/executor 节点的 end 才需要立即收尾（它们的 token 不会再来）。
-      if (evt.name !== "chatbot") {
-        endStreaming();
-      }
-    }
+    // 节点变化 → 独立气泡（每个节点的 start/end 都展示）
+    renderNodeEvent(evt);
     setLiveBadge(evt.phase === "start");
   } else if (step === "token") {
-    appendStreamToken(evt.text || "");
+    // 模型输出已由 llm_call 独立气泡完整承载，这里不再逐字追加进气泡，避免重复。
+    // 仅更新顶栏 liveStatus 的活跃状态（保持"运行中"指示）。
+    // （保留空分支，避免未知 step 落入末尾静默逻辑之外的路径；token 本身无需进一步处理）
+  } else if (step === "llm_call") {
+    // 每次 LLM 调用的完整输入/输出 → 独立"模型调用"气泡（可点击展开全部）
+    renderLlmCall(evt.data || {});
+  } else if (step === "node_thought") {
+    // 节点思考（planner/executor/summarizer 的 node_thought）→ 独立气泡
+    renderThoughtEvent((evt.data) || {});
   } else if (step === "tool_chunk" || step === "tool") {
-    // 工具调用不在对话气泡里创建卡片（避免干扰聊天内容），只在发送框上方的
-    // 状态行实时显示当前工具 name + args；需要审批时由 approval 事件弹出审批卡片。
-    // 网关把工具调用增量按 chunk 投递：首个 chunk 带 name，后续 chunk 只有 args 片段
-    //（JSON 片段如 '{'、'limit'、': 5'…），这里按序拼接，实时刷新状态行。
+    // 工具调用 → 独立气泡（参数 + 结果，可展开）；同时更新顶栏实时状态行
     if (evt.name) {
       State.liveToolName = evt.name;
       State.liveArgs = evt.args || "";
       setLiveStatus(State.liveToolName, State.liveArgs);
-      // 工具轮确认：把刚才流式输出的文本折叠为"思考过程"段（是执行工具前的过程话语，不是最终回答）
-      foldToolRoundText();
     } else if (step === "tool_chunk" && State.liveToolName) {
       State.liveArgs = (State.liveArgs || "") + (evt.args || "");
       setLiveStatus(State.liveToolName, State.liveArgs);
     }
     if (step === "tool" && evt.phase === "end" && evt.name) {
       setLiveStatus(evt.name, evt.args || "");
+      // 工具执行完成 → 独立工具气泡展示输入输出
+      renderToolEvent(evt);
     }
   } else if (step === "approval") {
     renderApprovalCard(evt.data || {});
