@@ -117,16 +117,21 @@ def sanitize_messages(messages):
     """（幂等）发送给 LLM 前的结构清洗：
       1. 丢弃孤儿 ToolMessage（前方无对应 assistant tool_calls）；
       2. 丢弃"带 tool_calls 却无 ToolMessage 收尾"的半截 assistant 残块（截断/压缩产物）；
-      3. 序列不以 tool 消息 / 半截 tool_calls assistant 结尾（OpenAI 兼容 API 禁止）。
+      3. 结尾清理只针对"真正孤儿"：末尾"从未被回填 tool_calls"的 assistant 残块删除；
+         已配好对的末尾 ToolMessage 必须保留——那是 ReActLoop 工具执行后、下一轮
+         LLM 调用前的合法中间态。删掉它会留下孤儿 assistant(tool_calls)（尤其当
+         assistant 带正文时只删 ToolMessage 不删 assistant）→ 网关 400。
     结构正常的历史消息原样保留。"""
     out = []
     pending = set()  # 期待被 ToolMessage 回填的 assistant tool_call id
+    matched_tool_ids = set()  # 已被 ToolMessage 成功回填的 tool_call id
     for m in messages:
         if _is_tool_message(m):
             tid = getattr(m, "tool_call_id", None)
             if tid is not None and str(tid) in pending:
                 out.append(m)
                 pending.discard(str(tid))
+                matched_tool_ids.add(str(tid))
             # 无主/重复 tool 消息 → 丢弃
             continue
         if pending:
@@ -145,11 +150,20 @@ def sanitize_messages(messages):
                     pending.add(str(i))
         else:
             pending = set()
-    # 结尾收尾：不得以 tool 消息、或"挂了未回填 tool_calls 且无正文"的 assistant 残块结束
-    while out and (_is_tool_message(out[-1])
-                   or (_is_ai_message(out[-1]) and getattr(out[-1], "tool_calls", None)
-                       and not _message_text(out[-1]).strip())):
-        out.pop()
+    # 结尾收尾：仅清理"真正孤儿"结尾。
+    # out 里的 ToolMessage 都在主循环中配过对（无主的已被丢弃），因此末尾若为 tool 消息
+    # 就是合法中间态，必须保留——不能像旧逻辑那样一律删掉（会把配好对的 ToolMessage 删除，
+    # 使前面的 assistant(tool_calls) 变孤儿 → 网关 400）。
+    if out and _is_ai_message(out[-1]) and getattr(out[-1], "tool_calls", None):
+        ids = set()
+        for tc in out[-1].tool_calls:
+            i = tc.get("id") or tc.get("tool_call_id") if isinstance(tc, dict) else getattr(tc, "id", None)
+            if i is not None:
+                ids.add(str(i))
+        # 末尾 assistant 带 tool_calls 但从未被回填（截断/压缩残块）→ 整体删除；
+        # 已全部回填（理论上不会以 tool_calls 结尾，防御）→ 保留
+        if ids and not ids.issubset(matched_tool_ids):
+            out.pop()
     return out
 
 

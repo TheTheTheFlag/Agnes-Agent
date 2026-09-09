@@ -82,6 +82,31 @@ class SanitizeTest(unittest.TestCase):
         out = sanitize_messages([H("q1"), T("c0"), A("ok"), H("q2")])
         self.assertEqual(len(out), 3)
 
+    def test_keeps_complete_tool_round_at_end(self):
+        """回归：配对完整、以 ToolMessage 结尾的工具轮次必须原样保留。
+
+        这是 ReActLoop 工具执行后、下一轮 LLM 调用前的真实消息形态。
+        旧实现收尾逻辑把末尾 ToolMessage 一律删掉 → assistant(tool_calls) 成孤儿
+        → 网关 400 "must be followed by tool messages responding to each tool_call_id"。
+        """
+        # 无正文 assistant 形态（工具调用前模型未输出文本）
+        msgs = [H("q1"), AT("c1"), T("c1")]
+        out = sanitize_messages(msgs)
+        self.assertEqual(len(out), 3, f"配对完整的工具轮次被误删: {out}")
+        self.assertIsInstance(out[-1], ToolMessage)
+
+    def test_keeps_complete_tool_round_with_text_at_end(self):
+        """回归：assistant 带正文（"稍等，我查一下…"）+ tool_calls + ToolMessage 的结尾形态。
+
+        该形态与上一用例等价，只是 assistant 含文本——旧实现收尾时只删 ToolMessage
+        而保留有正文的 assistant(tool_calls) → 孤儿 tool_calls → 400。
+        """
+        msgs = [H("q1"), AT("c1", text="稍等，我先查一下"), T("c1")]
+        out = sanitize_messages(msgs)
+        self.assertEqual(len(out), 3, f"有正文的完整工具轮次被误删: {out}")
+        self.assertEqual(out[1].tool_calls[0]["id"], "c1")
+        self.assertIsInstance(out[-1], ToolMessage)
+
 
 class TrimTurnsTest(unittest.TestCase):
     def test_keeps_recent_full_turns_with_tool_pair(self):
