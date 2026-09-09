@@ -832,6 +832,13 @@ function handleChatEvent(evt) {
     // 节点变化 → 独立气泡（每个节点的 start/end 都展示）
     renderNodeEvent(evt);
     setLiveBadge(evt.phase === "start");
+    // 节点结束时应清空流式状态，避免旧气泡残留
+    if (evt.phase === "end" && evt.name === "chatbot") {
+      // chatbot 节点结束后，如果已经没有流式内容，清空状态
+      if (!State.streamBuffer) {
+        State.currentAssistantEl = null;
+      }
+    }
   } else if (step === "token") {
     // 模型输出已由 llm_call 独立气泡完整承载，这里不再逐字追加进气泡，避免重复。
     // 仅更新顶栏 liveStatus 的活跃状态（保持"运行中"指示）。
