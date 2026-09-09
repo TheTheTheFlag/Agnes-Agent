@@ -308,7 +308,7 @@ class ReActLoop:
                     # 合并到 state）；改读 self._captured_pending_plan（在 _execute_tool 后捕获）。
                     if self._captured_pending_plan:
                         return {
-                            "final_answer": "已提交规划请求，进入规划流程。",
+                            "final_answer": "",  # 不显示过渡消息，直接让后续节点处理
                             "iteration_count": iteration,
                             "pending_plan": self._captured_pending_plan,
                         }

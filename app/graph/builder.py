@@ -299,8 +299,7 @@ def chatbot(state: State, config: RunnableConfig):
 
     content = re.sub(r'<tool_call>.*?</tool_call>', '', content, flags=re.DOTALL | re.IGNORECASE).strip()
     content = re.sub(r'<tool_calls>.*?</tool_calls>', '', content, flags=re.DOTALL | re.IGNORECASE).strip()
-    if not content:
-        content = "已处理完毕。"
+    # 不再设置默认内容"已处理完毕。"，让空内容直接触发规划跳转
 
     # 检测规划触发（两种来源，结果等价）：
     # 1) ReActLoop 从工具返回的 Command 中捕获的 pending_plan（最可靠，工具直接告诉 state）
