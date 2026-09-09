@@ -1,0 +1,109 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+    min-height: 100vh;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    color: #fff;
+}
+
+.game-container {
+    text-align: center;
+    padding: 20px;
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: 20px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+    backdrop-filter: blur(10px);
+}
+
+h1 {
+    margin-bottom: 20px;
+    font-size: 2.5rem;
+    text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
+}
+
+.score-board {
+    display: flex;
+    justify-content: space-around;
+    margin-bottom: 20px;
+    font-size: 1.2rem;
+}
+
+.score-board span {
+    background: rgba(255, 255, 255, 0.1);
+    padding: 10px 20px;
+    border-radius: 10px;
+}
+
+#gameCanvas {
+    border: 3px solid #4ecca3;
+    border-radius: 10px;
+    background: #0f0f23;
+    box-shadow: 0 0 20px rgba(78, 204, 163, 0.3);
+}
+
+.controls {
+    margin-top: 20px;
+    display: flex;
+    gap: 10px;
+    justify-content: center;
+}
+
+.controls button {
+    padding: 12px 24px;
+    font-size: 1rem;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    font-weight: bold;
+}
+
+#startBtn {
+    background: linear-gradient(135deg, #4ecca3, #45b393);
+    color: #fff;
+}
+
+#startBtn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 5px 15px rgba(78, 204, 163, 0.4);
+}
+
+#pauseBtn {
+    background: linear-gradient(135deg, #f9ca24, #f0932b);
+    color: #fff;
+}
+
+#pauseBtn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 5px 15px rgba(249, 202, 36, 0.4);
+}
+
+#resetBtn {
+    background: linear-gradient(135deg, #6c5ce7, #a29bfe);
+    color: #fff;
+}
+
+#resetBtn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 5px 15px rgba(108, 92, 231, 0.4);
+}
+
+.instructions {
+    margin-top: 20px;
+    padding: 15px;
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: 10px;
+}
+
+.instructions p {
+    margin: 5px 0;
+    color: #aaa;
+}

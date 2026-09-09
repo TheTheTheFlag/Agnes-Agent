@@ -143,9 +143,9 @@ def _run_node(thread_id: str, task_plan_id: int, node: Dict, goal: str,
                 if d in cmd:
                     return False, f"[安全策略] execute_command 命令 '{cmd[:80]}' 包含危险关键字 '{d}'，已被拒绝。"
         if name in _EXPLORE_TOOLS:
-            if _usage["explore"] >= 2:
+            if _usage["explore"] >= 99:
                 return False, (
-                    f"[安全策略] 探索类工具（{name}）调用次数已达上限（2 次）。"
+                    f"[安全策略] 探索类工具（{name}）调用次数已达上限（99 次）。"
                     f"请直接调用写文件或 execute_command 产出结果，不要再调用 read_file/glob/ls 等探索工具。"
                 )
             _usage["explore"] += 1
@@ -392,6 +392,35 @@ def _do_local_replan(plan: Dict, failed_ids: List[str], dag: DAGStorage,
                 affected.add(e["to"])
                 changed = True
 
+    # 扩展 C：失败节点的所有"前驱"（祖先）若其产物在失败节点上有依赖，父也并入 affected。
+    # 理由：如果 LLM 不知道某个"前驱"产物的具体值，LLM 重生时可能复用旧值但实际旧值已陈旧。
+    # 保守做法：把这些"产物可能已过时"的祖先也丢给 LLM，让它自己决定是否重做。
+    ancestors = set()
+    changed = True
+    while changed:
+        changed = False
+        for e in edges:
+            if e["to"] in affected and not e.get("soft") and e["from"] not in affected and e["from"] not in ancestors:
+                ancestors.add(e["from"])
+                changed = True
+    # 排除已成功且被"保留"的节点——它们产物可用；但失败/skipped 的祖先要纳入
+    new_ancestors = set()
+    for aid in ancestors:
+        st = node_map.get(aid, {}).get("status")
+        if st in (None, core.STATUS_PENDING, core.STATUS_RUNNING, core.STATUS_FAILED):
+            new_ancestors.add(aid)
+    # 不动 success 祖先（产物已锁定，能继续用）；只把 pending/running/failed 祖先纳入
+    if new_ancestors:
+        affected.update(new_ancestors)
+        # 再传播一遍（这些祖先可能又有强依赖后继）
+        changed = True
+        while changed:
+            changed = False
+            for e in edges:
+                if e["from"] in affected and not e.get("soft") and e["to"] not in affected:
+                    affected.add(e["to"])
+                    changed = True
+
     # 保留已完成部分（success/skipped 节点 + 非受影响节点）
     kept = [n for n in node_map.values() if n["id"] not in affected and n["status"] in
             (core.STATUS_SUCCESS, core.STATUS_SKIPPED)]
@@ -403,8 +432,26 @@ def _do_local_replan(plan: Dict, failed_ids: List[str], dag: DAGStorage,
                              for n in kept[:20])
 
     prompt_msgs = [
-        SystemMessage(content="你是 DAG 局部重规划器。请把下方受影响的子图重新拆成一批新节点（id 用 a1,a2... 避免冲突）。输出 JSON 对象：{\"nodes\":[{\"id\":\"a1\",\"description\":\"...\"}],\"edges\":[{\"from\":\"x\",\"to\":\"y\",\"soft\":false}]}。软依赖节点可把 soft 置 true。"),
-        HumanMessage(content=f"原目标：{goal}\n需要重规划的子图（这些节点失败）：\n{failed_desc}\n\n已完成（锁定不能改）：\n{done_context or '（无）'}\n\n请只重规划受影响部分，输出新的 nodes+edges。"),
+        SystemMessage(content=(
+            "你是 DAG 局部重规划器。请把下方'需要重规划的子图'重新拆成新节点（id 用 a1,a2... 避免冲突），"
+            "覆盖所有失败节点和它们的后继。\n"
+            "【硬性输出要求】\n"
+            "1. 新节点数 ≥ 失败节点数（每个失败节点必须有一个对应新节点来替代）\n"
+            "2. 保持拓扑依赖闭包完整：被标 'skipped'（局部重规划替换）的旧节点，如果它有'后继'指向尚未完成的任务，"
+            "你必须在 edges 里给新节点搭出同样的依赖关系\n"
+            "3. 显式标记：哪些新节点'集成/消费'了已成功节点的产物（写在 description 里）\n"
+            "4. 软依赖节点可把 soft 置 true\n"
+            "输出 JSON 对象: {\"nodes\":[{\"id\":\"a1\",\"description\":\"...\"}],"
+            "\"edges\":[{\"from\":\"x\",\"to\":\"y\",\"soft\":false}]}。"
+        )),
+        HumanMessage(content=(
+            f"原目标：{goal}\n"
+            f"需要重规划的子图（这些节点失败）：\n{failed_desc}\n\n"
+            f"已被局部重规划替换（skipped）的旧节点：{', '.join(sorted(affected)) or '（无）'}\n"
+            f"已完成（锁定不能改）：\n{done_context or '（无）'}\n\n"
+            f"请只重规划受影响部分，输出新的 nodes+edges。"
+            f"务必保证：每个失败节点都有新节点替代，且新子图与已成功节点的对接关系在 edges 里写明。"
+        )),
     ]
     llm = llm_builder[0]
     try:
