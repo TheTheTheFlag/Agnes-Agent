@@ -5,3 +5,17 @@
 {"type": "llm_call", "ts": "2026-09-09T08:33:41.904", "ts_ms": 1788914021904.8325, "data": {"node": "chatbot", "model": "", "duration_ms": 2110.2, "input": "[system] 当前操作系统是 Windows。\n当前时间：2026-09-09 08:33:39。\n当前工作目录：C:\\Users\\17625\\Agnes-Agent。\n所有生成的文件必须保存到交付物目录：`C:\\Users\\17625\\Agnes-Agent\\deliverables`。\n【禁止】严禁向以下核心目录/文件写入或修改：app/server/static（前端面板）、data/（数据库与配置）、.env、.model_config、.git/、pyproject.toml、uv.lock、checkpoints.db、memory.db。所有产出（代码、文档、资源）只能写入 `C:\\Users…(+6690)\n[human] 你好\n[ai] 你好呀，旅行者！派蒙在这里～有什么需要帮忙的吗？无论是查资料、整理文件，还是原神相关的问题，随时说一声就行！\n[human] 规划一下，开发一个网页版贪吃蛇游戏", "output": ""}}
 {"type": "tool_call", "ts": "2026-09-09T08:33:41.924", "ts_ms": 1788914021924.7002, "data": {"node": "chatbot", "name": "request_planning", "params": "{\"goal\": \"开发一个网页版贪吃蛇游戏\"}", "result": "\"Command(update={'messages': [ToolMessage(content='已接收规划请求，目标：开发一个网页版贪吃蛇游戏', tool_call_id='call_function_bomxlboqfcgl_1')], 'pending_plan': '开发一个网页版贪吃蛇游戏'})\"", "duration_ms": 0.0}}
 {"type": "node_end", "ts": "2026-09-09T08:33:41.935", "ts_ms": 1788914021935.4604, "data": {"node": "chatbot", "result": "🚀 正在为你规划并执行：开发一个网页版贪吃蛇游戏"}}
+{"type": "node_start", "ts": "2026-09-09T08:33:42.173", "ts_ms": 1788914022173.5295, "data": {"node": "planner"}}
+{"type": "node_end", "ts": "2026-09-09T08:34:04.733", "ts_ms": 1788914044733.3203, "data": {"node": "planner", "result": "7 节点 DAG"}}
+{"type": "node_start", "ts": "2026-09-09T08:34:04.736", "ts_ms": 1788914044736.718, "data": {"node": "executor"}}
+{"type": "node_end", "ts": "2026-09-09T08:34:55.316", "ts_ms": 1788914095316.6335, "data": {"node": "executor", "result": "本批 2 节点"}}
+{"type": "node_start", "ts": "2026-09-09T08:34:55.364", "ts_ms": 1788914095364.983, "data": {"node": "executor"}}
+{"type": "node_end", "ts": "2026-09-09T08:37:17.332", "ts_ms": 1788914237332.001, "data": {"node": "executor", "result": "本批 1 节点"}}
+{"type": "node_start", "ts": "2026-09-09T08:37:17.381", "ts_ms": 1788914237381.5305, "data": {"node": "executor"}}
+{"type": "node_end", "ts": "2026-09-09T08:38:30.381", "ts_ms": 1788914310381.1404, "data": {"node": "executor", "result": "本批 1 节点"}}
+{"type": "node_start", "ts": "2026-09-09T08:38:30.415", "ts_ms": 1788914310415.0403, "data": {"node": "executor"}}
+{"type": "node_end", "ts": "2026-09-09T08:39:01.056", "ts_ms": 1788914341056.6218, "data": {"node": "executor", "result": "本批 1 节点"}}
+{"type": "node_start", "ts": "2026-09-09T08:39:01.091", "ts_ms": 1788914341091.409, "data": {"node": "executor"}}
+{"type": "node_end", "ts": "2026-09-09T08:39:42.052", "ts_ms": 1788914382052.363, "data": {"node": "executor", "result": "本批 1 节点"}}
+{"type": "node_start", "ts": "2026-09-09T08:39:42.090", "ts_ms": 1788914382090.2222, "data": {"node": "executor"}}
+{"type": "node_end", "ts": "2026-09-09T08:40:14.077", "ts_ms": 1788914414077.753, "data": {"node": "executor", "result": "本批 1 节点"}}

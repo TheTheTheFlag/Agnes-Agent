@@ -29,17 +29,75 @@ h1 {
     text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
 }
 
+/* ==================== 分数面板样式 ==================== */
 .score-board {
     display: flex;
     justify-content: space-around;
     margin-bottom: 20px;
     font-size: 1.2rem;
+    gap: 20px;
 }
 
 .score-board span {
-    background: rgba(255, 255, 255, 0.1);
-    padding: 10px 20px;
-    border-radius: 10px;
+    position: relative;
+    background: linear-gradient(145deg, rgba(255, 255, 255, 0.15), rgba(255, 255, 255, 0.05));
+    padding: 12px 25px;
+    border-radius: 15px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    overflow: hidden;
+    transition: all 0.3s ease;
+}
+
+.score-board span::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -100%;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
+    transition: left 0.5s ease;
+}
+
+.score-board span:hover::before {
+    left: 100%;
+}
+
+#score {
+    color: #4ecca3;
+    font-weight: bold;
+    font-size: 1.4rem;
+    text-shadow: 0 0 10px rgba(78, 204, 163, 0.5);
+}
+
+#highScore {
+    color: #f9ca24;
+    font-weight: bold;
+    font-size: 1.4rem;
+    text-shadow: 0 0 10px rgba(249, 202, 36, 0.5);
+}
+
+/* 分数变化动画效果 */
+@keyframes scoreUp {
+    0% { transform: scale(1); }
+    50% { transform: scale(1.3); color: #4ecca3; }
+    100% { transform: scale(1); }
+}
+
+.score-up {
+    animation: scoreUp 0.3s ease-out;
+}
+
+/* ==================== 游戏画布区域 ==================== */
+.canvas-wrapper {
+    position: relative;
+    display: inline-block;
+    padding: 10px;
+    background: linear-gradient(145deg, #1a1a2e, #0f0f1a);
+    border-radius: 15px;
+    box-shadow: 
+        0 0 30px rgba(78, 204, 163, 0.2),
+        inset 0 0 20px rgba(0, 0, 0, 0.5);
 }
 
 #gameCanvas {
@@ -47,8 +105,68 @@ h1 {
     border-radius: 10px;
     background: #0f0f23;
     box-shadow: 0 0 20px rgba(78, 204, 163, 0.3);
+    display: block;
 }
 
+/* 网格叠加层 */
+.grid-overlay {
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    right: 10px;
+    bottom: 10px;
+    pointer-events: none;
+    border-radius: 10px;
+    background-image: 
+        linear-gradient(rgba(78, 204, 163, 0.1) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(78, 204, 163, 0.1) 1px, transparent 1px);
+    background-size: 20px 20px;
+    border: 1px solid rgba(78, 204, 163, 0.15);
+}
+
+/* ==================== 游戏状态覆盖层 ==================== */
+.game-overlay {
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    right: 10px;
+    bottom: 10px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    background: rgba(0, 0, 0, 0.7);
+    border-radius: 10px;
+    opacity: 0;
+    visibility: hidden;
+    transition: all 0.3s ease;
+}
+
+.game-overlay.active {
+    opacity: 1;
+    visibility: visible;
+}
+
+.game-overlay h2 {
+    font-size: 2rem;
+    margin-bottom: 15px;
+    text-shadow: 0 0 20px currentColor;
+}
+
+.game-overlay.paused h2 {
+    color: #f9ca24;
+}
+
+.game-overlay.game-over h2 {
+    color: #ff6b6b;
+}
+
+.game-overlay p {
+    color: #aaa;
+    font-size: 1.1rem;
+}
+
+/* ==================== 控制按钮样式 ==================== */
 .controls {
     margin-top: 20px;
     display: flex;
@@ -64,6 +182,26 @@ h1 {
     cursor: pointer;
     transition: all 0.3s ease;
     font-weight: bold;
+    position: relative;
+    overflow: hidden;
+}
+
+.controls button::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 0;
+    height: 0;
+    background: rgba(255, 255, 255, 0.3);
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    transition: width 0.4s, height 0.4s;
+}
+
+.controls button:active::after {
+    width: 200px;
+    height: 200px;
 }
 
 #startBtn {
@@ -96,14 +234,67 @@ h1 {
     box-shadow: 0 5px 15px rgba(108, 92, 231, 0.4);
 }
 
+/* 按钮禁用状态 */
+.controls button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    transform: none;
+}
+
+/* ==================== 操作说明 ==================== */
 .instructions {
     margin-top: 20px;
     padding: 15px;
     background: rgba(255, 255, 255, 0.05);
     border-radius: 10px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
 .instructions p {
     margin: 5px 0;
     color: #aaa;
+    font-size: 0.95rem;
+}
+
+.instructions kbd {
+    background: rgba(255, 255, 255, 0.1);
+    padding: 3px 8px;
+    border-radius: 4px;
+    font-family: monospace;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+/* ==================== 响应式设计 ==================== */
+@media (max-width: 500px) {
+    .game-container {
+        padding: 15px;
+        margin: 10px;
+    }
+    
+    h1 {
+        font-size: 1.8rem;
+    }
+    
+    #gameCanvas {
+        width: 320px;
+        height: 320px;
+    }
+    
+    .score-board {
+        flex-direction: column;
+        gap: 10px;
+    }
+    
+    .score-board span {
+        padding: 8px 15px;
+    }
+    
+    .controls {
+        flex-wrap: wrap;
+    }
+    
+    .controls button {
+        padding: 10px 18px;
+        font-size: 0.9rem;
+    }
 }
