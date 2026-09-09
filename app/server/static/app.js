@@ -1061,6 +1061,45 @@ function renderHistory(msgs) {
   let pendingToolCalls = [];
   let pendingToolIds = {};
 
+  // 去重：同 thread 内某条 assistant 文本若已被对应 llm_call 事件承载（前端流式期间
+  // 已经实时渲染 + llm_call 气泡的"📤 模型输出"折叠面板显示），切会话回放时不再
+  // 单独画一条 Agnes 气泡——避免"同一回复出现两次"。找不到配对的（如旧数据、
+  // 一次性内部 LLM 调用未广播）仍正常画 Agnes 气泡。
+  // llm_call.meta.output 格式由 _llm_messages_to_text 生成：
+  //   "--- ai ---\n{正文}\n[tool_calls] {json}\n"（有 tool_calls 时）
+  //   "--- ai ---\n{正文}\n"（纯文本时）
+  // 解析时只取中间正文段与 m.content 比较。
+  const _llmOutputs = new Set();
+  const _extractLlmBody = (raw) => {
+    if (!raw) return "";
+    const s = String(raw);
+    // 去前缀 "--- ai ---\n"
+    let i = s.indexOf("--- ai ---");
+    let body = i >= 0 ? s.slice(i + "--- ai ---".length).replace(/^\r?\n/, "") : s;
+    // 去后缀 "\n[tool_calls] ...\n"（如果存在）
+    const j = body.indexOf("\n[tool_calls] ");
+    if (j >= 0) body = body.slice(0, j);
+    return body.trim();
+  };
+  for (const m of msgs) {
+    if (m && m.kind === "llm_call" && m.meta) {
+      const _out = _extractLlmBody(m.meta.output || "");
+      if (_out) _llmOutputs.add(_out);
+    }
+  }
+  const _isDupOfLlmCall = (content) => {
+    if (!content) return false;
+    const t = String(content).trim();
+    if (!t) return false;
+    if (_llmOutputs.has(t)) return true;
+    // 容忍前后空白/换行差异：归一化后再比一次
+    const norm = t.replace(/\s+/g, " ");
+    for (const out of _llmOutputs) {
+      if (out.replace(/\s+/g, " ") === norm) return true;
+    }
+    return false;
+  };
+
   for (const m of msgs) {
     // 事件气泡（持久化回放）：node / llm_call / tool_call / thought / approval
     if (m.kind && m.kind !== "chat" && m.role === "event") {
@@ -1095,6 +1134,24 @@ function renderHistory(msgs) {
       inner.appendChild(wrap);
       assistantWrap = null;
     } else if (m.role === "assistant") {
+      // 跳过：同 thread 已有 llm_call 事件承载同一段文本（与前端流式播放期间显示的
+      // "🧠 模型调用 → 📤 模型输出"内容一致），不重复画 Agnes 气泡。
+      if (_isDupOfLlmCall(m.content)) {
+        // tool_calls 仍需维护（供后续 tool 消息填充工具卡片）——消息顺序里 tool 消息
+        // 紧跟此 assistant 之后，必须让 pendingToolIds 准备好。
+        const hasCalls = Array.isArray(m.tool_calls) && m.tool_calls.length;
+        if (hasCalls) {
+          pendingToolCalls = m.tool_calls.slice();
+          pendingToolIds = {};
+          m.tool_calls.forEach((tc) => {
+            pendingToolIds[tc.id] = { name: tc.name || "tool", args: tc.arguments || tc.args || "", done: false };
+          });
+        }
+        // assistantWrap 维持上一次非跳过的 wrapper（用于 tool 结果回填），或新建空 wrapper
+        // 兼容"该 assistant 后紧跟 tool 消息"的情况
+        assistantWrap = assistantWrap || (() => { const w = document.createElement("div"); w.className = "msg assistant"; inner.appendChild(w); return w; })();
+        continue;
+      }
       const wrap = document.createElement("div");
       wrap.className = "msg assistant";
       const content = m.content || "";
