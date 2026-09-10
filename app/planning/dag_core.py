@@ -63,6 +63,7 @@ def normalize_nodes(nodes_raw: List[Dict], edges_raw: List[Dict]) -> Tuple[List[
         nodes[nid] = {
             "id": nid,
             "description": str(n.get("description") or nid),
+            "acceptance_criteria": n.get("acceptance_criteria") or "",
             "tool": n.get("tool") or None,
             "params": n.get("params") or {},
         }

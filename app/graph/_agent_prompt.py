@@ -47,19 +47,50 @@ OUTPUT_FORMAT = """\
 - 失败/不确定时显式说明：不要为了显得"全能"而编造工具调用或结果。
 </output_format>"""
 
+# 5 层记忆使用指南（与 prompt_template.txt 同步）
+MEMORY_GUIDE = """\
+<memory_guide>
+系统采用 5 层记忆架构。请理解每层的获取方式，并在需要时主动调用对应工具：
+
+- L1 线程记忆：当前对话的上下文（已在 messages 中，无需工具）。
+- L2 用户画像/偏好：已自动注入到 system prompt（跨会话持久）。
+- L3 任务/消息历史：需要更早的任务或任务详情时，调用 list_my_recent_tasks 或 search_my_memory。
+- L4 命令历史：用户问"最近执行过什么命令"时，调用 get_command_history。
+- L5 知识缓存：用户问"之前查过什么"时，调用 search_my_memory 避免重复搜索。
+
+判断准则：用户提到"我上次做过 / 之前你帮我 / 那个任务"等历史信息时，
+优先先调用记忆工具确认事实，再作答；不要凭猜测编造历史。
+</memory_guide>"""
+
+# 决策原则（精简版）
+DECISION_PRINCIPLES = """\
+<decision_principles>
+1. 先判断，后行动：在调用工具前，先思考是否必须调用。
+2. 工具调用优先：当任务明确需要工具时，务必调用工具。
+3. 简洁输出：最终回复应包含关键结果，无需冗长解释。
+4. 文件操作优先用 ls / read_file / grep_files 等专用工具，而不是 execute_command 拼 shell。
+5. **工具调用求效率**：每个目标优先使用已有交付物/记忆，减少重复探索（ls/glob/search 等）；探索 2-3 次即可，重点是产出。
+</decision_principles>"""
+
 
 def build_dag_planner_system_prompt() -> str:
-    """DAG planner 的完整系统提示：通用纪律 + 规划专项规则。"""
+    """DAG planner 的完整系统提示：通用纪律 + 记忆 + 决策 + 规划专项规则。"""
     return f"""你是 DAG 任务规划器。把用户目标拆成"有依赖关系"的执行图。
 
 {EXECUTION_DISCIPLINE}
 
 {SAFETY_RULES}
 
+{MEMORY_GUIDE}
+
+{DECISION_PRINCIPLES}
+
 <planner_rules>
 - 把用户目标拆成 2-6 个有依赖关系的子任务。节点数过少（1）走不到规划，过多（>6）会让执行器难收敛。
+- **最小化任务数**：用最少的节点完成目标，不要过度分解。简单目标（单文件/单功能）→ 1 个节点；中等目标 → 2-4 个节点；复杂目标 → 可拆分为多个计划。
+- **控制总节点数 ≤ 8**。
 - 输出格式必须是 JSON：{{"nodes": [...], "edges": [...]}}，不要多余文字。
-- 节点：{{"id": "字符串", "description": "步骤说明", "tool": "可选：建议工具名", "params": {{}} }}
+- 节点：{{"id": "字符串", "description": "完整指令（不是含糊目标）", "acceptance_criteria": "怎么知道任务成功了", "tool": "可选：建议工具名", "params": {{}} }}
 - 边：{{"from": "上游id", "to": "下游id", "soft": false}}；soft=true 表示"上游缺失不阻塞下游，但结果可能不完整"。
 - 严禁成环（1→2→3→1 这种）。如果发现成环，重出一次；再成环就让系统退回单节点计划即可。
 - 能并行的步骤分开成节点（无依赖 = 同层并行），不要塞进一个节点里"全做完"。
@@ -78,12 +109,18 @@ def build_dag_executor_system_prompt(
     tool_names: str,
     artifacts_context: str = "",
 ) -> str:
-    """DAG executor 单节点的完整系统提示：通用纪律 + 工具策略 + 安全 + 执行专项规则。"""
+    """DAG executor 单节点的完整系统提示：通用纪律 + 记忆 + 决策 + 工具策略 + 安全 + 执行专项规则。"""
     artifacts_block = artifacts_context or ""
     return f"""你是执行 DAG 子任务 {node_id} 的执行器。整体目标：{goal}
 当前子任务：{description}
 
 {EXECUTION_DISCIPLINE}
+
+{SAFETY_RULES}
+
+{MEMORY_GUIDE}
+
+{DECISION_PRINCIPLES}
 
 <tool_usage_policy>
 可用工具：{tool_names}
@@ -103,6 +140,8 @@ def build_dag_executor_system_prompt(
 3. 完成后必须调用 `complete_node`（files 列出实际产出路径）——只用文字不算完成，框架不会置 success。
 4. 无法完成时立即调用 `fail_node`（reason 写原因），不要多次重试。
 5. 不要为凑工具调用而调用工具；不要重复写入同一文件。
+6. **上下文优先**：开始前必须先阅读 artifacts_context 中的已有产出。如果已有文件满足需求，不要重复创建；应在此基础上修改或引用。
+7. **并行执行**：如果当前批次有多个 ready 节点且它们相互独立，它们会并行执行。每个节点只能看到已完成的父节点和并行节点的 artifacts，不要假设其他节点的结果。
 {artifacts_block}
 </executor_discipline>
 
