@@ -22,6 +22,11 @@ def create_summarizer_node(llm):
             if plan:
                 tid = plan["id"]
                 goal = plan.get("goal", "")
+                # 标记计划 completed
+                try:
+                    dag.set_plan_status(tid, "completed")
+                except Exception as e:
+                    print(f"[Summarizer] 标记计划完成失败: {e}")
                 # 获取所有节点
                 nodes = dag.get_nodes(tid)
                 results = []

@@ -348,9 +348,10 @@ def create_executor(llm_builder, tools_list):
 
 def _emit_dag_event(dag: DAGStorage, plan_id: int):
     """返回 on_event 回调：把节点状态推给前端 SSE。"""
-    def _cb(step, _payload):
-        # step 由 _run_node 直接调用 add_event；这里保持兼容（无操作）
-        pass
+    def _cb(step, payload):
+        # 发送节点状态更新事件到前端
+        if payload and "nodes" in payload:
+            add_event("executor", payload, None)  # thread_id 由 add_event 内部处理
     return _cb
 
 
