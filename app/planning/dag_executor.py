@@ -149,9 +149,15 @@ def _run_node(thread_id: str, task_plan_id: int, node: Dict, goal: str,
                 )
             _usage["write"] += 1
             path = str(params.get("path", "") or "").replace("\\", "/")
+            # 增强校验：path 为空时给出明确提示
+            if not path:
+                return False, (
+                    f"[参数错误] 工具 {name} 缺少必需的 'path' 参数。"
+                    f"请在工具调用中提供完整路径，例如：{{\"path\": \"deliverables/xxx.html\", \"content\": \"...\"}}"
+                )
             if not path.startswith("deliverables/"):
                 return False, (
-                    f"[安全策略] 写文件路径必须以 'deliverables/' 开头（产出统一归档），"
+                    f"[路径错误] 写文件路径必须以 'deliverables/' 开头（产出统一归档），"
                     f"当前路径 '{path}' 不符合。"
                     f"请把文件路径改成 'deliverables/xxx' 形式（例如 'deliverables/snake/index.html'、"
                     f"'deliverables/snake/style.css'、'deliverables/snake/app.js'）。"

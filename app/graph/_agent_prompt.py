@@ -90,6 +90,8 @@ def build_dag_executor_system_prompt(
 也可调用 complete_node（声明完成 + 列出产出文件路径）/ fail_node（声明失败 + 写原因）。
 - 探索类（ls / glob_files / read_file / execute_command）：最多 2 次，之后必须直接产出。
 - 写入类（write_file / edit_file / delete_file）：每文件一次写完整；同一文件不要反复 edit_file 修补。
+  **重要**：write_file 和 edit_file 必须提供完整的 'path' 参数，格式为 deliverables/xxx。
+  示例: path="deliverables/game.html", content="..." 
 - 验证类（validate_html / execute_command 'node --check'）：只在产出可能有问题时调用，不要为凑工具调用而调。
 </tool_usage_policy>
 
