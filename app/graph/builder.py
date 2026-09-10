@@ -306,13 +306,23 @@ def chatbot(state: State, config: RunnableConfig):
     # 2) 消息流检测：找 ToolMessage("已接收规划请求，目标：...") 提取 goal（兜底）
     triggered_goal = react_pending_plan
     if not triggered_goal:
-        for m in reversed(state.get("messages", [])[-5:]):
-            if hasattr(m, 'type') and m.type == 'tool' and '已接收规划请求' in (m.content or ''):
-                try:
-                    triggered_goal = m.content.split('目标：', 1)[1].strip()
-                except Exception:
-                    pass
-                break
+        # 仅在 DAG 状态允许时检查历史消息中的规划请求
+        # 防止"用户说继续"时重复触发规划（此时 chat历史中有 request_planning 的 ToolMessage，但任务已在执行中）
+        try:
+            from app.planning.dag_storage import DAGStorage
+            _dag = DAGStorage(DB_PATH)
+            _existing_plan = _dag.get_plan_by_thread(thread_id)
+            _has_active_plan = _existing_plan and _existing_plan["status"] in ("planning", "executing")
+        except Exception:
+            _has_active_plan = False
+        if not _has_active_plan:
+            for m in reversed(state.get("messages", [])[-5:]):
+                if hasattr(m, 'type') and m.type == 'tool' and '已接收规划请求' in (m.content or ''):
+                    try:
+                        triggered_goal = m.content.split('目标：', 1)[1].strip()
+                    except Exception:
+                        pass
+                    break
     # 不再显示过渡消息"🚀 正在为你规划并执行"，直接让后续节点处理
 
     # 摘要更新（节流：最近对话新增 ≥4 条或距上次 ≥120s 才调用一次 LLM 摘要）。

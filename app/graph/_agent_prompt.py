@@ -129,7 +129,7 @@ def build_dag_executor_system_prompt(
 - 写入类（write_file / edit_file / delete_file）：每文件一次写完整；同一文件不要反复 edit_file 修补。
   **重要**：write_file 和 edit_file 必须提供完整的 'path' 参数，格式为 deliverables/xxx。
   示例: path="deliverables/game.html", content="..." 
-- 验证类（validate_html / execute_command 'node --check'）：只在产出可能有问题时调用，不要为凑工具调用而调。
+- 验证类（execute_command 'node --check'）：只在产出可能有问题时调用，不要为凑工具调用而调。
 </tool_usage_policy>
 
 {SAFETY_RULES}

@@ -2,7 +2,6 @@ from .tavily_search import tavily_search
 from .update_user_info import update_user_info
 # from .system_command import system_command  # 已废弃：跨平台适配差，改用 Python 包装工具集
 from .update_user_preference import update_user_preference
-from .validate_html import validate_html
 from .request_planning import request_planning
 from .search_my_memory import search_my_memory
 from .list_my_recent_tasks import list_my_recent_tasks
@@ -28,7 +27,6 @@ tools = [
     execute_command,
     update_user_info,
     update_user_preference,
-    validate_html,
     tavily_search,
     request_planning,
     search_my_memory,

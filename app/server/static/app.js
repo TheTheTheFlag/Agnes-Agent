@@ -874,7 +874,9 @@ function handleChatEvent(evt) {
     // "🚀 正在为你规划并执行"）挡住，导致"任务完成了但前端看不到总结回复"。
     // 故 summarizer 的 final 必须无条件覆盖显示。
     const _isSummarizer = evt.node === "summarizer";
-    if (evt.text && (!State.streamBuffer || _isSummarizer)) {
+    // 修复：只有 summarizer 或有现有气泡时才创建/复用气泡
+    // 避免 chatbot 节点结束后、planner 节点开始前出现多余的加载中气泡
+    if (evt.text && (_isSummarizer || State.currentAssistantEl)) {
       if (!State.currentAssistantEl) State.currentAssistantEl = addAssistantBubble("");
       // summarizer：用其总结文本取代当前气泡内容（清掉执行过程残留），展示最终答复
       State.streamBuffer = evt.text;

@@ -369,43 +369,48 @@ _sched_thread.start()
 
 # 白名单：只允许这些表通过 API 访问。绝不让前端传任意表名/任意 SQL。
 _MEMORY_TABLES = {
+    # L1 线程记忆
+    "messages": {
+        "label": "L1 · 对话消息",
+        "pk": "id",
+        "columns": ["id", "thread_id", "role", "content", "tool_calls", "tool_call_id", "timestamp"],
+    },
+    # L2 用户画像/偏好
     "user_profile": {
-        "label": "用户画像 (L2)",
+        "label": "L2 · 用户画像",
         "pk": "key",
         "columns": ["key", "value", "updated_at"],
     },
     "user_preferences": {
-        "label": "用户偏好 (L2)",
+        "label": "L2 · 用户偏好",
         "pk": "key",
         "columns": ["key", "value", "updated_at"],
     },
-    "messages": {
-        "label": "对话消息",
+    # L3 任务历史
+    "task_summaries": {
+        "label": "L3 · 任务摘要",
         "pk": "id",
-        "columns": ["id", "thread_id", "role", "content", "tool_calls", "tool_call_id", "timestamp"],
+        "columns": ["id", "thread_id", "summary_text", "start_time", "end_time", "created_at"],
     },
     "task_plans": {
-        "label": "任务计划",
+        "label": "L3 · 任务计划",
         "pk": "id",
         "columns": ["id", "thread_id", "goal", "status", "created_at", "updated_at", "deleted_at"],
     },
     "subtasks": {
-        "label": "子任务",
+        "label": "L3 · 子任务",
         "pk": "id",
         "columns": ["id", "thread_id", "task_plan_id", "subtask_id", "description", "dependencies", "status", "result", "artifacts", "created_at", "updated_at"],
     },
-    "task_summaries": {
-        "label": "任务摘要",
-        "pk": "id",
-        "columns": ["id", "thread_id", "summary_text", "start_time", "end_time", "created_at"],
-    },
+    # L4 命令历史
     "command_history": {
-        "label": "命令历史 (L4)",
+        "label": "L4 · 命令历史",
         "pk": "id",
         "columns": ["id", "thread_id", "command", "exit_code", "stdout_preview", "stderr_preview", "duration_ms", "success", "created_at"],
     },
+    # L5 知识缓存
     "semantic_cache": {
-        "label": "知识缓存 (L5)",
+        "label": "L5 · 知识缓存",
         "pk": "id",
         "columns": ["id", "source", "query", "content", "hit_count", "last_accessed_at", "created_at", "expires_at"],
     },
