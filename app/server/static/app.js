@@ -559,19 +559,27 @@ function topoSortLayers(nodes, edges) {
   const ordered = nodes.map((n) => String(n.id));
   const inFrontier = new Set(ordered.filter((id) => indeg.get(id) === 0));
   const layers = [];
+  const emitted = new Set();   // 已出列节点：异常图（重复边/自环）下也能保证循环收敛
   while (inFrontier.size) {
-    const layer = ordered.filter((id) => inFrontier.has(id)).map((id) => idToNode.get(id));
+    const layer = ordered
+      .filter((id) => inFrontier.has(id) && !emitted.has(id))
+      .map((id) => idToNode.get(id));
+    if (!layer.length) break;
     layers.push(layer);
+    layer.forEach((n) => emitted.add(String(n.id)));
     const next = new Set();
     for (const u of layer) {
       for (const v of adj.get(String(u.id))) {
         const d = indeg.get(String(v.id)) - 1;
         indeg.set(String(v.id), d);
-        if (d === 0) next.add(String(v.id));
+        if (d === 0 && !emitted.has(String(v.id))) next.add(String(v.id));
       }
     }
     inFrontier.clear();
-    inFrontier.add(...next);
+    // 不要写成 inFrontier.add(...next)：next 为空时等价于 add(undefined)，
+    // 集合里会残留一个 undefined 使 size 恒为 1，while 变成死循环
+    // （DAG 走到终末层时必然为空 → 规划任务一推送节点快照就把页面内存撑到 GB 级）。
+    for (const id of next) inFrontier.add(id);
   }
   // 兜底：若有环（不该发生），剩余的放最后一层
   const placed = new Set();
