@@ -711,15 +711,15 @@ class MemoryManager:
 
         - history_summary：当前会话历史对话的压缩摘要（history_summaries 表），
           在上下文被压缩后仍保留"更早发生过什么"。
-        - L2：用户画像 / 偏好 —— **由 chatbot 节点通过 {{profile_section}} 注入**（见 builder.py:114），
-          本函数不重复注入，避免 system prompt 中出现两次"用户个人信息"段。
+        - L2：用户画像 / 偏好 —— **唯一注入来源**（以【用户画像】/【用户偏好】形式），
+          由 chatbot 拼进"=== 分层记忆注入 ==="块。模板中不再有 {{profile_section}} 占位符。
         - L3：近期任务极简摘要（新规划器 dag_plans）。
         L4（命令历史）/ L5（知识缓存）不常驻，完全靠工具查询
         （get_command_history / search_my_memory）。
         返回 dict：key 是层名，value 是要追加到 system prompt 的 markdown 段落。
         """
         if layers is None:
-            layers = ["history_summary", "L3"]   # L2 由 {{profile_section}} 单独注入
+            layers = ["history_summary", "L2", "L3"]
         out = {}
 
         if "history_summary" in layers:

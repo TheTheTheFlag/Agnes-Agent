@@ -108,12 +108,10 @@ def create_dag_summarizer(llm):
                     summary += "\n\n产出文件：\n" + "\n".join(f"- {a}" for a in artifacts)
 
         dag.set_plan_status(plan["id"], "completed")
-        try:
-            from app.memory import MemoryManager
-            MemoryManager(db_path=DB_PATH, thread_id=thread_id).save_history_summary_scored(
-                thread_id, summary, importance_score=5.0)
-        except Exception:
-            pass
+        # 注：任务交付汇报**不再**写入 history_summaries 表。
+        # 那张表的语义是"历史对话压缩摘要"（由 app/memory/compaction.py 在 token 达阈值时写入），
+        # 把任务汇报混进去会让 build_memory_injection 的 history_summary 层注入错误语义的内容。
+        # 任务汇报本身已由 dag_plans.status + add_event("summarizer") + 前端气泡完整表达。
         add_event("summarizer", {"done": True, "artifacts": artifacts}, thread_id)
         add_log_entry("success", f"交付汇总完成（产物 {len(artifacts)} 个）")
         record_node_end(thread_id, "summarizer", f"{len(artifacts)} 个产物")

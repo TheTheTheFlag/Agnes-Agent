@@ -75,11 +75,9 @@ def chatbot(state: State, config: RunnableConfig):
     user_content = last_msg.content if hasattr(last_msg, 'content') else str(last_msg)
 
     mm = MemoryManager(db_path=DB_PATH, thread_id=thread_id)
-    context = mm.build_context()
-    # 业务数据直接用局部变量，不写回 state
-    profile = context["profile"]
-    preferences = context["preferences"]
-    recent_summary = context.get("recent_summary")
+    # 注：用户画像/偏好(L2) 与 历史对话摘要(history_summary) 均不在 chatbot 里单独注入，
+    # 统一由下方 build_memory_injection 拼进 system prompt 末尾的"=== 分层记忆注入 ==="块，
+    # 避免同一份数据在 prompt 里出现两次。
 
     # 记录用户消息到长期记忆
     mm.add_message(thread_id, "user", user_content)
@@ -91,15 +89,12 @@ def chatbot(state: State, config: RunnableConfig):
     if os_name == "Windows":
         os_cmds += "\n注意：Windows 控制台默认编码为 GBK，如读取中文文件出现乱码，请先执行 'chcp 65001' 切换为 UTF-8。"
 
-    profile_section = "\n".join([f"{k}: {v}" for k, v in profile.items()]) if profile else ""
-    preferences_section = "\n".join([f"{k}: {v}" for k, v in preferences.items()]) if preferences else ""
-    summary_section = recent_summary or ""
-    # 当前任务计划从 DB 查（state 不缓存 TaskPlan；当前进行中计划按 thread 查）
-
-    # ===== 5 层记忆注入（L2 / L3 / L4）=====
-    # 每轮自动把"用户画像 + 近期任务 + 近期命令"塞进 system prompt，
+    # ===== 5 层记忆注入（L2 / L3）=====
+    # 每轮自动把"用户画像/偏好 + 历史摘要 + 近期任务"塞进 system prompt，
     # 模型无需主动调工具即可"自然记住"用户。
-    memory_injection = mm.build_memory_injection(thread_id, layers=["history_summary", "L3"])
+    # L2 从 memory_injection 注入（以【用户画像】/【用户偏好】形式显示在"分层记忆注入"块内），
+    # 不再通过 {{profile_section}} 占位符重复注入。
+    memory_injection = mm.build_memory_injection(thread_id, layers=["history_summary", "L2", "L3"])
     memory_section = ""
     if memory_injection:
         memory_section = "\n\n=== 分层记忆注入 ===\n" + "\n\n".join(memory_injection.values())
@@ -111,9 +106,6 @@ def chatbot(state: State, config: RunnableConfig):
     template = load_prompt_template()
     system_text = template.replace("{{os}}", os_name).replace("{{os_cmds}}", os_cmds).replace("{{time}}", current_time)
     system_text = system_text.replace("{{cwd}}", cwd).replace("{{deliverables_dir}}", deliverables_dir)
-    system_text = system_text.replace("{{profile_section}}", f"用户个人信息：\n{profile_section}\n" if profile_section else "")
-    system_text = system_text.replace("{{preferences_section}}", f"用户偏好：\n{preferences_section}\n" if preferences_section else "")
-    system_text = system_text.replace("{{summary_section}}", f"对话摘要：\n{summary_section}\n" if summary_section else "")
     # 技能路由元数据：动态读取 app/skills/ 下所有 SKILL.md（实时，新增技能无需重启）
     try:
         from app.skills.loader import load_all_skills as _load_all_skills
