@@ -32,6 +32,24 @@ def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _as_text(value: Any) -> Optional[str]:
+    """把任意 planner/模型产出归一到 SQLite TEXT 字段能接受的形式。
+
+    SQLite 只接受 str / bytes / None；直接把 list 绑定进 SQL 会抛
+    "Error binding parameter N: type 'list' is not supported"，而 DAG 写库
+    没有 try/except 兜底——一抛整张 plan 就废了。所以所有文本字段统一走这里：
+      None / 空串 → None；str/bytes → 原样；list/dict/其它 → JSON 字符串。
+    """
+    if value is None:
+        return None
+    if isinstance(value, (str, bytes, bytearray)):
+        return value or None
+    try:
+        return json.dumps(value, ensure_ascii=False, default=str) or None
+    except Exception:
+        return str(value) or None
+
+
 class DAGStorage:
     """SQLite 存储：一张计划（plan）由 nodes + edges 表达。"""
 
@@ -102,10 +120,11 @@ class DAGStorage:
 
     # ---------------- plan ----------------
     def create_plan(self, thread_id: str, goal: str) -> int:
+        # goal 可能来自 planner 的模型输出（偶发写成 list），同样归一后再入库
         with sqlite3.connect(self.db_path) as conn:
             cur = conn.execute(
                 "INSERT INTO dag_plans (thread_id, goal, status, checkpoint) VALUES (?, ?, 'planning', NULL)",
-                (thread_id, goal),
+                (_as_text(thread_id), _as_text(goal)),
             )
             return cur.lastrowid
 
@@ -163,21 +182,19 @@ class DAGStorage:
                  params: Dict = None, status: str = STATUS_PENDING,
                  acceptance_criteria: str = None, replaces: str = None):
         # SQLite TEXT 字段不接受 list / dict / object；
-        # planner 信任 model 输出，model 可能把 `tool` 写成空 list `[]`，
+        # planner 信任 model 输出，model 可能把 `tool` 写成空 list `[]`、
+        # 把 acceptance_criteria 写成数组（"Error binding parameter 4"），
         # 不归一会直接抛 "type 'list' is not supported"，整张 plan 立刻废掉。
-        # 所有非字符串字段都做归一：None/空 → None；list/dict → JSON 字符串。
-        if tool is not None and not isinstance(tool, str):
-            tool = json.dumps(tool, ensure_ascii=False) if tool else None
-        if params is not None and not isinstance(params, str):
-            params = json.dumps(params, ensure_ascii=False) if params else None
+        # 故所有文本字段（含 acceptance_criteria / replaces）统一走 _as_text 归一。
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
                 """INSERT INTO dag_nodes
                    (plan_id, node_id, description, acceptance_criteria, replaces,
                     tool, params, status, updated_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (plan_id, node_id, description, acceptance_criteria or None, replaces or None,
-                 tool, params, status, _now()),
+                (plan_id, _as_text(node_id), _as_text(description),
+                 _as_text(acceptance_criteria), _as_text(replaces),
+                 _as_text(tool), _as_text(params), _as_text(status), _now()),
             )
 
     def get_nodes(self, plan_id: int) -> List[Dict]:
@@ -219,13 +236,14 @@ class DAGStorage:
 
     def set_node_status(self, plan_id: int, node_id: str, status: str,
                         result: str = None, artifacts: List[str] = None):
-        sets, vals = ["status = ?", "updated_at = ?"], [status, _now()]
+        sets, vals = ["status = ?", "updated_at = ?"], [_as_text(status), _now()]
         if result is not None:
-            sets.append("result = ?"); vals.append(result)
+            # 节点结果可能被 executor 写成 list/dict，同样归一后再入库
+            sets.append("result = ?"); vals.append(_as_text(result))
         if artifacts is not None:
             sets.append("artifacts = ?")
-            vals.append(json.dumps(artifacts, ensure_ascii=False))
-        vals += [plan_id, node_id]
+            vals.append(_as_text(artifacts))
+        vals += [plan_id, _as_text(node_id)]
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
                 f"UPDATE dag_nodes SET {', '.join(sets)} WHERE plan_id = ? AND node_id = ?",
@@ -237,7 +255,7 @@ class DAGStorage:
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
                 "INSERT OR IGNORE INTO dag_edges (plan_id, from_id, to_id, soft) VALUES (?, ?, ?, ?)",
-                (plan_id, from_id, to_id, 1 if soft else 0),
+                (plan_id, _as_text(from_id), _as_text(to_id), 1 if soft else 0),
             )
 
     def get_edges(self, plan_id: int) -> List[Dict]:
