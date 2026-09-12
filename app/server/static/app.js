@@ -462,6 +462,27 @@ function setTodos(items) {
   renderTodoPanel();
 }
 
+// _INJECTED_: summarizer final 事件兜底锚点
+function _isSummarizerFresh(last, evt) {
+  if (!last || !last.timestamp) return false;
+  return new Date(last.timestamp).getTime() >= new Date(evt.timestamp || 0).getTime() - 2000;
+}
+function renderSummarizerFromHistory(last) {
+  if (!last || !last.content) return;
+  State.currentAssistantEl = addAssistantBubble("");
+  State.streamBuffer = last.content;
+  const _host = State.currentAssistantEl;
+  const _box = _host && $(".msg-text", _host);
+  if (_box) {
+    const _old = $("#stream-text", _box);
+    if (_old) _old.remove();
+    const _tn = document.createElement("div");
+    _tn.id = "stream-text";
+    _box.prepend(_tn);
+  }
+  endStreaming();
+  scrollToBottom();
+}
 // 待办状态 → 图标
 function todoMark(status) {
   if (status === "done") return "✓";
@@ -851,6 +872,19 @@ function handleChatEvent(evt) {
       endStreaming();
       State.currentAssistantEl = null;
       State.streamBuffer = "";
+    } else if (evt.phase === "end" && evt.name === "summarizer") {
+      // 兜底：summarizer 节点结束时主动拉一次 /api/messages，
+      // 防止 SSE final 事件因 chat.py 的流竞态没传到前端。
+      // 拉到的最后一条 assistant 消息即是"该看到的最终交付汇报"。
+      (async () => {
+        try {
+          const r = await apiGet(`/api/messages?thread_id=${encodeURIComponent(State.threadId)}&limit=2`);
+          const last = (r && r.messages || []).filter(m => m.role === "assistant").pop();
+          if (last && last.content && _isSummarizerFresh(last, evt)) {
+            renderSummarizerFromHistory(last);
+          }
+        } catch (e) { /* 静默兜底，不影响 UI */ }
+      })();
     }
   } else if (step === "token") {
     // 模型输出已由 llm_call 独立气泡完整承载，这里不再逐字追加进气泡，避免重复。
