@@ -890,7 +890,15 @@ function handleChatEvent(evt) {
     // 修复：只有 summarizer 或有现有气泡时才创建/复用气泡
     // 避免 chatbot 节点结束后、planner 节点开始前出现多余的加载中气泡
     if (evt.text && (_isSummarizer || State.currentAssistantEl)) {
-      if (!State.currentAssistantEl) State.currentAssistantEl = addAssistantBubble("");
+      // summarizer 是本轮的最终交付答复：**强制新建一个干净气泡**，不复用执行期间的残留气泡。
+      // 原因：执行期间 State.currentAssistantEl 可能指向一个非底部、且已被 endStreaming
+      // 处理过的气泡；复用它会让总结渲染到页面中部（需滚动才可见），
+      // 表现为"任务跑完了却没有输出"。
+      if (_isSummarizer) {
+        State.currentAssistantEl = addAssistantBubble("");
+      } else if (!State.currentAssistantEl) {
+        State.currentAssistantEl = addAssistantBubble("");
+      }
       // summarizer：用其总结文本取代当前气泡内容（清掉执行过程残留），展示最终答复
       State.streamBuffer = evt.text;
       // 若当前是计划执行期间的气泡，移除残留的流式文本节点，避免旧文本残留

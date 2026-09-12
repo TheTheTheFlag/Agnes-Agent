@@ -15,6 +15,8 @@ build_memory_injection（把历史对话压缩后注入 system prompt）职责�
 """
 from typing import Dict, List
 
+import os
+
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from app.config import DB_PATH
@@ -42,7 +44,13 @@ def _collect(nodes: List[Dict]):
             continue  # 被局部重规划替换 / 前置失败跳过的作废节点，不向用户汇报
         if st == core.STATUS_FAILED:
             failed.append(n)
-        arts = [str(a) for a in (n.get("artifacts") or []) if a]
+        # 只保留磁盘上真实存在的产物：执行器记录的 _written 不会因 delete_file 回滚，
+        # 校验脚本之类的中间产物已被删除；不过滤会在总结里把它们列成"交付文件"，误导用户。
+        arts: List[str] = []
+        for a in (n.get("artifacts") or []):
+            p = str(a).replace("\\", "/").strip()
+            if p and p not in arts and os.path.exists(p):
+                arts.append(p)
         for a in arts:
             if a not in artifacts:
                 artifacts.append(a)
