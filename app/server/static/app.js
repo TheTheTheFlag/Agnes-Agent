@@ -320,6 +320,7 @@ function scrollToBottom() {
 }
 
 function renderWelcome() {
+  closeProcGroup();  // 欢迎页 = 新会话起点，过程聚合组一并作废
   const inner = messagesInner();
   inner.innerHTML = `
     <div class="welcome">
@@ -356,7 +357,6 @@ function addUserBubble(text) {
 }
 
 function addAssistantBubble(metaText) {
-  closeProcGroup();  // 助手正文气泡不与过程事件同组（简洁模式下过程另起一组）
   const inner = messagesInner();
   const wrap = document.createElement("div");
   wrap.className = "msg assistant pending";
@@ -374,12 +374,14 @@ function addAssistantBubble(metaText) {
       </div>
     </div>`;
   inner.appendChild(wrap);
+  // 正文不切分本轮的过程摘要行，只登记为"本轮正文锚点"：
+  // 之后若还有事件，摘要行会插到这条正文之前（过程在上、回答在下）
+  noteTurnTextEl(wrap);
   scrollToBottom();
   return wrap;
 }
 
 function addErrorBubble(text) {
-  closeProcGroup();
   const inner = messagesInner();
   const wrap = document.createElement("div");
   wrap.className = "msg assistant error";
@@ -888,6 +890,7 @@ const PROC_KIND_FMT = [
 
 // 摘要行结构刻意保持极简：一行浅灰小字 + 右侧 ›，与 Reasonix 的过程行观感一致
 // （不放图标、"执行过程"这类标签和计数器，避免变成"横幅卡片"）。
+// 若本轮已有正文气泡（_turnTextEl），摘要行插到它之前——"过程在上、回答在下"。
 function createProcGroup() {
   const group = document.createElement("details");
   group.className = "proc-group";
@@ -897,7 +900,9 @@ function createProcGroup() {
       <span class="pg-arrow">›</span>
     </summary>
     <div class="proc-group-body"></div>`;
-  messagesInner().appendChild(group);
+  const inner = messagesInner();
+  if (_turnTextEl && _turnTextEl.parentNode === inner) inner.insertBefore(group, _turnTextEl);
+  else inner.appendChild(group);
   return { el: group, body: $(".proc-group-body", group), counts: {}, nodes: new Set() };
 }
 
@@ -912,8 +917,7 @@ function updateProcGroupSummary(g) {
 
 // 返回"当前过程气泡该塞进哪个容器"：详细模式 → null（由调用方兜底到消息流）；
 // 简洁模式 → 当前聚合组（不存在、或已随消息流被清掉时新建），并把该事件计入摘要。
-// 分组的边界（一轮一次）由 closeProcGroup 在正文出现时显式给出，不靠 DOM 位置猜，
-// 否则历史回放里被去重的空气泡、被跳过的过渡文案都会把一轮切碎。
+// 分组边界是"一轮一次"，只由用户消息 / 切换会话 / 清空消息区来关闭。
 function procGroupHost(kind, statKey) {
   if (State.displayMode !== "compact") return null;
   const inner = messagesInner();
@@ -928,9 +932,20 @@ function procGroupHost(kind, statKey) {
   return g.body;
 }
 
-// 一轮过程的结束点：用户消息、助手正文（实时 final / 历史回放正文）、错误气泡出现时调用。
+// 本轮第一个正文气泡：新摘要行插在它之前，保证"过程摘要在上、回答在下"。
+// 正文本身不再关闭聚合组——否则回答之后（如 summarizer / 记忆摘要）再发生的
+// 事件会另起一条摘要行跑到回答下面去。
+let _turnTextEl = null;
+function noteTurnTextEl(el) {
+  if (!el) return;
+  const inner = messagesInner();
+  if (!_turnTextEl || _turnTextEl.parentNode !== inner) _turnTextEl = el;
+}
+
+// 一轮过程的结束点：用户消息出现、切换/清空会话时调用（见调用点）
 function closeProcGroup() {
   State.procGroup = null;
+  _turnTextEl = null;
 }
 
 /* ==================== 独立事件气泡渲染（节点/模型/工具/思考） ==================== */
@@ -1202,6 +1217,14 @@ async function sendMessage(text, opts) {
   if (!isResume) {
     text = (text == null ? "" : String(text)).trim();
     if (!text || State.streaming) return;
+    // 新会话的欢迎页必须先清掉：否则它会和这一轮对话叠在一起
+    // （表现为"切了显示模式却没重绘、切会话才正常"）。
+    // 顺手用首条消息当会话标题，省得顶栏一直挂着"新对话"。
+    const _inner = messagesInner();
+    if ($(".welcome", _inner)) {
+      _inner.innerHTML = "";
+      updateChatTitle(text);
+    }
     addUserBubble(text);
     $("#chatInput").value = "";
     autosizeInput();
@@ -1408,7 +1431,6 @@ function renderHistory(msgs) {
       // 工具轮的 assistant 常常只有 tool_calls、没有正文：这种"空气泡"不占位，
       // 也不能当作一轮过程的分界（否则会把一轮切成好几条摘要行）。
       if (!content.trim() && !showToolCards) continue;
-      if (content.trim()) closeProcGroup();  // 真正的正文才结束这一轮的过程分组
       const wrap = document.createElement("div");
       wrap.className = "msg assistant";
       wrap.innerHTML = `
@@ -1425,6 +1447,9 @@ function renderHistory(msgs) {
         </div>`;
       inner.appendChild(wrap);
       assistantWrap = wrap;
+      // 正文只登记为本轮锚点，不再切分过程分组：本轮后续事件仍归同一条摘要行，
+      // 且该摘要行始终位于这条回答之上（"输出在最下面"）
+      if (content.trim()) noteTurnTextEl(wrap);
       // 收集 tool_calls（供后续 tool 消息回填工具卡）
       if (hasCalls) {
         pendingToolCalls = m.tool_calls.slice();
