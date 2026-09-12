@@ -99,7 +99,7 @@ def chatbot(state: State, config: RunnableConfig):
     # ===== 5 层记忆注入（L2 / L3 / L4）=====
     # 每轮自动把"用户画像 + 近期任务 + 近期命令"塞进 system prompt，
     # 模型无需主动调工具即可"自然记住"用户。
-    memory_injection = mm.build_memory_injection(thread_id, layers=["history_summary", "L2"])
+    memory_injection = mm.build_memory_injection(thread_id, layers=["history_summary", "L3"])
     memory_section = ""
     if memory_injection:
         memory_section = "\n\n=== 分层记忆注入 ===\n" + "\n\n".join(memory_injection.values())
