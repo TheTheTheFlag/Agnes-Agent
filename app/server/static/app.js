@@ -18,6 +18,8 @@ const State = {
   renderTimer: null,
   liveToolName: "",           // LiveStatus 当前工具名（chunk 增量累积用）
   liveArgs: "",               // LiveStatus 参数累积缓冲
+  displayMode: "verbose",     // 对话显示模式：verbose=详细（每事件独立气泡）/ compact=简洁（聚合成摘要行）
+  procGroup: null,            // 简洁模式下当前打开的"执行过程"聚合组（{el, body, counts, nodes}）
   approvalCard: null,         // 当前审批卡片
   drawerTab: null,
   sse: null,
@@ -343,6 +345,7 @@ function renderWelcome() {
 
 /* ==================== 用户/助手消息渲染 ==================== */
 function addUserBubble(text) {
+  closeProcGroup();  // 正文出现即结束当前"执行过程"聚合组（简洁模式下另有新组）
   const inner = messagesInner();
   const wrap = document.createElement("div");
   wrap.className = "msg user";
@@ -353,6 +356,7 @@ function addUserBubble(text) {
 }
 
 function addAssistantBubble(metaText) {
+  closeProcGroup();  // 助手正文气泡不与过程事件同组（简洁模式下过程另起一组）
   const inner = messagesInner();
   const wrap = document.createElement("div");
   wrap.className = "msg assistant pending";
@@ -375,6 +379,7 @@ function addAssistantBubble(metaText) {
 }
 
 function addErrorBubble(text) {
+  closeProcGroup();
   const inner = messagesInner();
   const wrap = document.createElement("div");
   wrap.className = "msg assistant error";
@@ -832,6 +837,102 @@ function endStreaming(finalText) {
   scrollToBottom();
 }
 
+/* ==================== 对话显示模式（详细 / 简洁） ==================== */
+/* 详细模式（verbose）：每个节点 / 模型调用 / 工具调用都是独立气泡，链路一目了然（原有效果）。
+   简洁模式（compact）：过程事件收进一个可展开的摘要行
+   「N 个工具 · M 段思考 · K 次模型调用」，对话区只留正文 + 折叠行。
+   模式持久化在 localStorage；切换后当前会话立即按新模式重放。 */
+const DISPLAY_MODE_KEY = "agnes-display-mode";
+const DISPLAY_MODES = [
+  { id: "verbose", icon: "🧩", name: "详细模式", desc: "每个节点 / 模型调用 / 工具调用都是独立气泡，适合盯链路调试。" },
+  { id: "compact", icon: "✨", name: "简洁模式", desc: "过程事件聚合成一行「N 个工具 · M 段思考」摘要，点开才看细节，只留正文。" },
+];
+
+function displayModeName(mode) {
+  const m = DISPLAY_MODES.find((x) => x.id === mode);
+  return m ? m.name : mode;
+}
+
+// 启动时恢复上次选择（必须在首次渲染历史之前调用）
+function initDisplayMode() {
+  const saved = localStorage.getItem(DISPLAY_MODE_KEY);
+  State.displayMode = saved === "compact" ? "compact" : "verbose";
+  document.documentElement.dataset.display = State.displayMode;
+}
+
+function setDisplayMode(mode) {
+  mode = mode === "compact" ? "compact" : "verbose";
+  const changed = mode !== State.displayMode;
+  State.displayMode = mode;
+  localStorage.setItem(DISPLAY_MODE_KEY, mode);
+  document.documentElement.dataset.display = mode;
+  closeProcGroup();
+  if (!changed) return;
+  if (State.streaming) {
+    // 回复还在生成中：不重放（避免打断当前流式气泡），新模式对后续渲染生效
+    toast(`${displayModeName(mode)}已开启，本次回复结束后生效`);
+    return;
+  }
+  toast(`已切换到${displayModeName(mode)}`);
+  if (State.threadId) loadHistory(State.threadId);
+}
+
+/* ---- 简洁模式：把过程事件（节点/模型/工具/思考）聚合成一个可展开组 ---- */
+const PROC_KIND_FMT = [
+  ["tool", (n) => `${n} 个工具`],
+  ["thought", (n) => `${n} 段思考`],
+  ["llm", (n) => `${n} 次模型调用`],
+  ["approval", (n) => `${n} 次审批`],
+  ["event", (n) => `${n} 条事件`],
+];
+
+// 摘要行结构刻意保持极简：一行浅灰小字 + 右侧 ›，与 Reasonix 的过程行观感一致
+// （不放图标、"执行过程"这类标签和计数器，避免变成"横幅卡片"）。
+function createProcGroup() {
+  const group = document.createElement("details");
+  group.className = "proc-group";
+  group.innerHTML = `
+    <summary class="proc-group-head">
+      <span class="pg-counts"></span>
+      <span class="pg-arrow">›</span>
+    </summary>
+    <div class="proc-group-body"></div>`;
+  messagesInner().appendChild(group);
+  return { el: group, body: $(".proc-group-body", group), counts: {}, nodes: new Set() };
+}
+
+// 摘要只列"用户可见的过程量"，节点 start/end 属于链路调试信息，不计入
+// （除非这一段过程只有节点事件——那时退化成"N 个节点"，总比光秃秃的"过程"有信息量）
+function updateProcGroupSummary(g) {
+  const parts = PROC_KIND_FMT.filter(([k]) => g.counts[k] > 0).map(([k, fmt]) => fmt(g.counts[k]));
+  const el = $(".pg-counts", g.el);
+  if (!el) return;
+  el.textContent = parts.join(" · ") || (g.nodes.size ? `${g.nodes.size} 个节点` : "过程");
+}
+
+// 返回"当前过程气泡该塞进哪个容器"：详细模式 → null（由调用方兜底到消息流）；
+// 简洁模式 → 当前聚合组（不存在、或已随消息流被清掉时新建），并把该事件计入摘要。
+// 分组的边界（一轮一次）由 closeProcGroup 在正文出现时显式给出，不靠 DOM 位置猜，
+// 否则历史回放里被去重的空气泡、被跳过的过渡文案都会把一轮切碎。
+function procGroupHost(kind, statKey) {
+  if (State.displayMode !== "compact") return null;
+  const inner = messagesInner();
+  let g = State.procGroup;
+  if (!g || g.el.parentNode !== inner) {
+    g = createProcGroup();
+    State.procGroup = g;
+  }
+  if (kind === "node") g.nodes.add(statKey || "node");
+  else if (kind) g.counts[kind] = (g.counts[kind] || 0) + 1;
+  updateProcGroupSummary(g);
+  return g.body;
+}
+
+// 一轮过程的结束点：用户消息、助手正文（实时 final / 历史回放正文）、错误气泡出现时调用。
+function closeProcGroup() {
+  State.procGroup = null;
+}
+
 /* ==================== 独立事件气泡渲染（节点/模型/工具/思考） ==================== */
 // 把任意长文本包进 <details>，超长默认收起、点击展开查看全部。
 function wrapCollapsible(label, bodyHtml, startOpen) {
@@ -840,8 +941,11 @@ function wrapCollapsible(label, bodyHtml, startOpen) {
 }
 
 // 通用独立气泡：icon 图标 + title 标题行 + (可选 meta) + body（可能含可展开内容）
-function addEventBubble(kind, icon, title, metaHtml, bodyHtml, ts) {
-  const inner = messagesInner();
+function addEventBubble(kind, icon, title, metaHtml, bodyHtml, ts, host, statKey) {
+  // host 可选：不传 → 渲染到对话区消息流（默认，自动滚到底）；
+  // 传入其它容器时（调试面板的"追踪"页）复用同一套气泡样式，两处视觉保持一致。
+  // 对话流路径下，简洁模式会自动把气泡收进"执行过程"聚合组。
+  const inner = host || procGroupHost(kind, statKey) || messagesInner();
   const wrap = document.createElement("div");
   wrap.className = `msg assistant evtb evtb-${kind}`;
   const now = ts ? new Date(ts).toISOString() : new Date().toISOString();
@@ -856,7 +960,7 @@ function addEventBubble(kind, icon, title, metaHtml, bodyHtml, ts) {
       <div class="msg-text evtb-text">${bodyHtml || ""}</div>
     </div>`;
   inner.appendChild(wrap);
-  scrollToBottom();
+  if (!host) scrollToBottom();  // 只有对话区才需要自动滚动
   return wrap;
 }
 
@@ -870,41 +974,42 @@ function prettyText(obj) {
 }
 
 // 节点变化气泡
-function renderNodeEvent(evt, ts) {
+function renderNodeEvent(evt, ts, host) {
   const name = evt.name || "";
   const phase = evt.phase === "start" ? "▶ 开始" : "■ 结束";
-  addEventBubble("node", "🧩", `节点 ${name} ${phase}`, "", "", ts);
+  const result = evt.result ? `<span class="evtb-chip">${escapeHtml(String(evt.result))}</span>` : "";
+  addEventBubble("node", "🧩", `节点 ${name} ${phase}`, result, "", ts, host, name);
 }
 
 // 模型调用气泡：输入（可展开完整）+ 输出（可展开完整）+ 耗时
-function renderLlmCall(data, ts) {
+function renderLlmCall(data, ts, host) {
   const node = data.node || "";
   const duration = data.duration_ms != null ? ` · ${data.duration_ms}ms` : "";
   addEventBubble("llm", "🧠", `模型调用(${node})${duration}`,
     `<span class="evtb-chip">输入 ${(data.input || "").length} 字符 · 输出 ${(data.output || "").length} 字符</span>`,
     wrapCollapsible("📥 模型输入（点击展开/收起）", `<pre class="evt-pre">${escapeHtml(data.input || "")}</pre>`, false) +
-    wrapCollapsible("📤 模型输出（点击展开/收起）", `<pre class="evt-pre">${escapeHtml(data.output || "")}</pre>`, false), ts);
+    wrapCollapsible("📤 模型输出（点击展开/收起）", `<pre class="evt-pre">${escapeHtml(data.output || "")}</pre>`, false), ts, host);
 }
 
 // 工具调用气泡：工具名 + 参数 + 结果（可展开完整）
-function renderToolEvent(evt, ts) {
+function renderToolEvent(evt, ts, host) {
   const name = evt.name || "tool";
   const node = evt.node ? ` · 子任务 ${evt.node}` : "";
   const argsText = prettyText(evt.params != null ? evt.params : evt.args);
   const resultText = evt.result != null ? evt.result : (evt.output_preview || "");
   addEventBubble("tool", "🔧", `工具 ${name}${node}`, "",
     wrapCollapsible("输入参数（点击展开/收起）", `<pre class="evt-pre">${escapeHtml(argsText)}</pre>`, false) +
-    wrapCollapsible("执行结果（点击展开/收起）", `<pre class="evt-pre">${escapeHtml(String(resultText))}</pre>`, false), ts);
+    wrapCollapsible("执行结果（点击展开/收起）", `<pre class="evt-pre">${escapeHtml(String(resultText))}</pre>`, false), ts, host);
 }
 
 // 节点思考气泡（planner/executor/summarizer 的 node_thought）
-function renderThoughtEvent(data, ts) {
+function renderThoughtEvent(data, ts, host) {
   const role = data.role || "";
   const title = data.title || "思考";
   const text = data.text || "";
   addEventBubble("thought", "💭", String(title),
     `<span class="evtb-chip">${escapeHtml(String(role))}</span>`,
-    wrapCollapsible("内容（点击展开/收起）", `<pre class="evt-pre">${escapeHtml(String(text))}</pre>`, false), ts);
+    wrapCollapsible("内容（点击展开/收起）", `<pre class="evt-pre">${escapeHtml(String(text))}</pre>`, false), ts, host);
 }
 
 // 历史回放：审批卡（只读，展示提问/命令/最终决定；不做交互）
@@ -1170,6 +1275,7 @@ function stopChat() {
 async function loadHistory(tid) {
   const inner = messagesInner();
   inner.innerHTML = "";
+  closeProcGroup();  // 清空消息流时丢弃"执行过程"聚合组引用，避免指向已移除的 DOM
   resetTodoPanel();
   try {
     const data = await apiGet(`/api/messages?thread_id=${encodeURIComponent(tid)}&limit=500`);
@@ -1261,6 +1367,7 @@ function renderHistory(msgs) {
       continue;
     }
     if (m.role === "user") {
+      closeProcGroup();  // 用户消息是一轮过程的分界：后续过程事件另起一组
       const wrap = document.createElement("div");
       wrap.className = "msg user";
       wrap.innerHTML = `<div class="msg-body"><div class="msg-text">${renderMarkdown(m.content)}</div></div>`;
@@ -1276,7 +1383,9 @@ function renderHistory(msgs) {
       }
       // 跳过：同 thread 已有 llm_call 事件承载同一段文本（与前端流式播放期间显示的
       // "🧠 模型调用 → 📤 模型输出"内容一致），不重复画 Agnes 气泡。
-      if (_isDupOfLlmCall(m.content)) {
+      // 但"简洁模式"下 llm_call 已被折叠进过程摘要行，用户看不到模型输出——
+      // 此时必须让正文气泡照常显示，否则会出现"对话里只剩摘要行、回复全没了"。
+      if (State.displayMode !== "compact" && _isDupOfLlmCall(m.content)) {
         // tool_calls 仍需维护（供后续 tool 消息填充工具卡片）——消息顺序里 tool 消息
         // 紧跟此 assistant 之后，必须让 pendingToolIds 准备好。
         const hasCalls = Array.isArray(m.tool_calls) && m.tool_calls.length;
@@ -1292,10 +1401,16 @@ function renderHistory(msgs) {
         assistantWrap = assistantWrap || (() => { const w = document.createElement("div"); w.className = "msg assistant"; inner.appendChild(w); return w; })();
         continue;
       }
-      const wrap = document.createElement("div");
-      wrap.className = "msg assistant";
       const content = m.content || "";
       const hasCalls = Array.isArray(m.tool_calls) && m.tool_calls.length;
+      // 简洁模式下工具卡由"过程摘要行"承载，正文气泡里不再重复贴
+      const showToolCards = hasCalls && State.displayMode !== "compact";
+      // 工具轮的 assistant 常常只有 tool_calls、没有正文：这种"空气泡"不占位，
+      // 也不能当作一轮过程的分界（否则会把一轮切成好几条摘要行）。
+      if (!content.trim() && !showToolCards) continue;
+      if (content.trim()) closeProcGroup();  // 真正的正文才结束这一轮的过程分组
+      const wrap = document.createElement("div");
+      wrap.className = "msg assistant";
       wrap.innerHTML = `
         <div class="msg-body">
           <div class="msg-head">
@@ -1310,23 +1425,25 @@ function renderHistory(msgs) {
         </div>`;
       inner.appendChild(wrap);
       assistantWrap = wrap;
-      // 收集 tool_calls
+      // 收集 tool_calls（供后续 tool 消息回填工具卡）
       if (hasCalls) {
         pendingToolCalls = m.tool_calls.slice();
         pendingToolIds = {};
         m.tool_calls.forEach((tc) => {
           pendingToolIds[tc.id] = { name: tc.name || "tool", args: tc.arguments || tc.args || "", done: false };
         });
-        const box = $(".msg-text", wrap);
-        pendingToolCalls.forEach((tc) => {
-          const card = createToolCard(tc.name || "tool");
-          card.classList.add("success");
-          const badge = $(".tool-badge", card);
-          if (badge) { badge.textContent = "✓ 完成"; badge.className = "tool-badge ok"; }
-          const p = $(".tool-args", card);
-          if (p) p.textContent = prettyArgs(tc.arguments || tc.args || "");
-          box.appendChild(card);
-        });
+        if (showToolCards) {
+          const box = $(".msg-text", wrap);
+          pendingToolCalls.forEach((tc) => {
+            const card = createToolCard(tc.name || "tool");
+            card.classList.add("success");
+            const badge = $(".tool-badge", card);
+            if (badge) { badge.textContent = "✓ 完成"; badge.className = "tool-badge ok"; }
+            const p = $(".tool-args", card);
+            if (p) p.textContent = prettyArgs(tc.arguments || tc.args || "");
+            box.appendChild(card);
+          });
+        }
       }
     } else if (m.role === "tool") {
       // 填充对应 tool_call 的结果
@@ -1526,6 +1643,7 @@ async function newThread() {
     const data = await apiPost("/api/command", { command: "/new" });
     State.threadId = data.thread_id || State.threadId;
     messagesInner().innerHTML = "";
+    closeProcGroup();  // 清空消息流时丢弃过程聚合组引用
     resetTodoPanel();
     renderWelcome();
     updateChatTitle("新对话");
@@ -1848,50 +1966,31 @@ async function renderTraceTab(el) {
     const data = await apiGet(`/api/trace?limit=300${tid}`);
     const events = data.events || [];
     if (!events.length) { el.innerHTML = `<div class="d-empty">暂无追踪记录</div>`; return; }
-    // 备份风格元素：按 node_start 分组时间线 + LLM 消息卡（markdown 输出 + 折叠输入）+ 折叠工具卡 + 错误卡
-    const ts = (t) => (t || "").slice(11, 19);
-    let html = "";
-    let groupOpen = false;
+    // 与对话区右侧保持一致：直接复用对话流的气泡渲染（同一套 addEventBubble 样式），
+    // host 指向本抽屉容器即可，不再自己拼一套 trace 专属 HTML。
+    el.innerHTML = drawerSection(`追踪（${events.length} 条）`, `<div id="traceStream" class="trace-stream"></div>`) +
+      `<div class="d-row"><button class="d-btn danger" id="traceClear">清空追踪</button></div>`;
+    const host = $("#traceStream", el);
     for (const evt of events) {
       const d = evt.data || {};
       const etype = evt.type || "";
-      const nodeColor = TRACE_NODE_COLOR[d.node] || "var(--text-faint)";
-      if (etype === "node_start") {
-        if (groupOpen) html += "</div>";
-        groupOpen = true;
-        html += `<div class="trace-group" style="--tnode:${nodeColor}">
-          <div class="trace-group-head"><span>🚀</span><b>${escapeHtml(d.node || "")}</b><span class="trace-ts">${escapeHtml(ts(evt.ts))}</span></div>`;
-      } else if (etype === "node_end") {
-        html += `<div class="trace-group-end"><span>🏁</span><span>${escapeHtml(String(d.result || "完成"))}</span></div>`;
-      } else if (etype === "llm_call") {
-        // ChatGPT 风格消息卡：模型标签 + 折叠输入 + markdown 输出
-        const inPreview = String(d.input || "").length > 300 ? String(d.input).slice(0, 300) + "…" : (d.input || "");
-        html += `<div class="trace-llm">
-          <div class="t-llm-head" onclick="toggleTraceCard(this)">
-            <span>🤖</span><b>${escapeHtml(d.model || "模型")}</b>
-            <span class="trace-ts">${d.duration_ms != null ? escapeHtml(d.duration_ms + "ms") : ""}</span>
-            <span class="t-llm-toggle">${d.input ? "▸ 输入" : "▾"}</span>
-          </div>
-          ${d.input ? `<div class="t-llm-input">${escapeHtml(inPreview)}</div>` : ""}
-          ${d.output ? `<div class="t-llm-output md-body">${renderMarkdown(String(d.output))}</div>` : ""}
-        </div>`;
-      } else if (etype === "tool_call") {
-        // 折叠工具卡：点击展开参数/结果
-        const isErr = /错误|error|fail|禁止|拒绝/i.test(String(d.result || ""));
-        html += `<div class="trace-tool ${isErr ? "err" : ""}" onclick="toggleTraceCard(this)">
-          <div class="trace-tool-head"><span>${isErr ? "❌" : "🔧"}</span><b>${escapeHtml(d.name || "")}</b><span class="trace-ts">▸</span></div>
-          <div class="trace-tool-body">
-            <div class="trace-tool-sec">参数: ${escapeHtml(String(d.params || ""))}</div>
-            <div class="trace-tool-sec">结果: ${escapeHtml(String(d.result || ""))}</div>
-          </div>
-        </div>`;
-      } else if (etype === "error") {
-        html += `<div class="trace-error">❌ ${escapeHtml(String(d.message || ""))}</div>`;
-      }
+      try {
+        if (etype === "node_start") {
+          renderNodeEvent({ name: d.node, phase: "start" }, evt.ts, host);
+        } else if (etype === "node_end") {
+          renderNodeEvent({ name: d.node, phase: "end", result: d.result }, evt.ts, host);
+        } else if (etype === "llm_call") {
+          renderLlmCall(d, evt.ts, host);
+        } else if (etype === "tool_call") {
+          renderToolEvent(d, evt.ts, host);
+        } else if (etype === "thought") {
+          renderThoughtEvent(d, evt.ts, host);
+        } else if (etype === "error") {
+          addEventBubble("node", "❌", "错误", "",
+            `<pre class="evt-pre">${escapeHtml(String(d.message || ""))}</pre>`, evt.ts, host);
+        }
+      } catch (e) { /* 单条渲染失败不影响整体 */ }
     }
-    if (groupOpen) html += "</div>";
-    el.innerHTML = drawerSection(`追踪（${events.length} 条）`, html) +
-      `<div class="d-row"><button class="d-btn danger" id="traceClear">清空追踪</button></div>`;
     $("#traceClear", el).addEventListener("click", async () => {
       await apiPost("/api/trace/clear", { thread_id: State.threadId });
       renderTraceTab(el);
@@ -2352,9 +2451,33 @@ async function renderGitTab(el) {
   } catch (e) { el.innerHTML = drawerErr(e); }
 }
 
+/* ---- 对话显示模式（详细 / 简洁） ---- */
+async function renderDisplayTab(el) {
+  const cur = State.displayMode || "verbose";
+  el.innerHTML = drawerSection("对话显示模式", `
+    <div class="mode-list">
+      ${DISPLAY_MODES.map((m) => `
+        <button class="mode-card ${m.id === cur ? "active" : ""}" data-mode="${m.id}">
+          <span class="mode-ico">${m.icon}</span>
+          <span class="mode-text"><b>${m.name}</b><span>${escapeHtml(m.desc)}</span></span>
+          <span class="mode-check">${m.id === cur ? "✓" : ""}</span>
+        </button>`).join("")}
+    </div>
+    <div class="d-empty" style="margin-top:8px">
+      切换后当前会话立即按新模式重绘；若回复正在生成，则在本次回复结束后生效。选择会被记住。
+    </div>`);
+  $$(".mode-card", el).forEach((btn) => {
+    btn.addEventListener("click", () => {
+      setDisplayMode(btn.dataset.mode);
+      renderDisplayTab(el);
+    });
+  });
+}
+
 /* ---- 抽屉 tab 注册表 ---- */
 const DRAWER_LOADERS = {
   state: renderStateTab,
+  display: renderDisplayTab,
   prompt: renderPromptTab,
   trace: renderTraceTab,
   memory: renderMemoryTab,
@@ -2368,6 +2491,7 @@ const DRAWER_LOADERS = {
 
 const DRAWER_TABS = [
   { id: "state", label: "State", icon: "📊" },
+  { id: "display", label: "显示", icon: "🖥️" },
   { id: "prompt", label: "提示词", icon: "📄" },
   { id: "trace", label: "追踪", icon: "🧭" },
   { id: "memory", label: "记忆", icon: "🧠" },
@@ -2504,6 +2628,8 @@ async function init() {
 
   // 主题
   applyTheme();
+  // 对话显示模式（必须在首次渲染历史前恢复，否则历史会按默认模式画一遍）
+  initDisplayMode();
   // 模型信息
   try {
     const m = await apiGet("/api/models");

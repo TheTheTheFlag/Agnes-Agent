@@ -1205,7 +1205,16 @@ input, textarea { font-family: inherit; }
 .lv-debug { background: var(--bg-hover); color: var(--text-faint); }
 .d-log .msg { color: var(--text-soft); }
 
-/* 追踪 tab：分组时间线 + LLM 消息卡 + 折叠工具卡（备份元素风格，适配当前主题） */
+/* 追踪 tab：直接复用对话区气泡（.msg.assistant.evtb），这里只做容器适配 */
+.trace-stream {
+  padding: 4px 2px 8px;
+  max-height: 62vh;
+  overflow-y: auto;
+}
+.trace-stream .msg { margin-bottom: 12px; }
+.trace-stream .msg-body { max-width: 100%; }
+
+/* 追踪 tab（旧版紧凑列表样式）：已被上面的对话区气泡替代，保留样式以便回退 */
 .trace-group {
   margin: 10px 0;
   border-left: 3px solid var(--tnode, var(--text-faint));
@@ -1687,6 +1696,87 @@ input, textarea { font-family: inherit; }
 .proc-text .proc-body > :last-child { margin-bottom: 0; }
 .proc-text.collapsed .proc-body { display: none; }
 .proc-text:hover { border-left-color: var(--accent-2); }
+
+/* ==================== 简洁模式：过程摘要行 ==================== */
+/* 显示模式切到"简洁"时，节点/模型/工具/思考气泡收进这里。
+   刻意做成 Reasonix 那种"一行浅灰小字 + ›"：无边框、无底色、不横贯全宽，
+   点开后才展开细节；详细模式下该容器不会出现。 */
+.proc-group {
+  margin: 2px 0 10px;
+}
+.proc-group > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 6px 2px 0;
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-faint);
+}
+.proc-group > summary::-webkit-details-marker { display: none; }
+.proc-group > summary:hover { color: var(--text-soft); }
+.proc-group[open] > summary { color: var(--text-soft); }
+.proc-group .pg-arrow {
+  font-size: 12px;
+  color: var(--text-faint);
+  transition: transform 0.15s;
+}
+.proc-group > summary:hover .pg-arrow { transform: translateX(2px); }
+.proc-group[open] .pg-arrow { transform: rotate(90deg); }
+.proc-group-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 6px 0 12px 3px;
+  padding-left: 12px;
+  border-left: 2px solid var(--border-soft);
+}
+.proc-group-body .msg { margin-bottom: 0; }
+.proc-group-body .msg-body { max-width: 100%; }
+/* 展开后的细节同样保持轻量：去掉头像与卡片底色/阴影，只留标题行 + 可展开内容 */
+.proc-group-body .evtb .msg-avatar { display: none; }
+.proc-group-body .evtb .msg-body {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+}
+.proc-group-body .evtb .msg-head { margin-bottom: 3px; }
+.proc-group-body .evtb .evt-collapse {
+  background: transparent;
+  margin: 3px 0;
+}
+
+/* ==================== 调试面板：显示模式卡片 ==================== */
+.mode-list { display: flex; flex-direction: column; gap: 8px; }
+.mode-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-elev);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.mode-card:hover { border-color: var(--accent); }
+.mode-card.active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg-elev));
+}
+.mode-card .mode-ico { font-size: 16px; line-height: 1.3; flex: 0 0 auto; }
+.mode-card .mode-text { display: flex; flex-direction: column; gap: 3px; }
+.mode-card .mode-text b { font-size: 12.5px; }
+.mode-card .mode-text span { font-size: 11.5px; color: var(--text-soft); line-height: 1.55; }
+.mode-card .mode-check { margin-left: auto; color: var(--accent); font-weight: 700; font-size: 13px; }
 
 /* ==================== 独立事件气泡（节点/模型/工具/思考） ==================== */
 .evtb { }
