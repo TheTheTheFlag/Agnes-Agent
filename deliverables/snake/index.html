@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>贪吃蛇 - Neon Snake</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="container">
+    <h1 class="title">🐍 NEON SNAKE</h1>
+    
+    <div class="stats">
+      <div class="stat">
+        <span class="label">得分</span>
+        <span id="score">0</span>
+      </div>
+      <div class="stat">
+        <span class="label">最高分</span>
+        <span id="highScore">0</span>
+      </div>
+      <div class="stat">
+        <span class="label">关卡</span>
+        <span id="level">1</span>
+      </div>
+      <div class="stat">
+        <span class="label">速度</span>
+        <span id="speed">1x</span>
+      </div>
+    </div>
+    
+    <div class="canvas-wrapper">
+      <canvas id="gameCanvas" width="400" height="400"></canvas>
+      <div id="overlay" class="overlay">
+        <div class="overlay-content">
+          <h2 id="overlayTitle">按任意键开始</h2>
+          <p id="overlaySubtitle">使用方向键或 WASD 控制</p>
+          <button id="startBtn">开始游戏</button>
+        </div>
+      </div>
+    </div>
+    
+    <div class="controls">
+      <p>方向键 / WASD 控制移动</p>
+      <p>空格键 暂停/继续</p>
+    </div>
+  </div>
+  
+  <script src="game.js"></script>
+</body>
+</html>

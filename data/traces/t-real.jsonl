@@ -1,2 +1,0 @@
-{"type": "node_start", "ts": "2026-09-12T11:23:13.332", "ts_ms": 1789183393332.6274, "data": {"node": "summarizer"}}
-{"type": "node_end", "ts": "2026-09-12T11:23:13.383", "ts_ms": 1789183393383.723, "data": {"node": "summarizer", "result": "0 个产物"}}

@@ -1,2 +1,0 @@
-{"type": "node_start", "ts": "2026-09-12T11:21:38.947", "ts_ms": 1789183298947.6665, "data": {"node": "summarizer"}}
-{"type": "node_end", "ts": "2026-09-12T11:21:38.951", "ts_ms": 1789183298951.9973, "data": {"node": "summarizer", "result": "无计划可汇总"}}
