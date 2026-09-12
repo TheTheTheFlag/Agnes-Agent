@@ -177,8 +177,13 @@ class RotatingKeyChatOpenAI:
                 self.current_index = i
                 try:
                     client = self._create_client()
-                    self.attempt_count = 0  # 成功后复位，防止上次耗尽导致后续调用全部直接失败
-                    return client.invoke(messages, **kwargs)
+                    # 注意：必须在**调用成功之后**才复位 attempt_count。
+                    # 曾经把它写在 client.invoke 之前，导致每轮进入 for 时都被清零，
+                    # while self.attempt_count < max_rounds 恒为真 → 全部 key 失败后
+                    # 无限退避重试（实测卡住 13 分钟以上，节点永远停在 running）。
+                    resp = client.invoke(messages, **kwargs)
+                    self.attempt_count = 0
+                    return resp
                 except _RETRYABLE as e:
                     if self._is_non_retryable(e):
                         raise  # 400 立即抛，不重试
@@ -190,7 +195,7 @@ class RotatingKeyChatOpenAI:
                     if self._is_non_retryable(e):
                         raise
                     raise
-            # 一轮全部失败 → 退避重试
+            # 一轮全部失败 → 退避重试（attempt_count += 1，受 max_rounds 约束）
             self._reset_from_start()
         # openai>=2 的 RateLimitError 等 APIStatusError 子类构造必须携带 response/body，
         # 不能手工 RateLimitError("...")——否则构造时即抛 TypeError。
