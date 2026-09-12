@@ -27,6 +27,7 @@ from app.llm import create_llm
 from app.memory import MemoryManager
 from app.planning.dag_planner import create_dag_planner_node
 from app.planning.dag_executor import create_executor
+from app.planning.dag_summarizer import create_dag_summarizer
 from app.planning.react_loop import ReActLoop
 from app.server import update_state, update_prompt, add_log_entry, add_event
 
@@ -520,8 +521,10 @@ def build_graph():
     builder.add_node("chatbot", chatbot)
     builder.add_node("planner", planner_node)
     builder.add_node("executor", create_executor([llm], tools))
-    # 注：原 summarizer 节点已废弃。历史对话摘要注入由 chatbot 内部完成（build_memory_injection）。
-    # DAG 任务完成后直接 END，不再单独经过 summarizer 节点。
+    # DAG 全部终态后的「交付汇总」节点：把各子任务结果汇总成最终答复交给用户。
+    # 注意：它与 build_memory_injection（历史对话压缩注入）是两件事，不能互相替代——
+    # 少了它，任务跑完直接 END，用户只看到过程气泡、没有人"复命"。
+    builder.add_node("summarizer", create_dag_summarizer(llm))
 
     builder.add_edge(START, "chatbot")
     # chatbot 退出后按 state 决定下一步
@@ -532,11 +535,12 @@ def build_graph():
     })
     # planner 之后总是进入 executor
     builder.add_edge("planner", "executor")
-    # executor 退出后根据 DAG 状态决定：还有未完成 → 继续；全终态 → END
+    # executor 退出后根据 DAG 状态决定：还有未完成 → 继续；全部终态 → summarizer 汇总
     builder.add_conditional_edges("executor", route_after_executor, {
-        "executor": "executor", "summarizer": END,
+        "executor": "executor", "summarizer": "summarizer",
     })
-    # task 完成直接结束（不再单独 summarizer）
+    # 汇总节点把最终答复写成 AIMessage（SSE 推成 step=final,node=summarizer），随后本图结束
+    builder.add_edge("summarizer", END)
 
     conn = sqlite3.connect(CHECKPOINT_DB_PATH, check_same_thread=False)
     checkpointer = SqliteSaver(conn)
