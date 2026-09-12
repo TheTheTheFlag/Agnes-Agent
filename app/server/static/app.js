@@ -825,12 +825,19 @@ function endStreaming(finalText) {
   if (host) {
     host.classList.remove("streaming", "pending");
     if (!State.streamBuffer && finalText) State.streamBuffer = finalText;
-    flushStreamRender();
     const tn = $("#stream-text", host);
-    if (tn && State.streamBuffer) tn.innerHTML = renderMarkdown(State.streamBuffer);
-    // 没有文本内容、没有任何卡片/思考过程段 → 移除空气泡
+    // 只有确实有内容时才用缓冲刷新。done / node end / 停止 都会二次进入这里，
+    // 此时缓冲已空，无条件 flush 会把刚渲染好的最终回答覆盖成空白
+    // （表现为"回答一闪而过"）。
+    if (State.streamBuffer) {
+      flushStreamRender();
+      if (tn) tn.innerHTML = renderMarkdown(State.streamBuffer);
+    }
+    // 没有文本内容、没有任何卡片/思考过程段 → 移除空气泡。
+    // 注意：已经渲染出文字的不能当空气泡删掉（紧凑模式的最终回答就没有工具卡）。
     const hasExtras = $(".tool-card, .approval-card, .proc-text", host);
-    if (!State.streamBuffer && !hasExtras) host.remove();
+    const hasText = !!(tn && tn.textContent.trim());
+    if (!State.streamBuffer && !hasExtras && !hasText) host.remove();
   }
   // 不在这里清 State.currentAssistantEl——
   // 真正的"流结束"由调用方在合适的时机显式清空（done/error/abort/node end 非 chatbot）
