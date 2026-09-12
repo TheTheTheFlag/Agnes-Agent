@@ -7,7 +7,6 @@
 {{profile_section}}
 {{preferences_section}}
 {{summary_section}}
-{{task_plan_section}}
 
 <agent_instructions>
 <role>
