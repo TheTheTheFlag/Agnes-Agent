@@ -302,44 +302,6 @@ def ensure_tool_calls(response: AIMessage) -> AIMessage:
     return response
 
 
-def compress_messages(messages: List, llm_instance, max_tokens: int, thread_id: str = None, depth: int = 0) -> List:
-    if depth > 3:
-        if len(messages) > KEEP_RECENT:
-            truncated = messages[-KEEP_RECENT:]
-            while count_tokens(truncated) > max_tokens and len(truncated) > 2:
-                truncated = truncated[1:]
-            return [SystemMessage(content="[已截断早期对话]")] + truncated
-        return messages
-    current_tokens = count_tokens(messages)
-    if current_tokens <= max_tokens:
-        return messages
-    mm = MemoryManager(db_path=DB_PATH)
-    classified = mm.importance_filter(messages, llm_instance)
-    compressed = []
-    if classified['summarize']:
-        summary_text = mm.generate_summary_from_messages(classified['summarize'], llm_instance)
-        if len(summary_text) > 1000:
-            summary_text = summary_text[:1000] + "..."
-        if thread_id:
-            mm.save_summary(thread_id, summary_text)
-        compressed.append(SystemMessage(content=f"[对话摘要]\n{summary_text}"))
-    for msg in classified['keep']:
-        if hasattr(msg, 'content') and isinstance(msg.content, str) and len(msg.content) > 2000:
-            msg.content = msg.content[:2000] + "..."
-        compressed.append(msg)
-    new_tokens = count_tokens(compressed)
-    if new_tokens > max_tokens:
-        if len(compressed) > 30:
-            compressed = compressed[-30:]
-        while count_tokens(compressed) > max_tokens:
-            longest = max(compressed, key=lambda m: len(getattr(m, 'content', '')))
-            if hasattr(longest, 'content') and isinstance(longest.content, str):
-                longest.content = longest.content[:int(len(longest.content)*0.8)] + "..."
-            else:
-                break
-    return compressed
-
-
 def ensure_token_limit(messages: List, system_text: str, thread_id: str = None) -> List:
     """把待发消息收敛到 TOKEN_LIMIT 预算内。
 

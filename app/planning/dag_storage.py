@@ -8,11 +8,6 @@
   - 节点节点状态机：pending / ready / running / success / failed / skipped
   - 边带 soft 标记（软依赖：父失败不阻塞子，但子上下文标注"缺数据"）
   - 按节点提交 = 轻量 checkpoint；recover_stale_running 处理重启后"running 悬空"
-
-本模块**独立**于旧 memory_manager 的 task_plans/subtasks：当前过渡期两套表共存
-（dag_plans/nodes/edges 与旧的 task_plans/subtasks 并存），后续将所有调用方迁移到新表
-后再清理旧表。旧代码路径（executor 依赖旧 subsubtask 方法）将由新执行器替换，
-不再引用旧表。
 """
 
 import json
@@ -47,9 +42,8 @@ class DAGStorage:
     # ---------------- schema ----------------
     def _init_db(self):
         with sqlite3.connect(self.db_path) as conn:
-            # 过渡期：保留旧 task_plans / subtasks，避免面板的 /api/threads
-            # 等接口在新旧规划器共存时抛 "no such table" 报错。
-            # 旧路径将由执行器替换后再清理。
+            # 旧规划器时代已废弃：task_plans / subtasks 表不再创建，
+            # 相关接口（/api/threads、list_my_recent_tasks 等）已统一改读 dag_* 表。
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS dag_plans (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,

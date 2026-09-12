@@ -375,6 +375,11 @@ _MEMORY_TABLES = {
         "pk": "id",
         "columns": ["id", "thread_id", "role", "content", "tool_calls", "tool_call_id", "timestamp"],
     },
+    "history_summaries": {
+        "label": "L1 · 历史对话压缩",
+        "pk": "id",
+        "columns": ["id", "thread_id", "summary_text", "importance_score", "access_count", "start_time", "end_time", "created_at"],
+    },
     # L2 用户画像/偏好
     "user_profile": {
         "label": "L2 · 用户画像",
@@ -386,21 +391,21 @@ _MEMORY_TABLES = {
         "pk": "key",
         "columns": ["key", "value", "updated_at"],
     },
-    # L3 任务历史
-    "task_summaries": {
-        "label": "L3 · 任务摘要",
+    # L3 任务历史（新规划器：dag_plans / dag_nodes / dag_edges）
+    "dag_plans": {
+        "label": "L3 · DAG 计划（新规划器）",
         "pk": "id",
-        "columns": ["id", "thread_id", "summary_text", "start_time", "end_time", "created_at"],
+        "columns": ["id", "thread_id", "goal", "replan_count", "status", "checkpoint", "created_at", "updated_at"],
     },
-    "task_plans": {
-        "label": "L3 · 任务计划",
+    "dag_nodes": {
+        "label": "L3 · DAG 节点",
         "pk": "id",
-        "columns": ["id", "thread_id", "goal", "status", "created_at", "updated_at", "deleted_at"],
+        "columns": ["id", "plan_id", "node_id", "description", "tool", "params", "status", "result", "artifacts", "updated_at"],
     },
-    "subtasks": {
-        "label": "L3 · 子任务",
+    "dag_edges": {
+        "label": "L3 · DAG 边",
         "pk": "id",
-        "columns": ["id", "thread_id", "task_plan_id", "subtask_id", "description", "dependencies", "status", "result", "artifacts", "created_at", "updated_at"],
+        "columns": ["id", "plan_id", "from_id", "to_id", "soft"],
     },
     # L4 命令历史
     "command_history": {
@@ -414,28 +419,11 @@ _MEMORY_TABLES = {
         "pk": "id",
         "columns": ["id", "source", "query", "content", "hit_count", "last_accessed_at", "created_at", "expires_at"],
     },
-    # ----- 新规划器 (DAG) 表：与 task_plans / subtasks 共存于过渡期 -----
-    "dag_plans": {
-        "label": "DAG 计划 (新规划器)",
-        "pk": "id",
-        "columns": ["id", "thread_id", "goal", "replan_count", "status", "checkpoint", "created_at", "updated_at"],
-    },
-    "dag_nodes": {
-        "label": "DAG 节点",
-        "pk": "id",
-        "columns": ["id", "plan_id", "node_id", "description", "tool", "params", "status", "result", "artifacts", "updated_at"],
-    },
-    "dag_edges": {
-        "label": "DAG 边",
-        "pk": "id",
-        "columns": ["id", "plan_id", "from_id", "to_id", "soft"],
-    },
 }
 
 # MemoryDB 浏览器里要隐藏的表（仍在 DB 中存在、仍可被其他模块使用，
-# 只是不让面板看到/操作）。当前为旧规划器时代的表：已经被新 DAG 替代，
-# 不再被写入，仅保留为历史数据。如需恢复展示，从这里移除即可。
-_MDB_HIDDEN = {"task_plans", "subtasks", "task_summaries"}
+# 只是不让面板看到/操作）。
+_MDB_HIDDEN: set = set()
 
 import re as _re
 _SAFE_IDENT = _re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")

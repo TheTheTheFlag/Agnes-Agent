@@ -39,46 +39,19 @@ class MemoryManager:
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
 
-                -- 任务计划主表
-                CREATE TABLE IF NOT EXISTS task_plans (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    thread_id TEXT NOT NULL,
-                    goal TEXT NOT NULL,
-                    status TEXT NOT NULL,   -- planning, executing, completed, deleted
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    deleted_at TIMESTAMP NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_task_plans_thread ON task_plans(thread_id);
-
-                -- 子任务表（增加 artifacts 字段）
-                CREATE TABLE IF NOT EXISTS subtasks (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    thread_id TEXT NOT NULL,
-                    task_plan_id INTEGER NOT NULL,
-                    subtask_id TEXT NOT NULL,
-                    description TEXT NOT NULL,
-                    dependencies TEXT,
-                    status TEXT DEFAULT 'pending',
-                    result TEXT,
-                    artifacts TEXT,  -- 存储产出文件清单（JSON 数组）
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (task_plan_id) REFERENCES task_plans(id) ON DELETE CASCADE,
-                    UNIQUE(thread_id, task_plan_id, subtask_id)
-                );
-                CREATE INDEX IF NOT EXISTS idx_subtasks_task_plan ON subtasks(task_plan_id);
-
-                CREATE TABLE IF NOT EXISTS task_summaries (
+                CREATE TABLE IF NOT EXISTS history_summaries (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     thread_id TEXT NOT NULL,
                     summary_text TEXT NOT NULL,
+                    importance_score REAL DEFAULT 5.0,  -- 1.0 ~ 10.0, LLM 评分
+                    access_count INTEGER DEFAULT 0,   -- 检索命中次数
                     start_time TIMESTAMP,
                     end_time TIMESTAMP,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
-                CREATE INDEX IF NOT EXISTS idx_task_summaries_thread_id ON task_summaries(thread_id);
-                CREATE INDEX IF NOT EXISTS idx_task_summaries_created_at ON task_summaries(created_at);
+                CREATE INDEX IF NOT EXISTS idx_history_summaries_thread_id ON history_summaries(thread_id);
+                CREATE INDEX IF NOT EXISTS idx_history_summaries_created_at ON history_summaries(created_at);
+                CREATE INDEX IF NOT EXISTS idx_history_summaries_importance ON history_summaries(importance_score);
 
                 CREATE TABLE IF NOT EXISTS messages (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -135,6 +108,20 @@ class MemoryManager:
                     conn.execute("ALTER TABLE messages ADD COLUMN meta TEXT")
                 try:
                     conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_kind ON messages(thread_id, kind)")
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+            # ---- history_summaries 表结构迁移：旧库补 importance_score/access_count 列（history_summary 评分用）----
+            try:
+                _ts_cols = {r[1] for r in conn.execute("PRAGMA table_info(history_summaries)").fetchall()}
+                if "importance_score" not in _ts_cols:
+                    conn.execute("ALTER TABLE history_summaries ADD COLUMN importance_score REAL DEFAULT 5.0")
+                if "access_count" not in _ts_cols:
+                    conn.execute("ALTER TABLE history_summaries ADD COLUMN access_count INTEGER DEFAULT 0")
+                try:
+                    conn.execute("CREATE INDEX IF NOT EXISTS idx_history_summaries_importance ON history_summaries(importance_score)")
                 except Exception:
                     pass
             except Exception:
@@ -284,197 +271,7 @@ class MemoryManager:
                 "timestamp": row[6]
             } for row in cur.fetchall()]
 
-    # -------------------- 任务计划管理（软删除） --------------------
-    def create_task_plan(self, thread_id: str, goal: str) -> int:
-        with sqlite3.connect(self.db_path) as conn:
-            cur = conn.execute(
-                "INSERT INTO task_plans (thread_id, goal, status) VALUES (?, ?, ?)",
-                (thread_id, goal, "planning")
-            )
-            return cur.lastrowid
-
-    def update_task_plan_status(self, task_plan_id: int, status: str):
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                "UPDATE task_plans SET status = ?, updated_at = ? WHERE id = ?",
-                (status, datetime.now(), task_plan_id)
-            )
-
-    def complete_task_plan(self, task_plan_id: int):
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                "UPDATE task_plans SET status = 'completed', updated_at = ? WHERE id = ?",
-                (datetime.now(), task_plan_id)
-            )
-
-    def delete_task_plan(self, thread_id: str, task_plan_id: int = None):
-        with sqlite3.connect(self.db_path) as conn:
-            if task_plan_id:
-                conn.execute(
-                    "UPDATE task_plans SET status = 'deleted', deleted_at = ?, updated_at = ? WHERE id = ?",
-                    (datetime.now(), datetime.now(), task_plan_id)
-                )
-            else:
-                conn.execute(
-                    "UPDATE task_plans SET status = 'deleted', deleted_at = ?, updated_at = ? WHERE thread_id = ? AND status != 'deleted'",
-                    (datetime.now(), datetime.now(), thread_id)
-                )
-
-    # -------------------- 子任务管理（含 artifacts） --------------------
-    def add_subtask(self, task_plan_id: int, thread_id: str, subtask_id: str,
-                    description: str, dependencies: List[str], artifacts: str = "[]"):
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                """INSERT INTO subtasks (thread_id, task_plan_id, subtask_id, description, dependencies, status, artifacts)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (thread_id, task_plan_id, subtask_id, description,
-                 json.dumps(dependencies), "pending", artifacts)
-            )
-
-    def get_subtasks(self, task_plan_id: int) -> List[Dict]:
-        with sqlite3.connect(self.db_path) as conn:
-            cur = conn.execute(
-                "SELECT subtask_id, description, dependencies, status, result, artifacts FROM subtasks WHERE task_plan_id = ? ORDER BY id",
-                (task_plan_id,)
-            )
-            rows = cur.fetchall()
-            subtasks = []
-            for row in rows:
-                deps = row[2]
-                if deps:
-                    try:
-                        deps = json.loads(deps)
-                    except Exception:
-                        deps = []
-                else:
-                    deps = []
-                if not isinstance(deps, list):
-                    deps = []
-                artifacts_raw = row[5]
-                if artifacts_raw:
-                    try:
-                        artifacts = json.loads(artifacts_raw)
-                    except Exception:
-                        artifacts = []
-                else:
-                    artifacts = []
-                subtasks.append({
-                    "id": row[0],
-                    "description": row[1],
-                    "dependencies": deps,
-                    "status": row[3],
-                    "result": row[4],
-                    "artifacts": artifacts
-                })
-            return subtasks
-
-    def update_subtask_status(self, task_plan_id: int, subtask_id: str, status: str,
-                              result: str = None, artifacts: List[str] = None):
-        with sqlite3.connect(self.db_path) as conn:
-            if result is not None and artifacts is not None:
-                conn.execute(
-                    "UPDATE subtasks SET status = ?, result = ?, artifacts = ?, updated_at = ? WHERE task_plan_id = ? AND subtask_id = ?",
-                    (status, result, json.dumps(artifacts, ensure_ascii=False),
-                     datetime.now(), task_plan_id, subtask_id)
-                )
-            elif result is not None:
-                conn.execute(
-                    "UPDATE subtasks SET status = ?, result = ?, updated_at = ? WHERE task_plan_id = ? AND subtask_id = ?",
-                    (status, result, datetime.now(), task_plan_id, subtask_id)
-                )
-            elif artifacts is not None:
-                conn.execute(
-                    "UPDATE subtasks SET status = ?, artifacts = ?, updated_at = ? WHERE task_plan_id = ? AND subtask_id = ?",
-                    (status, json.dumps(artifacts, ensure_ascii=False),
-                     datetime.now(), task_plan_id, subtask_id)
-                )
-            else:
-                conn.execute(
-                    "UPDATE subtasks SET status = ?, updated_at = ? WHERE task_plan_id = ? AND subtask_id = ?",
-                    (status, datetime.now(), task_plan_id, subtask_id)
-                )
-
-    def recover_stale_running(self, task_plan_id: int, timeout_seconds: int = 300) -> int:
-        """恢复卡在 running 超过 timeout 的子任务为 failed（避免无限等"running"）。
-        返回恢复的子任务数。"""
-        with sqlite3.connect(self.db_path) as conn:
-            cur = conn.execute(
-                """SELECT subtask_id, updated_at FROM subtasks
-                   WHERE task_plan_id = ? AND status = 'running'""",
-                (task_plan_id,),
-            )
-            stale = []
-            for r in cur.fetchall():
-                try:
-                    from datetime import datetime as _dt
-                    last = _dt.fromisoformat((r[1] or '').replace(' ', 'T'))
-                    if (_dt.now() - last).total_seconds() > timeout_seconds:
-                        stale.append(r[0])
-                except Exception:
-                    pass
-            for sid in stale:
-                conn.execute(
-                    "UPDATE subtasks SET status = 'failed', result = 'stale running 超时自动清理', updated_at = ? WHERE task_plan_id = ? AND subtask_id = ?",
-                    (datetime.now(), task_plan_id, sid),
-                )
-            return len(stale)
-
-    def get_next_executable_subtask(self, task_plan_id: int) -> Optional[Dict]:
-        """查下一个可执行子任务（DB 唯一来源）：
-          1) pending 状态 + 依赖都已 done 的子任务（按 id 顺序）
-          2) 找不到则返回 None（说明全部完成或无 pending）
-        注意：这里**不**选 running 子任务——重入 executor 时不应重跑正在跑的。
-        """
-        subs = self.get_subtasks(task_plan_id)
-        # 第一轮：依赖都已 done 的 pending 子任务
-        done_ids = {s['id'] for s in subs if s['status'] == 'done'}
-        for s in subs:
-            if s['status'] != 'pending':
-                continue
-            deps = s.get('dependencies') or []
-            if all(d in done_ids for d in deps):
-                return s
-        return None
-
-    def get_plan_progress(self, task_plan_id: int) -> Dict:
-        """统计计划进度（DB 唯一来源）：{pending, running, done, failed, all_done}"""
-        subs = self.get_subtasks(task_plan_id)
-        progress = {'pending': 0, 'running': 0, 'done': 0, 'failed': 0, 'total': len(subs)}
-        for s in subs:
-            progress[s['status']] = progress.get(s['status'], 0) + 1
-        progress['all_done'] = progress['total'] > 0 and (progress['pending'] + progress['running']) == 0
-        progress['any_failed'] = progress['failed'] > 0
-        return progress
-
-    def get_task_plan_by_thread(self, thread_id: str, status_filter: str = None) -> Optional[Dict]:
-        with sqlite3.connect(self.db_path) as conn:
-            if status_filter:
-                cur = conn.execute(
-                    "SELECT id, goal, status FROM task_plans WHERE thread_id = ? AND status = ? ORDER BY created_at DESC LIMIT 1",
-                    (thread_id, status_filter)
-                )
-            else:
-                cur = conn.execute(
-                    "SELECT id, goal, status FROM task_plans WHERE thread_id = ? AND status IN ('planning', 'executing') ORDER BY created_at DESC LIMIT 1",
-                    (thread_id,)
-                )
-            row = cur.fetchone()
-            if row:
-                return {"id": row[0], "goal": row[1], "status": row[2]}
-            return None
-
-    def get_latest_task_plan(self, thread_id: str) -> Optional[Dict]:
-        plan = self.get_task_plan_by_thread(thread_id)
-        if not plan:
-            return None
-        return {
-            "goal": plan["goal"],
-            "plan_json": "{}",
-            "status": plan["status"],
-            "updated_at": datetime.now()
-        }
-
-    # -------------------- 智能摘要相关 --------------------
+    # -------------------- 消息摘要生成（供 update_summary / history_summaries 使用） --------------------
     def generate_summary_from_messages(self, messages: List, llm) -> str:
         msg_texts = []
         for msg in messages:
@@ -499,24 +296,181 @@ class MemoryManager:
         response = _silent_invoke(llm, [prompt, human_msg])
         return response.content
 
-    def save_summary(self, thread_id: str, summary_text: str, start_time: datetime = None, end_time: datetime = None):
+    # ===== history_summary 历史对话摘要 =====
+    # 触发条件：对话消息达到阈值（如 10 条）或距上次 120 秒
+    # 数据源：history_summaries 表（字段语义 = history_summary）
+    # 用途：build_memory_injection 注入到 system prompt，压缩历史消息避免 context 爆炸
+
+    def save_history_summary_scored(self, thread_id: str, summary_text: str,
+                                   importance_score: float, llm=None,
+                                   start_time: datetime = None, end_time: datetime = None):
+        """保存带重要性评分的历史摘要。
+        importance_score: 1.0 ~ 10.0
+        如果传了 llm，会自动调用 LLM 评估重要性。
+        """
+        if llm is not None:
+            importance_score = self._evaluate_importance(summary_text, llm)
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
-                """INSERT INTO task_summaries (thread_id, summary_text, start_time, end_time, created_at)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (thread_id, summary_text, start_time, end_time, datetime.now())
+                """INSERT INTO history_summaries
+                   (thread_id, summary_text, importance_score, start_time, end_time, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (thread_id, summary_text, importance_score, start_time, end_time, datetime.now())
             )
+
+    def evaluate_messages_importance(self, messages: List, llm,
+                                    min_score: float = 7.0) -> List[Dict]:
+        """对一批消息逐条打分（1-10），返回达到 min_score 阈值的高价值消息。
+
+        设计目的：在压缩历史前先过滤低分消息（闲聊/确认/无关内容），
+        只保留 ≥ min_score 分的重要消息进入 history_summary 压缩流程。
+        这是 Q7 的 Importance Score 过滤策略。
+        """
+        from langchain_core.messages import SystemMessage, HumanMessage
+        if not messages:
+            return []
+
+        # 准备消息列表文本（带索引方便 LLM 引用）
+        msg_lines = []
+        for idx, msg in enumerate(messages):
+            role = getattr(msg, 'type', 'unknown')
+            content = str(getattr(msg, 'content', '') or '')[:300]
+            msg_lines.append(f"{idx}. [{role}]: {content}")
+        text = "\n".join(msg_lines)
+
+        system = SystemMessage(content=(
+            "你是对话重要性评估专家。给定对话消息列表，对每条打 1-10 分：\n"
+            "- 1-3: 闲聊/确认/无关（'好的'、'谢谢'、'嗯'、'再见'）\n"
+            "- 4-6: 普通信息（一般对话、工具调用结果）\n"
+            "- 7-10: 重要内容（用户偏好/核心背景/关键决策/重要发现）\n"
+            "请以 JSON 数组输出：[{\"index\": 编号, \"score\": 数字, \"reason\": \"原因\"}]"
+        ))
+        human = HumanMessage(content=f"消息列表：\n{text}")
+
+        try:
+            response = _silent_invoke(llm, [system, human])
+            data = json.loads(response.content)
+        except Exception:
+            # 解析失败时全部保留（不丢失数据）
+            return [{"msg": m, "score": 5.0, "reason": "parse_failed"}
+                    for m in messages]
+
+        # 过滤高分消息
+        kept = []
+        for item in data:
+            idx = item.get("index")
+            score = float(item.get("score", 5.0))
+            if idx is not None and 0 <= idx < len(messages) and score >= min_score:
+                kept.append({
+                    "msg": messages[idx],
+                    "score": score,
+                    "reason": item.get("reason", ""),
+                })
+        return kept
+
+    def _evaluate_importance(self, summary_text: str, llm) -> float:
+        """让 LLM 评估摘要的重要性（1-10 分）。用于保存摘要时打元数据标签。"""
+        from langchain_core.messages import SystemMessage, HumanMessage
+        prompt = SystemMessage(content=(
+            "你是记忆重要性评估专家。给定一段对话摘要，评估其对 Agent 未来行为的重要性。"
+            "评分标准：1=闲聊无关，5=普通信息，10=核心偏好/关键背景/重要决策。"
+            "请只返回 1-10 之间的整数。"
+        ))
+        try:
+            response = _silent_invoke(llm, [prompt, HumanMessage(content=summary_text)])
+            score = float(response.content.strip())
+            return max(1.0, min(10.0, score))
+        except Exception:
+            return 5.0  # 默认中等重要性
+
+    def get_history_summaries_scored(self, limit: int = 5, thread_id: str = None,
+                                     query: str = None,
+                                     alpha: float = 0.5, beta: float = 0.3, gamma: float = 0.2,
+                                     decay_factor: float = 0.995) -> List[Dict]:
+        """按 Stanford 三因子评分排序的历史摘要：
+        Score = α*Recency + β*Importance + γ*Relevance
+        - Recency: 0.995 ^ hours_since_access（指数衰减）
+        - Importance: importance_score / 10
+        - Relevance: 简单的关键词重叠（如果没传 query 则跳过）
+        """
+        from datetime import datetime
+
+        candidates = self.get_history_summaries(limit=max(limit * 3, 10), thread_id=thread_id)
+        if not candidates:
+            return []
+
+        now = datetime.now()
+        scored = []
+        for c in candidates:
+            # 1. 时效性（指数衰减）
+            try:
+                created = datetime.fromisoformat(c["created_at"]) if isinstance(c["created_at"], str) else c["created_at"]
+                hours_elapsed = (now - created).total_seconds() / 3600
+            except Exception:
+                hours_elapsed = 0
+            recency = decay_factor ** max(0, hours_elapsed)
+
+            # 2. 重要性（1-10 → 0-1）
+            importance = (c.get("importance_score") or 5.0) / 10.0
+
+            # 3. 相关性（如果传了 query，做简单的关键词重叠评分）
+            relevance = 0.5  # 默认中性
+            if query:
+                query_words = set(query.lower().split())
+                summary_words = set((c.get("summary_text") or "").lower().split())
+                if query_words and summary_words:
+                    overlap = len(query_words & summary_words) / len(query_words | summary_words)
+                    relevance = min(1.0, overlap * 2)  # 放大一点
+
+            # 综合评分
+            score = alpha * recency + beta * importance + gamma * relevance
+            scored.append((score, c))
+
+        # 按评分降序
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [item[1] for item in scored[:limit]]
 
     def get_recent_summary(self, thread_id: str) -> Optional[str]:
         with sqlite3.connect(self.db_path) as conn:
             cur = conn.execute(
-                """SELECT summary_text FROM task_summaries
+                """SELECT summary_text FROM history_summaries
                    WHERE thread_id = ?
                    ORDER BY created_at DESC LIMIT 1""",
                 (thread_id,)
             )
             row = cur.fetchone()
             return row[0] if row else None
+
+    def get_history_summaries(self, limit: int = 5, thread_id: str = None) -> List[Dict]:
+        """读取最近的历史对话摘要（按创建时间倒序）。
+        用于 build_memory_injection 的 history_summary 注入。
+        thread_id 为 None 时返回所有线程的全局摘要。
+        """
+        return self.get_recent_summaries(limit, thread_id)
+
+    def get_recent_summaries(self, limit: int = 5, thread_id: str = None) -> List[Dict]:
+        """读取最近的对话摘要（按创建时间倒序）。
+        用于 history_summary 注入：把压缩过的历史消息摘要放进 system prompt。
+        thread_id 为 None 时返回所有线程的全局摘要。
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            if thread_id:
+                cur = conn.execute(
+                    """SELECT id, thread_id, summary_text, importance_score, start_time, end_time, created_at
+                       FROM history_summaries
+                       WHERE thread_id = ?
+                       ORDER BY created_at DESC LIMIT ?""",
+                    (thread_id, limit)
+                )
+            else:
+                cur = conn.execute(
+                    """SELECT id, thread_id, summary_text, importance_score, start_time, end_time, created_at
+                       FROM history_summaries
+                       ORDER BY created_at DESC LIMIT ?""",
+                    (limit,)
+                )
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
 
     def update_summary(self, thread_id: str, old_summary: str, new_messages: List, llm) -> str:
         recent_text = []
@@ -596,11 +550,12 @@ class MemoryManager:
     # 分层记忆 API（L1-L5）
     # 业界共识（参考 MemGPT / LangMem / Letta）的 5 层：
     #   L0 Working   → LangGraph state（messages 列表本身）
-    #   L1 Thread    → task_summaries（已有，本节只新增读取聚合）
+    #   L1 Thread    → messages 表（对话消息历史，通过 messages 字段直接访问）
     #   L2 Profile   → user_profile + user_preferences（已有）
-    #   L3 Episodic  → task_plans + subtasks + messages（已有）
+    #   L3 Episodic  → dag_plans（新规划器）+ messages（任务目标+消息）
     #   L4 Procedural→ command_history（新增）
     #   L5 Semantic  → semantic_cache（新增）
+    # 附：history_summaries 表是历史对话的压缩摘要（不归入标准 5 层），用于 history_summary 注入中
     # ============================================================
 
     # ----- L4 命令历史 -----
@@ -705,35 +660,41 @@ class MemoryManager:
     # ----- L3 任务记忆读取（聚合） -----
     def get_recent_tasks(self, limit: int = 5, status_filter: str = None,
                          keyword: str = None) -> List[Dict]:
-        """读取最近的任务计划（按完成时间倒序）。"""
-        with sqlite3.connect(self.db_path) as conn:
-            sql = """SELECT id, thread_id, goal, status, created_at, updated_at
-                     FROM task_plans WHERE status != 'deleted' """
-            params = []
-            if status_filter:
-                sql += "AND status = ? "
-                params.append(status_filter)
-            if keyword:
-                sql += "AND goal LIKE ? "
-                params.append(f"%{keyword}%")
-            sql += "ORDER BY updated_at DESC LIMIT ?"
-            params.append(limit)
-            cur = conn.execute(sql, params)
-            cols = [d[0] for d in cur.description]
-            return [dict(zip(cols, row)) for row in cur.fetchall()]
+        """读取最近的任务计划（按完成时间倒序，基于 dag_plans 表）。"""
+        import sqlite3 as _s
+        try:
+            with _s.connect(self.db_path) as conn:
+                sql = "SELECT id, thread_id, goal, status, created_at, updated_at FROM dag_plans WHERE 1=1"
+                params = []
+                if status_filter:
+                    sql += " AND status = ?"
+                    params.append(status_filter)
+                if keyword:
+                    sql += " AND goal LIKE ?"
+                    params.append(f"%{keyword}%")
+                sql += " ORDER BY updated_at DESC LIMIT ?"
+                params.append(limit)
+                cur = conn.execute(sql, params)
+                cols = [d[0] for d in cur.description]
+                return [dict(zip(cols, row)) for row in cur.fetchall()]
+        except Exception:
+            return []
 
     def search_episodes(self, keyword: str, limit: int = 10) -> List[Dict]:
-        """在历史任务 + 消息里搜关键词。"""
+        """在历史任务（dag_plans）+ 消息里搜关键词。"""
         with sqlite3.connect(self.db_path) as conn:
             results = []
-            # 搜任务目标
-            cur = conn.execute(
-                """SELECT 'task' as kind, id, goal as text, created_at
-                   FROM task_plans WHERE goal LIKE ? AND status != 'deleted'
-                   ORDER BY created_at DESC LIMIT ?""",
-                (f"%{keyword}%", limit)
-            )
-            results.extend([{"kind": "task", "id": r[1], "text": r[2], "at": r[3]} for r in cur.fetchall()])
+            # 搜任务目标（新规划器：dag_plans）
+            try:
+                cur = conn.execute(
+                    """SELECT 'task' as kind, id, goal as text, created_at
+                       FROM dag_plans WHERE goal LIKE ? AND status != 'deleted'
+                       ORDER BY created_at DESC LIMIT ?""",
+                    (f"%{keyword}%", limit)
+                )
+                results.extend([{"kind": "task", "id": r[1], "text": r[2], "at": r[3]} for r in cur.fetchall()])
+            except Exception:
+                pass
             # 搜消息内容
             cur = conn.execute(
                 """SELECT 'message' as kind, id, content, timestamp
@@ -746,15 +707,33 @@ class MemoryManager:
 
     # ----- 分层注入 prompt 的聚合方法 -----
     def build_memory_injection(self, thread_id: str, layers: List[str] = None) -> Dict[str, str]:
-        """
-        为 chatbot 准备分层的"记忆注入"片段。
-        默认只注入 L2 (画像/偏好) + L3 (近期任务极简摘要) —— context 稀缺，只常驻高价值信息；
-        L4 (命令历史) / L5 (知识缓存) 完全靠工具查询（get_command_history / search_my_memory）。
-        返回 dict，每条 key 是层名，value 是要追加到 system prompt 的 markdown 段落。
+        """为 chatbot 准备分层的"记忆注入"片段。
+
+        - history_summary：当前会话历史对话的压缩摘要（history_summaries 表），
+          在上下文被压缩后仍保留"更早发生过什么"。
+        - L2：用户画像 / 偏好 —— context 稀缺，只常驻高价值信息。
+        - L3：近期任务极简摘要（新规划器 dag_plans）。
+        L4（命令历史）/ L5（知识缓存）不常驻，完全靠工具查询
+        （get_command_history / search_my_memory）。
+        返回 dict：key 是层名，value 是要追加到 system prompt 的 markdown 段落。
         """
         if layers is None:
-            layers = ["L2", "L3"]
+            layers = ["history_summary", "L2"]
         out = {}
+
+        if "history_summary" in layers:
+            # Stanford 三因子排序（α*Recency + β*Importance + γ*Relevance）挑出最该保留的摘要，
+            # 而不是单纯按时间取最近 N 条——避免久远但高价值的记忆被新摘要挤出注入窗口。
+            try:
+                summaries = self.get_history_summaries_scored(limit=3, thread_id=thread_id)
+            except Exception:
+                summaries = []
+            texts = [s.get("summary_text") for s in summaries if s.get("summary_text")]
+            if texts:
+                lines = ["【历史对话摘要（按 Recency+Importance 排序）】"]
+                lines.extend(f"- {t}" for t in texts)
+                out["history_summary"] = "\n".join(lines)
+
         if "L2" in layers:
             profile = self.get_profile()
             prefs = self.get_preferences()
@@ -765,6 +744,7 @@ class MemoryManager:
                 parts.append("【用户偏好】\n" + "\n".join(f"- {k}: {v}" for k, v in prefs.items()))
             if parts:
                 out["L2"] = "\n".join(parts)
+
         if "L3" in layers:
             recent_tasks = self.get_recent_tasks(limit=2, status_filter="completed")
             if recent_tasks:
@@ -774,4 +754,5 @@ class MemoryManager:
                     goal = str(t.get("goal") or "")[:40]
                     lines.append(f"- {when}: {goal} [id={t['id']}]")
                 out["L3"] = "\n".join(lines)
+
         return out

@@ -60,7 +60,7 @@ Web 面板（http://localhost:8000）：
 
 - ✅ **模型自决路由**：无硬编码意图分类，LLM 自行决定"直接回答 / 调工具 / 进入多步规划"
 - ✅ **自定义 ReAct 循环**：亲手实现思考—行动—观察闭环（`ReActLoop`），支持工具安全拦截、人工审批、连续拒绝熔断、迭代上限防死循环
-- ✅ **5 层记忆系统**：会话摘要 / 用户画像 / 历史任务 / 命令历史 / 语义缓存，每轮自动注入 System Prompt
+- ✅ **5 层记忆系统**：L1 对话消息 / L2 用户画像 / L3 任务历史（dag_plans） / L4 命令历史 / L5 语义缓存（tavily 搜索结果），详细见 [docs/l5-semantic-cache.md](docs/l5-semantic-cache.md)
 - ✅ **多 Key 自动轮换**：api_key 逗号分隔，限流/超时/鉴权自动换 key + 指数退避重试
 - ✅ **沉浸式 Web 面板**：流式对话、工具状态行、审批卡片、State/日志/记忆/定时任务调试抽屉、模型一键切换
 - ✅ **标准 cron 定时任务**：`*/5 * * * *` 常规 cron 语法驱动 Agent 周期性执行任务
@@ -170,7 +170,7 @@ flowchart LR
 |---|---|---|
 | `graph/builder.py` | 节点编排 + 条件路由 | 路由决策全部读 DB（任务进度唯一真相源），state 只传标识 |
 | `planning/react_loop.py` | 思考—行动—观察循环 | 自实现：安全拦截、审批 interrupt、连续 3 次同调用熔断、`max_iterations` 防死循环 |
-| `memory/memory_manager.py` | 5 层记忆 | L2/L3/L4 每轮注入 System Prompt，L5 语义缓存带 TTL |
+| `memory/memory_manager.py` | 5 层记忆 | L2 自动注入 / L5 语义缓存（tavily 搜索结果） / history_summary 压缩历史 |
 | `llm/llm_factory.py` | 多 Key 轮换 | 401/429/5xx 换 key，指数退避（2^n+jitter，上限 30s） |
 | `server/api/chat.py` | SSE 流式推送 | `updates` + `messages` 双通道；工具事件监听桥 |
 

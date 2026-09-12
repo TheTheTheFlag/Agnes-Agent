@@ -99,14 +99,14 @@ async def get_memory_api(thread_id: str = Query("default")):
         "L3_recent_tasks": mm.get_recent_tasks(limit=10),
         "L4_command_history": mm.get_command_history(thread_id=thread_id, limit=20),
         "L5_knowledge_cache": mm.search_knowledge("", limit=20),
-        "prompt_injection_preview": mm.build_memory_injection(thread_id, layers=["L2", "L3"]),
+        "prompt_injection_preview": mm.build_memory_injection(thread_id, layers=["history_summary", "L2"]),
     }
 
 
 
 @router.get("/api/threads")
 async def get_threads():
-    """列出所有有过活动的 thread（来自 messages / task_plans），
+    """列出所有有过活动的 thread（来自 messages），
     并把当前会话（main.py 注入的 thread_id）置顶、标记 current=true。
     每项携带 last_user_msg（该会话最后一条用户消息，供列表标题展示）。"""
     import sqlite3 as _sqlite
@@ -118,16 +118,6 @@ async def get_threads():
     ).fetchall()
     for r in rows:
         out.append({"thread_id": r[0], "source": "messages", "count": r[1], "last": r[2]})
-    rows = db.execute(
-        """SELECT thread_id, COUNT(*) as n, MAX(updated_at) as last
-           FROM task_plans WHERE status != 'deleted' GROUP BY thread_id"""
-    ).fetchall()
-    for r in rows:
-        existing = next((t for t in out if t["thread_id"] == r[0]), None)
-        if existing:
-            existing["task_count"] = r[1]
-        else:
-            out.append({"thread_id": r[0], "source": "task_plans", "count": r[1], "last": r[2]})
     # 每个 thread 的最后一条用户消息（会话列表标题用，替代裸 thread_id）
     try:
         user_rows = db.execute(

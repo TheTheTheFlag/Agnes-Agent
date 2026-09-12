@@ -19,7 +19,7 @@ from openai import RateLimitError
 
 from app.graph.state import State
 from app.graph.utils import (count_tokens, retry_llm_call, parse_tool_calls_from_content,
-    ensure_tool_calls, compress_messages, ensure_token_limit, sync_state_to_db, load_prompt_template,
+    ensure_tool_calls, ensure_token_limit, sync_state_to_db, load_prompt_template,
     MODEL_CONTEXT_LIMIT, TOKEN_LIMIT, KEEP_RECENT, MAX_TOOL_CALL_ROUNDS, _tool_params_summary,
     prepare_context_messages, apply_reply_guard)
 from app.tools import tools, request_planning
@@ -27,7 +27,6 @@ from app.llm import create_llm
 from app.memory import MemoryManager
 from app.planning.dag_planner import create_dag_planner_node
 from app.planning.dag_executor import create_executor
-from app.planning.summarizer import create_summarizer_node
 from app.planning.react_loop import ReActLoop
 from app.server import update_state, update_prompt, add_log_entry, add_event
 
@@ -95,18 +94,11 @@ def chatbot(state: State, config: RunnableConfig):
     preferences_section = "\n".join([f"{k}: {v}" for k, v in preferences.items()]) if preferences else ""
     summary_section = recent_summary or ""
     # 当前任务计划从 DB 查（state 不缓存 TaskPlan；当前进行中计划按 thread 查）
-    task_plan_section = ""
-    _plan = mm.get_task_plan_by_thread(thread_id) or {}
-    if _plan.get("status") in ("planning", "executing"):
-        _subs = mm.get_subtasks(_plan["id"])
-        task_plan_section = f"【当前任务计划】目标：{_plan.get('goal', '')}\n进度：\n" + "\n".join(
-            [f"  - [{s['id']}] {s['description']} {s['status']}" for s in _subs]
-        )
 
     # ===== 5 层记忆注入（L2 / L3 / L4）=====
     # 每轮自动把"用户画像 + 近期任务 + 近期命令"塞进 system prompt，
     # 模型无需主动调工具即可"自然记住"用户。
-    memory_injection = mm.build_memory_injection(thread_id, layers=["L2", "L3"])
+    memory_injection = mm.build_memory_injection(thread_id, layers=["history_summary", "L2"])
     memory_section = ""
     if memory_injection:
         memory_section = "\n\n=== 分层记忆注入 ===\n" + "\n\n".join(memory_injection.values())
@@ -121,7 +113,6 @@ def chatbot(state: State, config: RunnableConfig):
     system_text = system_text.replace("{{profile_section}}", f"用户个人信息：\n{profile_section}\n" if profile_section else "")
     system_text = system_text.replace("{{preferences_section}}", f"用户偏好：\n{preferences_section}\n" if preferences_section else "")
     system_text = system_text.replace("{{summary_section}}", f"对话摘要：\n{summary_section}\n" if summary_section else "")
-    system_text = system_text.replace("{{task_plan_section}}", task_plan_section)
     # 技能路由元数据：动态读取 app/skills/ 下所有 SKILL.md（实时，新增技能无需重启）
     try:
         from app.skills.loader import load_all_skills as _load_all_skills
@@ -325,20 +316,49 @@ def chatbot(state: State, config: RunnableConfig):
                     break
     # 不再显示过渡消息"🚀 正在为你规划并执行"，直接让后续节点处理
 
-    # 摘要更新（节流：最近对话新增 ≥4 条或距上次 ≥120s 才调用一次 LLM 摘要）。
-    # 目的：update_summary 每次都会同步发起一次 LLM 调用，若每轮都跑，会形成
-    # "回复文本早已输出完、但 SSE 迟迟不结束，前端一直显示运行中/工具名"的空窗。
+    # history_summary 触发：当上下文使用达到 MODEL_CONTEXT_LIMIT * 80% 时调用 LLM 压缩历史。
+    # 同时保留 120 秒的最小间隔作为辅助节流（避免极端情况频繁调用）。
     if len(state["messages"]) > 0:
         try:
             import time as _time
             _now = _time.time()
             _mlen = len(state["messages"])
-            _gate = globals().setdefault("_summary_gate", {"ts": 0.0, "msgs": 0})
-            if (_mlen - _gate["msgs"] >= 4) or (_now - _gate["ts"] >= 120):
-                new_summary = mm.update_summary(thread_id, state.get("recent_summary", "无"), state["messages"][-5:], llm)
-                mm.save_summary(thread_id, new_summary)
-                state["recent_summary"] = new_summary
-                _gate.update(ts=_now, msgs=_mlen)
+            _gate = globals().setdefault("_summary_gate", {"ts": 0.0, "last_tokens": 0})
+            # 计算当前消息的 token 数
+            try:
+                _current_tokens = count_tokens(state["messages"])
+            except Exception:
+                _current_tokens = 0
+            # 触发条件：token 数达到上下文 80% 或距上次 120 秒
+            HISTORY_SUMMARY_TOKEN_RATIO = 0.8
+            HISTORY_SUMMARY_INTERVAL = 120  # 秒，最小间隔
+            HISTORY_SUMMARY_MIN_MESSAGES = 4  # 至少积累 4 条消息才触发
+            _token_threshold = MODEL_CONTEXT_LIMIT * HISTORY_SUMMARY_TOKEN_RATIO
+            _should_trigger = (
+                _mlen >= HISTORY_SUMMARY_MIN_MESSAGES and (
+                    _current_tokens >= _token_threshold
+                    or (_now - _gate["ts"] >= HISTORY_SUMMARY_INTERVAL and _current_tokens > 0)
+                )
+            )
+            if _should_trigger:
+                # 第一步：Importance 过滤（Q7）—— 让 LLM 对每条消息打 1-10 分
+                # 只保留 ≥7 分的重要消息，丢弃"好的/谢谢"等闲聊内容
+                _all_messages = state["messages"][-(HISTORY_SUMMARY_MIN_MESSAGES * 2):]
+                _scored = mm.evaluate_messages_importance(_all_messages, llm, min_score=7.0)
+                _important_messages = [item["msg"] for item in _scored]
+
+                # 第二步：压缩重要消息
+                if _important_messages:
+                    new_summary = mm.update_summary(
+                        thread_id,
+                        state.get("recent_summary", "无"),
+                        _important_messages,
+                        llm,
+                    )
+                    # 第三步：保存（带摘要的元数据评分，供未来检索排序）
+                    mm.save_history_summary_scored(thread_id, new_summary, importance_score=0.0, llm=llm)
+                    state["recent_summary"] = new_summary
+                    _gate.update(ts=_now, last_tokens=_current_tokens)
         except Exception:
             pass
 
@@ -485,7 +505,8 @@ def build_graph():
     builder.add_node("chatbot", chatbot)
     builder.add_node("planner", planner_node)
     builder.add_node("executor", create_executor([llm], tools))
-    builder.add_node("summarizer", create_summarizer_node(llm))
+    # 注：原 summarizer 节点已废弃。历史对话摘要注入由 chatbot 内部完成（build_memory_injection）。
+    # DAG 任务完成后直接 END，不再单独经过 summarizer 节点。
 
     builder.add_edge(START, "chatbot")
     # chatbot 退出后按 state 决定下一步
@@ -496,14 +517,11 @@ def build_graph():
     })
     # planner 之后总是进入 executor
     builder.add_edge("planner", "executor")
-    # executor 退出后根据 DAG 状态决定：还有未完成 → 继续；全终态 → summarizer
+    # executor 退出后根据 DAG 状态决定：还有未完成 → 继续；全终态 → END
     builder.add_conditional_edges("executor", route_after_executor, {
-        "executor": "executor", "summarizer": "summarizer",
+        "executor": "executor", "summarizer": END,
     })
-    # summarizer 完成后回到 chatbot 让用户继续
-    # summarizer 完成后直接结束（summary 已是最终答复）。
-    # 之前回到 chatbot 会再次触发模型规划/执行，造成"任务完成后一直不结束"的循环。
-    builder.add_edge("summarizer", END)
+    # task 完成直接结束（不再单独 summarizer）
 
     conn = sqlite3.connect(CHECKPOINT_DB_PATH, check_same_thread=False)
     checkpointer = SqliteSaver(conn)

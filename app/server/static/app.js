@@ -1842,12 +1842,13 @@ async function renderMemoryDBTab(el) {
     const where = whereInp.value.trim();
     loadMdbQuery(el, table, where);
   };
-  // 仅消息表默认按当前会话过滤；用户画像/用户偏好/命令历史/知识缓存等业务记忆表
-  // 不自动加过滤条件（展示全量，避免误以为数据丢失；semantic_cache 无 thread_id 列，
-  // 自动过滤反而报错）
-  const AUTO_FILTER_TABLES = new Set(["messages"]);
+  // 凡带 thread_id 列的表（messages / history_summaries / dag_plans / command_history）
+  // 默认按当前会话预填过滤，省去每次手输；user_profile / user_preferences / dag_nodes /
+  // dag_edges / semantic_cache 无 thread_id 列，预填反而会让查询报错，故仍展示全量。
+  const mdbTableMeta = new Map(tables.map((t) => [t.name, t]));
   const applyDefaultWhere = () => {
-    whereInp.value = AUTO_FILTER_TABLES.has(tableSel.value) && State.threadId
+    const cols = (mdbTableMeta.get(tableSel.value) || {}).columns || [];
+    whereInp.value = cols.includes("thread_id") && State.threadId
       ? `thread_id='${State.threadId}'` : "";
   };
   tableSel.addEventListener("change", () => { applyDefaultWhere(); runQuery(); });
