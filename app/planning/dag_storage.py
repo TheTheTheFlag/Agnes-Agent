@@ -162,6 +162,14 @@ class DAGStorage:
     def add_node(self, plan_id: int, node_id: str, description: str, tool: str = None,
                  params: Dict = None, status: str = STATUS_PENDING,
                  acceptance_criteria: str = None, replaces: str = None):
+        # SQLite TEXT 字段不接受 list / dict / object；
+        # planner 信任 model 输出，model 可能把 `tool` 写成空 list `[]`，
+        # 不归一会直接抛 "type 'list' is not supported"，整张 plan 立刻废掉。
+        # 所有非字符串字段都做归一：None/空 → None；list/dict → JSON 字符串。
+        if tool is not None and not isinstance(tool, str):
+            tool = json.dumps(tool, ensure_ascii=False) if tool else None
+        if params is not None and not isinstance(params, str):
+            params = json.dumps(params, ensure_ascii=False) if params else None
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
                 """INSERT INTO dag_nodes
@@ -169,8 +177,7 @@ class DAGStorage:
                     tool, params, status, updated_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (plan_id, node_id, description, acceptance_criteria or None, replaces or None,
-                 tool, json.dumps(params, ensure_ascii=False) if params else None,
-                 status, _now()),
+                 tool, params, status, _now()),
             )
 
     def get_nodes(self, plan_id: int) -> List[Dict]:

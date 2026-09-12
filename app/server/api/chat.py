@@ -381,6 +381,14 @@ async def chat_endpoint(payload: dict):
             await queue.put({"step": "error", "message": str(e)})
         finally:
             await queue.put({"step": "__close__"})
+            # 移除本次 SSE 连接的 listener queue：否则每次刷新页面都会在
+            # _store._event_listeners 累计一个无界 Queue，add_event 每次都往里 put
+            # （最多 200KB/条的 LLM 全量输入输出），进程内存会涨到 GB 级
+            # 而 put_nowait 满后只是 except: pass 静默吞掉，从不删除。
+            try:
+                _store._event_listeners.remove(_listen_q)
+            except ValueError:
+                pass
 
     async def event_gen():
         import asyncio as _aio
