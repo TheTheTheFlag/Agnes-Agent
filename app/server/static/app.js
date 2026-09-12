@@ -462,19 +462,32 @@ function setTodos(items) {
   renderTodoPanel();
 }
 
+// 待办状态 → 图标
+function todoMark(status) {
+  if (status === "done") return "✓";
+  if (status === "doing") return "⟳";
+  if (status === "failed") return "✕";
+  return "•";
+}
+
 // 把后端 DAG 节点快照（[{id, status, description}]）转成待办列表并刷新面板。
-// 保留顺序（按原节点顺序，不重排），状态映射：success→done、running→doing、其余→todo。
+// 过滤 skipped：这些节点已被"局部重规划替换"或"前置失败跳过"，属于作废节点，
+// 若照旧显示会把待办数量撑虚（例如 5 个作废 + 6 个新节点 = 11 项）并与新节点重复。
+// 状态映射：success→done、running→doing、failed→failed（红色叹号）、其余→todo。
 // 规划任务全程由这个函数驱动"动态变化"的待办列表（替代原先的 DAG 图）。
 function updateTodoFromNodes(nodes) {
   if (!Array.isArray(nodes) || !nodes.length) return;
-  const items = nodes.map((n, i) => {
-    const st = n.status || "todo";
-    let status = "todo";
-    if (st === "success") status = "done";
-    else if (st === "running") status = "doing";
-    const text = (n.description || n.desc || String(n.id)).trim();
-    return { id: n.id || String(i), text, status, rawStatus: st };
-  });
+  const items = nodes
+    .filter((n) => (n.status || "") !== "skipped")
+    .map((n, i) => {
+      const st = n.status || "todo";
+      let status = "todo";
+      if (st === "success") status = "done";
+      else if (st === "running") status = "doing";
+      else if (st === "failed") status = "failed";
+      const text = (n.description || n.desc || String(n.id)).trim();
+      return { id: n.id || String(i), text, status, rawStatus: st };
+    });
   setTodos(items);
 }
 
@@ -487,20 +500,21 @@ function renderTodoPanel() {
     return;
   }
   panel.classList.remove("hidden");
-  // 徽章：N/M（已完成/总数）
+  // 徽章：完成/总数；有失败节点时追加"失败 N"，否则失败会完全看不见
   const done = items.filter((t) => t.status === "done").length;
+  const failed = items.filter((t) => t.status === "failed").length;
   const total = items.length;
   const badge = $("#todoBadge");
   if (badge) {
-    badge.textContent = `待办 ${done}/${total}`;
+    badge.textContent = failed ? `待办 ${done}/${total} · 失败 ${failed}` : `待办 ${done}/${total}`;
     badge.classList.toggle("done", done === total);
+    badge.classList.toggle("failed", failed > 0);
   }
-  // 摘要行：优先显示"未完成"中的最新一条，否则显示最后一条已完成
+  // 摘要行：优先显示"未完成/失败"中的最新一条，否则显示最后一条已完成
   const latest = items.find((t) => t.status !== "done") || items[items.length - 1];
   const latestEl = $("#todoLatest");
   if (latestEl) {
-    const mark = latest.status === "done" ? "✓" : (latest.status === "doing" ? "⟳" : "•");
-    latestEl.textContent = `${mark} ${latest.text || latest.id}`;
+    latestEl.textContent = `${todoMark(latest.status)} ${latest.text || latest.id}`;
   }
   // 展开图标
   const toggle = $("#todoToggle");
@@ -509,8 +523,7 @@ function renderTodoPanel() {
   const list = $("#todoList");
   if (list) {
     list.innerHTML = items.map((t) => {
-      const mark = t.status === "done" ? "✓" : (t.status === "doing" ? "⟳" : "•");
-      return `<div class="todo-item ${t.status}"><span class="todo-status">${mark}</span><span class="todo-text">${escapeHtml(t.text || t.id || "")}</span></div>`;
+      return `<div class="todo-item ${t.status}"><span class="todo-status">${todoMark(t.status)}</span><span class="todo-text">${escapeHtml(t.text || t.id || "")}</span></div>`;
     }).join("");
   }
   // 展开状态

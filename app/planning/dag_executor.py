@@ -55,6 +55,37 @@ def _extract_artifacts(text: str) -> List[str]:
     return list(dict.fromkeys(out))
 
 
+def _has_real_artifact(files) -> bool:
+    """声明的产物里是否至少有一个真实存在于磁盘上。
+
+    用于"未落盘不许声明完成"的硬约束：模型常见的失败模式是只输出一句
+    "直接产出两个文件。"就调 complete_node（files 传空或传不存在的路径），
+    事后只能由 _run_node 把 success 改判 failed，白跑一整轮才触发重规划。
+    """
+    for f in files or []:
+        p = str(f).replace("\\", "/").strip()
+        if p and os.path.exists(p):
+            return True
+    return False
+
+
+def _normalize_declared_files(files) -> List[str]:
+    """规范化 complete_node 声明的文件路径（去空、统一斜杠、去重）。"""
+    out = []
+    for f in files or []:
+        p = str(f).replace("\\", "/").strip()
+        if p:
+            out.append(p)
+    return list(dict.fromkeys(out))
+
+
+# 契约解析函数（expected_artifacts / missing_expected）已下沉到 dag_core：
+# 它们是纯函数，planner（统计契约遵守率）与 executor（complete_node 硬校验）都要用，
+# 放 core 可避免 dag_planner → dag_executor 的跨模块耦合。此处保留本地别名，调用点无需改动。
+_expected_artifacts = core.expected_artifacts
+_missing_expected = core.missing_expected
+
+
 def _run_node(thread_id: str, task_plan_id: int, node: Dict, goal: str,
               parent_artifacts: List[str], missing_soft: List[str],
               llm_builder, tools_list, mm, dag: DAGStorage, on_event):
@@ -73,12 +104,16 @@ def _run_node(thread_id: str, task_plan_id: int, node: Dict, goal: str,
         artifacts_context += "\n\n【提示】以下软依赖节点未能成功，其结果缺失（本次不阻塞，但结论可能不完整）：\n" + \
                              "\n".join(f"- {m}" for m in missing_soft)
 
+    # 契约前置：解析本节点"应产出哪些文件"，用于 system prompt 提示与 complete_node 校验
+    expected_artifacts = _expected_artifacts(node)
+
     system_prompt = build_dag_executor_system_prompt(
         node_id=node_id,
         description=description,
         goal=goal,
         tool_names=", ".join(t.name for t in tools_list),
         artifacts_context=artifacts_context,
+        acceptance_criteria=(node.get("acceptance_criteria") or ""),
     )
 
     _outcome = {"status": None, "reason": "", "files": []}
@@ -134,6 +169,32 @@ def _run_node(thread_id: str, task_plan_id: int, node: Dict, goal: str,
             for d in ("rm -rf /", "dd ", "mkfs", "format", "shutdown"):
                 if d in cmd:
                     return False, f"[安全策略] execute_command 命令 '{cmd[:80]}' 包含危险关键字 '{d}'，已被拒绝。"
+        if name == "complete_node":
+            # 硬约束：没有真实产物就不允许声明完成。
+            # 线上事故：模型只输出一句"直接产出两个文件。"就调 complete_node（files 传空或
+            # 传不存在的路径），success 只能由 _run_node 事后改判 failed，白跑一整轮。
+            # 这里前置拦下，拒因会作为 ToolMessage 回给模型逼它先 write_file；
+            # react_loop 自带"连续被拒 3 次强制终止"兜底，不会因此空转。
+            declared = _normalize_declared_files(params.get("files"))
+            if not _has_real_artifact(declared):
+                return False, (
+                    "[未落盘] complete_node 被拒绝：本节点还没有任何真实产物。"
+                    f"你声明的 files={declared or '（空）'} 在磁盘上都不存在。"
+                    "请先用 write_file 把完整内容写入 deliverables/（路径必须以 'deliverables/' 开头，"
+                    "例如 'deliverables/tetris/index.html'），确认文件真实存在后再调用 complete_node；"
+                    "若确实无法产出，请改调 fail_node 说明卡在哪里。"
+                )
+            # 硬约束 2（契约前置）：验收标准里要求的产出文件必须被覆盖。
+            # 只在解析出明确产物路径时生效（旧计划没有该信息则不拦，避免误伤）。
+            if expected_artifacts:
+                miss = _missing_expected(declared, expected_artifacts)
+                if miss:
+                    return False, (
+                        f"[契约未满足] complete_node 被拒绝：本节点验收标准要求产出 {expected_artifacts}，"
+                        f"但你声明的 files 里缺少：{miss}。"
+                        f"请用 write_file 补齐这些文件（路径与验收标准一致）后再声明完成；"
+                        f"若确实无法产出，请改调 fail_node 说明原因。"
+                    )
         if name in _EXPLORE_TOOLS:
             if _usage["explore"] >= 99:
                 return False, (
@@ -272,7 +333,7 @@ def create_executor(llm_builder, tools_list):
         # 局部重规划：存在 failed 节点 → 摘出受影响子图重规划（④）
         replan_requested = False
         failed_ids = [n["id"] for n in dag.get_nodes(plan["id"]) if n["status"] == core.STATUS_FAILED]
-        if failed_ids and plan["replan_count"] < 3:
+        if failed_ids and plan["replan_count"] < core.MAX_REPLAN:
             replan_requested = True
 
         dag.recover_stale_running(plan["id"])
@@ -282,9 +343,20 @@ def create_executor(llm_builder, tools_list):
         node_map, edges = _reinstall_state(nodes, edges)
 
         if replan_requested:
-            _do_local_replan(plan, failed_ids, dag, node_map, edges, llm_builder, thread_id)
+            ok = _do_local_replan(plan, failed_ids, dag, node_map, edges, llm_builder, thread_id)
+            if not ok:
+                # 重规划没能产出替代节点（LLM 报错/返回空）→ 无法继续推进，收敛结束。
+                # 用 _empty_streak=3 让 route_after_executor 直接走 summarizer，避免无限空转。
+                add_log_entry("error", "局部重规划未产出新节点，结束本计划")
+                dag.set_plan_status(plan["id"], "failed")
+                record_node_end(thread_id, "executor", "局部重规划失败，结束")
+                return {"thread_id": thread_id, "_empty_streak": 3}
             nodes = dag.get_nodes(plan["id"])
+            # 重规划会新增节点与边：必须把 edges 一并重读，否则下面 compute_ready_batch
+            # 仍按旧边算依赖，新节点会全部被当成"无前置"并发执行（依赖语义失效）。
+            edges = dag.get_edges(plan["id"])
             node_map = {n["id"]: n for n in nodes}
+            edges = [dict(e) for e in edges]
 
         # 计算失败隔离（强依赖失败 → 后继 skipped）与软依赖缺数据标注
         skips = core.compute_failure_skips(node_map, edges)
@@ -399,78 +471,91 @@ def _missing_soft(node_map, edges, nid) -> List[str]:
 
 
 def _do_local_replan(plan: Dict, failed_ids: List[str], dag: DAGStorage,
-                     node_map, edges, llm_builder, thread_id: str):
-    """④ 局部重规划：锁定已完成节点，只让 LLM 重出受影响子图（failed 及其强依赖后继），
-    替换回 DAG 继续。重规划后 replan_count++。"""
-    # 受影响子图 = failed 节点 + 其强依赖后继（传递闭包）
+                     node_map, edges, llm_builder, thread_id: str) -> bool:
+    """④ 局部重规划：锁定已完成节点，只让 LLM 重出"失败节点"的替代子图。
+
+    收敛后的语义（避免一个失败波及全图）：
+      - affected        = 失败节点 + 已失败(failed)的强依赖后继（传递闭包）→ 需要重新拆解
+      - rewire_children = 尚未执行(pending/ready)的强依赖后继 → 本身没问题，不重拆，
+                          只把它们的入边从被替换节点重挂到替代节点，依赖关系无缝转移
+    返回是否成功产出替代节点（False = LLM 失败/返回空，调用方应结束本计划）。
+    """
+    # ---- ① 需要重新拆解的节点：失败节点 + 已失败的强依赖后继（传递闭包）----
     affected = set(failed_ids)
     changed = True
     while changed:
         changed = False
         for e in edges:
             if e["from"] in affected and not e.get("soft") and e["to"] not in affected:
-                affected.add(e["to"])
-                changed = True
-
-    # 扩展 C：失败节点的所有"前驱"（祖先）若其产物在失败节点上有依赖，父也并入 affected。
-    # 理由：如果 LLM 不知道某个"前驱"产物的具体值，LLM 重生时可能复用旧值但实际旧值已陈旧。
-    # 保守做法：把这些"产物可能已过时"的祖先也丢给 LLM，让它自己决定是否重做。
-    ancestors = set()
-    changed = True
-    while changed:
-        changed = False
-        for e in edges:
-            if e["to"] in affected and not e.get("soft") and e["from"] not in affected and e["from"] not in ancestors:
-                ancestors.add(e["from"])
-                changed = True
-    # 排除已成功且被"保留"的节点——它们产物可用；但失败/skipped 的祖先要纳入
-    new_ancestors = set()
-    for aid in ancestors:
-        st = node_map.get(aid, {}).get("status")
-        if st in (None, core.STATUS_PENDING, core.STATUS_RUNNING, core.STATUS_FAILED):
-            new_ancestors.add(aid)
-    # 不动 success 祖先（产物已锁定，能继续用）；只把 pending/running/failed 祖先纳入
-    if new_ancestors:
-        affected.update(new_ancestors)
-        # 再传播一遍（这些祖先可能又有强依赖后继）
-        changed = True
-        while changed:
-            changed = False
-            for e in edges:
-                if e["from"] in affected and not e.get("soft") and e["to"] not in affected:
+                if node_map.get(e["to"], {}).get("status") == core.STATUS_FAILED:
                     affected.add(e["to"])
                     changed = True
+
+    # ---- ② 未执行的后继：不重拆，稍后把入边重挂到替代节点 ----
+    rewire_children = set()
+    for e in edges:
+        if e["from"] in affected and not e.get("soft") and e["to"] not in affected:
+            st = node_map.get(e["to"], {}).get("status")
+            if st in (None, core.STATUS_PENDING, core.STATUS_READY):
+                rewire_children.add(e["to"])
 
     # 保留已完成部分（success/skipped 节点 + 非受影响节点）
     kept = [n for n in node_map.values() if n["id"] not in affected and n["status"] in
             (core.STATUS_SUCCESS, core.STATUS_SKIPPED)]
 
     goal = plan["goal"]
-    failed_desc = "\n".join(f"- {node_map.get(f, {}).get('description', f)}"
-                            for f in failed_ids)
+    # P2-1：把失败节点的"失败原因"交给 LLM 换做法；
+    # 同时把**原验收标准（契约）**一并给出——否则重规划器看不到接口，
+    # 只能从 description 重新猜，产物路径必然漂移，下游契约随之落空。
+    failed_desc = "\n".join(
+        "- %s\n  ↳ 必须继续满足的验收标准：%s\n  ↳ 失败原因：%s" % (
+            node_map.get(f, {}).get("description", f),
+            (str(node_map.get(f, {}).get("acceptance_criteria") or "").strip() or "（无）")[:300],
+            (str(node_map.get(f, {}).get("result") or "").strip() or "（无）")[:300],
+        )
+        for f in failed_ids
+    )
     done_context = "\n".join(f"- {n['description']}（已成功，产出 {n.get('artifacts', []) or '无'}）"
                              for n in kept[:20])
+    # 未执行的下游：它们的契约依赖替代节点的产出接口，必须把"它们在等什么"一并交给重规划器，
+    # 否则重规划器可能改掉产物路径，导致下游契约永久无法满足。
+    pending_lines = []
+    for nid in sorted(rewire_children):
+        n = node_map.get(nid, {})
+        acc = str(n.get("acceptance_criteria") or "").strip()
+        line = "- %s：%s" % (nid, (n.get("description") or "")[:60])
+        if acc:
+            line += "\n   ↳ 它期待的接口/产物：%s" % acc[:200]
+        pending_lines.append(line)
+    pending_context = "\n".join(pending_lines) or "（无）"
 
     prompt_msgs = [
         SystemMessage(content=(
-            "你是 DAG 局部重规划器。请把下方'需要重规划的子图'重新拆成新节点（id 用 a1,a2... 避免冲突），"
-            "覆盖所有失败节点和它们的后继。\n"
+            "你是 DAG 局部重规划器。只重规划'失败节点'，新节点 id 用 a1,a2... 避免冲突。\n"
             "【硬性输出要求】\n"
-            "1. 新节点数 ≥ 失败节点数（每个失败节点必须有一个对应新节点来替代）\n"
-            "2. 保持拓扑依赖闭包完整：被标 'skipped'（局部重规划替换）的旧节点，如果它有'后继'指向尚未完成的任务，"
-            "你必须在 edges 里给新节点搭出同样的依赖关系\n"
-            "3. 显式标记：哪些新节点'集成/消费'了已成功节点的产物（写在 description 里）\n"
-            "4. 软依赖节点可把 soft 置 true\n"
-            "输出 JSON 对象: {\"nodes\":[{\"id\":\"a1\",\"description\":\"...\"}],"
+            "1. 每个失败节点都必须被替代：在对应新节点上用 \"replaces\" 标注它替代哪个旧节点 id，"
+            "并用 \"acceptance_criteria\" 写明怎样算完成 + 要产出的具体文件路径"
+            "（如 deliverables/tetris/index.html）\n"
+            "2. **接口冻结**：原失败节点验收标准里列出的产出文件路径，是下游节点依赖的接口——"
+            "替代节点必须产出**完全相同的路径**（不改名、不少产、不换目录）。"
+            "你只能改变'怎么做'，不能改变'产出什么'\n"
+            "3. 必须针对'失败原因'换做法（例如上一版只输出文字、没有真正落盘，"
+            "这一版就必须真的调用写文件工具把文件写出来），不要原样复读原来的拆法\n"
+            "4. 只需给出新节点之间的依赖边；对'未执行的后继'的依赖由系统自动重挂，"
+            "但**下方列出的'它们期待的接口/产物'必须被满足**\n"
+            "5. 显式标记：哪些新节点'集成/消费'了已成功节点的产物（写在 description 里）\n"
+            "6. 软依赖节点可把 soft 置 true\n"
+            "输出 JSON 对象: {\"nodes\":[{\"id\":\"a1\",\"replaces\":\"n1\","
+            "\"acceptance_criteria\":\"...\",\"description\":\"...\"}],"
             "\"edges\":[{\"from\":\"x\",\"to\":\"y\",\"soft\":false}]}。"
         )),
         HumanMessage(content=(
             f"原目标：{goal}\n"
-            f"需要重规划的子图（这些节点失败）：\n{failed_desc}\n\n"
-            f"已被局部重规划替换（skipped）的旧节点：{', '.join(sorted(affected)) or '（无）'}\n"
+            f"失败节点（需要被替代，含原验收标准与失败原因）：\n{failed_desc}\n\n"
+            f"尚未执行、依赖会被系统自动重挂的节点（不要替代它们，但必须满足它们期待的接口）：\n"
+            f"{pending_context}\n\n"
             f"已完成（锁定不能改）：\n{done_context or '（无）'}\n\n"
-            f"请只重规划受影响部分，输出新的 nodes+edges。"
-            f"务必保证：每个失败节点都有新节点替代，且新子图与已成功节点的对接关系在 edges 里写明。"
+            f"请输出替代失败节点的新 nodes，以及它们之间的 edges。"
         )),
     ]
     llm = llm_builder[0]
@@ -502,7 +587,34 @@ def _do_local_replan(plan: Dict, failed_ids: List[str], dag: DAGStorage,
             raise ValueError("重规划未返回节点")
     except Exception as e:
         add_log_entry("error", f"局部重规划失败: {e}")
-        return
+        return False
+
+    # ---- 解析 replaces 映射：旧节点 id → [替代节点 id]（一个旧节点可被拆成多个新节点）----
+    repl_map: Dict[str, List[str]] = {}
+    for n in new_nodes:
+        rep = str(n.get("replaces") or "").strip()
+        if rep and rep in affected:
+            repl_map.setdefault(rep, []).append(n["id"])
+
+    # ---- 契约继承兜底：模型没给 acceptance_criteria 时，从它替代的原节点继承 ----
+    # 不信任模型自觉：缺契约会让 _expected_artifacts 返回空 → 契约校验整段跳过，
+    # 等于退回"事后改判 failed"的老路。
+    inherited = 0
+    for n in new_nodes:
+        if not str(n.get("acceptance_criteria") or "").strip():
+            rep = str(n.get("replaces") or "").strip()
+            parent_acc = ""
+            if rep:
+                parent_acc = str(node_map.get(rep, {}).get("acceptance_criteria") or "").strip()
+            if parent_acc:
+                n["acceptance_criteria"] = parent_acc
+                inherited += 1
+
+    # LLM 没按约定标注 replaces → 无法安全重挂依赖，退回"把未执行后继一并替换"保证依赖完整
+    if rewire_children and not repl_map:
+        add_log_entry("warn", f"重规划未标注 replaces，未执行的 {len(rewire_children)} 个后继一并纳入替换")
+        affected |= rewire_children
+        rewire_children = set()
 
     # 把受影响节点标记 skipped（它们被替换），再写入新节点
     for nid in affected:
@@ -510,10 +622,51 @@ def _do_local_replan(plan: Dict, failed_ids: List[str], dag: DAGStorage,
             dag.set_node_status(plan["id"], nid, core.STATUS_SKIPPED, result="局部重规划替换")
     for n in new_nodes:
         nid = n["id"]
-        dag.add_node(plan["id"], nid, n["description"], tool=None, params={}, status=core.STATUS_PENDING)
+        dag.add_node(plan["id"], nid, n["description"], tool=None, params={},
+                     status=core.STATUS_PENDING,
+                     acceptance_criteria=n.get("acceptance_criteria"))
     for e in new_edges:
         dag.add_edge(plan["id"], e["from"], e["to"], soft=bool(e.get("soft")))
 
+    # ---- 未执行后继的入边重挂：old_from -> child 改接 new_from -> child ----
+    rewired = 0
+    for child in rewire_children:
+        for e in list(edges):
+            if e["to"] != child or e["from"] not in affected:
+                continue
+            news = repl_map.get(e["from"]) or []
+            if not news:
+                continue
+            dag.remove_edge(plan["id"], e["from"], child)
+            for nf in news:
+                dag.add_edge(plan["id"], nf, child, soft=bool(e.get("soft")))
+            rewired += 1
+
     dag.bump_replan(plan["id"])
     dag.save_checkpoint(plan["id"])
-    add_log_entry("info", f"局部重规划：{len(affected)} 失败节点 → {len(new_nodes)} 新节点")
+
+    # ---- 接口冻结校验：替代节点是否仍产出"被替代节点承诺过的产物路径"？----
+    # 注意语义：acceptance_criteria 描述的是"本节点要产出什么"，不是"它期待别人产出什么"，
+    # 所以校验对象是「原节点的产出承诺 vs 替代节点的产出承诺」，而不是下游自己的契约。
+    # 上面的契约继承兜底通常已保证一致；但模型若显式给出了不同契约，就可能悄悄改掉接口
+    # （下游依赖的产物路径），这里检测并告警。
+    got_paths = set()
+    for n in new_nodes:
+        got_paths.update(_expected_artifacts(n))
+    drift = []
+    for n in new_nodes:
+        rep = str(n.get("replaces") or "").strip()
+        if not rep:
+            continue
+        want = _expected_artifacts(node_map.get(rep, {}))
+        lost = _missing_expected(sorted(got_paths), want)
+        if lost:
+            drift.append(f"{n['id']}(替代 {rep}) 未产出 {lost}")
+    if drift:
+        add_log_entry("warn",
+                      "局部重规划后接口可能漂移（原承诺的产物未被任何替代节点产出）：" + "；".join(drift))
+
+    add_log_entry("info", f"局部重规划：{len(affected)} 节点被替换 → {len(new_nodes)} 新节点"
+                          + (f"，{inherited} 个新节点继承原契约" if inherited else "")
+                          + (f"，{rewired} 条后继依赖已重挂" if rewired else ""))
+    return True

@@ -503,8 +503,12 @@ input, textarea { font-family: inherit; }
 .todo-item.done .todo-status { color: var(--success); }
 .todo-item.doing .todo-status { color: var(--accent); }
 .todo-item.todo .todo-status { color: var(--text-faint); }
+.todo-item.failed .todo-status { color: var(--danger); }
 .todo-item.done { color: var(--text); }
+.todo-item.failed { color: var(--danger); }
 .todo-item .todo-text { flex: 1; }
+/* 有失败节点时徽章转红（与 .todo-badge.done 互斥：全完成时 done 优先） */
+.todo-badge.failed { background: var(--danger); }
 .messages-inner {
   max-width: 90vw;
   margin: 0 auto;

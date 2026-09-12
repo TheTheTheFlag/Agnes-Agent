@@ -62,6 +62,7 @@ class DAGStorage:
                     plan_id INTEGER NOT NULL,
                     node_id TEXT NOT NULL,               -- 逻辑 id（planner 给，如 "1" "2a"）
                     description TEXT NOT NULL,           -- 节点动作描述
+                    acceptance_criteria TEXT,            -- 验收标准（planner 给：怎样算完成 / 要产出哪些文件）
                     tool TEXT,                           -- 建议执行的工具（可选，planner 填）
                     params TEXT,                         -- 工具参数（JSON）
                     status TEXT NOT NULL DEFAULT 'pending',
@@ -85,6 +86,16 @@ class DAGStorage:
                 );
                 CREATE INDEX IF NOT EXISTS idx_dag_edges_plan ON dag_edges(plan_id);
             """)
+
+            # ---- dag_nodes 结构迁移：旧库补 acceptance_criteria 列 ----
+            # 新库由上方 CREATE TABLE 直接带列；旧库（CREATE TABLE IF NOT EXISTS 不生效）
+            # 必须 PRAGMA 检测后 ALTER 补列，否则 planner 写入的验收标准会被静默丢弃。
+            try:
+                _dn_cols = {r[1] for r in conn.execute("PRAGMA table_info(dag_nodes)").fetchall()}
+                if "acceptance_criteria" not in _dn_cols:
+                    conn.execute("ALTER TABLE dag_nodes ADD COLUMN acceptance_criteria TEXT")
+            except Exception:
+                pass
 
     # ---------------- plan ----------------
     def create_plan(self, thread_id: str, goal: str) -> int:
@@ -146,43 +157,49 @@ class DAGStorage:
 
     # ---------------- nodes ----------------
     def add_node(self, plan_id: int, node_id: str, description: str, tool: str = None,
-                 params: Dict = None, status: str = STATUS_PENDING):
+                 params: Dict = None, status: str = STATUS_PENDING,
+                 acceptance_criteria: str = None):
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
-                """INSERT INTO dag_nodes (plan_id, node_id, description, tool, params, status, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (plan_id, node_id, description, tool,
+                """INSERT INTO dag_nodes
+                   (plan_id, node_id, description, acceptance_criteria, tool, params, status, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (plan_id, node_id, description, acceptance_criteria or None, tool,
                  json.dumps(params, ensure_ascii=False) if params else None, status, _now()),
             )
 
     def get_nodes(self, plan_id: int) -> List[Dict]:
         with sqlite3.connect(self.db_path) as conn:
             rows = conn.execute(
-                "SELECT node_id, description, tool, params, status, result, artifacts "
+                "SELECT node_id, description, acceptance_criteria, tool, params, status, result, artifacts "
                 "FROM dag_nodes WHERE plan_id = ? ORDER BY id",
                 (plan_id,),
             ).fetchall()
         return [{
-            "id": r[0], "description": r[1], "tool": r[2],
-            "params": json.loads(r[3]) if r[3] else {},
-            "status": r[4], "result": r[5],
-            "artifacts": json.loads(r[6]) if r[6] else [],
+            "id": r[0], "description": r[1],
+            "acceptance_criteria": r[2] or "",
+            "tool": r[3],
+            "params": json.loads(r[4]) if r[4] else {},
+            "status": r[5], "result": r[6],
+            "artifacts": json.loads(r[7]) if r[7] else [],
         } for r in rows]
 
     def get_node(self, plan_id: int, node_id: str) -> Optional[Dict]:
         with sqlite3.connect(self.db_path) as conn:
             r = conn.execute(
-                "SELECT node_id, description, tool, params, status, result, artifacts "
+                "SELECT node_id, description, acceptance_criteria, tool, params, status, result, artifacts "
                 "FROM dag_nodes WHERE plan_id = ? AND node_id = ?",
                 (plan_id, node_id),
             ).fetchone()
             if not r:
                 return None
             return {
-                "id": r[0], "description": r[1], "tool": r[2],
-                "params": json.loads(r[3]) if r[3] else {},
-                "status": r[4], "result": r[5],
-                "artifacts": json.loads(r[6]) if r[6] else [],
+                "id": r[0], "description": r[1],
+                "acceptance_criteria": r[2] or "",
+                "tool": r[3],
+                "params": json.loads(r[4]) if r[4] else {},
+                "status": r[5], "result": r[6],
+                "artifacts": json.loads(r[7]) if r[7] else [],
             }
 
     def set_node_status(self, plan_id: int, node_id: str, status: str,
@@ -214,6 +231,15 @@ class DAGStorage:
                 "SELECT from_id, to_id, soft FROM dag_edges WHERE plan_id = ?", (plan_id,)
             ).fetchall()
         return [{"from": r[0], "to": r[1], "soft": bool(r[2])} for r in rows]
+
+    def remove_edge(self, plan_id: int, from_id: str, to_id: str) -> int:
+        """删除一条边（局部重规划把未执行后继的入边"重挂"到替代节点时用）。"""
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.execute(
+                "DELETE FROM dag_edges WHERE plan_id = ? AND from_id = ? AND to_id = ?",
+                (plan_id, from_id, to_id),
+            )
+            return cur.rowcount
 
     # ---------------- checkpoint / snapshot ----------------
     def save_checkpoint(self, plan_id: int):

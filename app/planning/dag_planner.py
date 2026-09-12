@@ -109,11 +109,24 @@ def create_dag_planner_node(llm):
             dag.delete_plan(old["id"])
         plan_id = dag.create_plan(thread_id, goal)
         for n in nodes:
-            dag.add_node(plan_id, n["id"], n["description"], tool=n.get("tool"), params=n.get("params"))
+            dag.add_node(plan_id, n["id"], n["description"], tool=n.get("tool"),
+                         params=n.get("params"),
+                         acceptance_criteria=n.get("acceptance_criteria"))
         for e in edges:
             dag.add_edge(plan_id, e["from"], e["to"], soft=bool(e.get("soft")))
         dag.set_plan_status(plan_id, "executing")
         dag.save_checkpoint(plan_id)
+
+        # 契约遵守率：planner 是否真的把"产出文件路径"写进了 acceptance_criteria。
+        # 这个比率直接决定后续 complete_node 契约校验的强度——没契约的节点只剩下
+        # "必须真实落盘"这一层约束。记入日志 + 规划气泡，便于长期观察 prompt 遵守情况。
+        with_acc = [n for n in nodes if str(n.get("acceptance_criteria") or "").strip()]
+        no_path_ids = [n["id"] for n in nodes if not core.expected_artifacts(n)]
+        contract_line = (f"[契约] 规划遵守率：{len(with_acc)}/{len(nodes)} 节点带验收标准，"
+                         f"{len(nodes) - len(no_path_ids)} 个写明产出文件路径")
+        if no_path_ids:
+            contract_line += "；缺产出路径：" + ", ".join(no_path_ids)
+        add_log_entry("info", contract_line)
 
         node_snap = [{"id": n["id"], "status": "pending", "description": n["description"][:40]} for n in nodes]
         add_event("planner", {
@@ -124,7 +137,8 @@ def create_dag_planner_node(llm):
         add_event("node_thought", {
             "role": "planner",
             "title": f"📋 规划（{len(nodes)} 节点）",
-            "text": f"目标：{goal}\n节点：\n" + "\n".join(f"- {n['description'][:60]}" for n in nodes),
+            "text": (f"目标：{goal}\n节点：\n" + "\n".join(f"- {n['description'][:60]}" for n in nodes)
+                     + f"\n\n{contract_line}"),
         }, thread_id)
 
         record_node_end(thread_id, "planner", f"{len(nodes)} 节点 DAG")

@@ -90,7 +90,7 @@ def build_dag_planner_system_prompt() -> str:
 - **最小化任务数**：用最少的节点完成目标，不要过度分解。简单目标（单文件/单功能）→ 1 个节点；中等目标 → 2-4 个节点；复杂目标 → 可拆分为多个计划。
 - **控制总节点数 ≤ 8**。
 - 输出格式必须是 JSON：{{"nodes": [...], "edges": [...]}}，不要多余文字。
-- 节点：{{"id": "字符串", "description": "完整指令（不是含糊目标）", "acceptance_criteria": "怎么知道任务成功了", "tool": "可选：建议工具名", "params": {{}} }}
+- 节点：{{"id": "字符串", "description": "完整指令（不是含糊目标）", "acceptance_criteria": "验收标准：怎样算完成 + 本节点要产出的文件路径（如 deliverables/tetris/index.html），逐条写明", "tool": "可选：建议工具名", "params": {{}} }}
 - 边：{{"from": "上游id", "to": "下游id", "soft": false}}；soft=true 表示"上游缺失不阻塞下游，但结果可能不完整"。
 - 严禁成环（1→2→3→1 这种）。如果发现成环，重出一次；再成环就让系统退回单节点计划即可。
 - 能并行的步骤分开成节点（无依赖 = 同层并行），不要塞进一个节点里"全做完"。
@@ -108,12 +108,23 @@ def build_dag_executor_system_prompt(
     goal: str,
     tool_names: str,
     artifacts_context: str = "",
+    acceptance_criteria: str = "",
 ) -> str:
     """DAG executor 单节点的完整系统提示：通用纪律 + 记忆 + 决策 + 工具策略 + 安全 + 执行专项规则。"""
     artifacts_block = artifacts_context or ""
+    # 契约前置：把 planner 给出的验收标准（含应产出的文件路径）直接摆在模型面前，
+    # 避免它只输出文字、或产出与契约不符的文件。
+    acceptance_block = ""
+    if acceptance_criteria:
+        acceptance_block = (
+            "\n<acceptance_criteria>\n"
+            "本节点的验收标准（必须逐条满足，框架会在 complete_node 时据此校验）：\n"
+            f"{acceptance_criteria}\n"
+            "</acceptance_criteria>\n"
+        )
     return f"""你是执行 DAG 子任务 {node_id} 的执行器。整体目标：{goal}
 当前子任务：{description}
-
+{acceptance_block}
 {EXECUTION_DISCIPLINE}
 
 {SAFETY_RULES}
@@ -137,7 +148,9 @@ def build_dag_executor_system_prompt(
 <executor_discipline>
 1. 探索 ≤ 2 次；写入 ≤ 8 次（写超过 8 次会被安全策略直接拒绝，请合并到更少的文件里）。
 2. 路径必须以 `deliverables/` 开头，否则被拒。
-3. 完成后必须调用 `complete_node`（files 列出实际产出路径）——只用文字不算完成，框架不会置 success。
+3. 完成后必须调用 `complete_node`（files 列出实际产出路径）——只用文字不算完成，框架不会置 success；
+   **files 必须完整覆盖验收标准（acceptance_criteria）里列出的所有产出文件**，缺一个都会被拒并要求补齐。
+   没有落盘任何文件时 complete_node 也会被直接拒绝。
 4. 无法完成时立即调用 `fail_node`（reason 写原因），不要多次重试。
 5. 不要为凑工具调用而调用工具；不要重复写入同一文件。
 6. **上下文优先**：开始前必须先阅读 artifacts_context 中的已有产出。如果已有文件满足需求，不要重复创建；应在此基础上修改或引用。

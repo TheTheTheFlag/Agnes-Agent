@@ -443,8 +443,8 @@ def route_after_executor(state: State):
     """DAG executor 退出后：所有决策走 dag_storage（唯一真相源）。
       1) 如果连续 3 次无可执行节点 → 进 summarizer（防死循环）
       2) 还有未完成节点（pending/ready/running）→ 继续 executor
-      3) 全部终态（success/failed/skipped）→ 进 summarizer 汇总结论
-      局部重规划由 executor 内部先做；这里只在 DAG 彻底完成/收敛时结束。"""
+      3) 还有 failed 节点且重规划未用完 → 继续 executor（让入口触发下一轮局部重规划）
+      4) 全部终态且重规划已用完 → 进 summarizer 汇总结论"""
     # 首先检查是否连续空批达到上限
     empty_streak = int(state.get("_empty_streak", 0))
     if empty_streak >= 3:
@@ -453,6 +453,7 @@ def route_after_executor(state: State):
 
     thread_id = state.get("thread_id") or "default"
     try:
+        from app.planning.dag_core import MAX_REPLAN
         from app.planning.dag_storage import DAGStorage
         from app.config import DB_PATH
         dag = DAGStorage(DB_PATH)
@@ -469,6 +470,20 @@ def route_after_executor(state: State):
     if unfinished:
         add_log_entry("info", f"DAG 路由→executor: 还有 {len(unfinished)} 节点未完成")
         return "executor"
+
+    # 还有 failed 节点、且重规划次数没用完 → 回 executor 触发下一轮局部重规划。
+    # 缺了这条时：一批节点全失败 → unfinished 为空 → 直接收敛结束，
+    # 而重规划挂在 executor 入口，于是全程只可能重规划一次（上限形同虚设）。
+    replan_count = int(plan.get("replan_count", 0))
+    failed = [n for n in nodes if n["status"] == "failed"]
+    if failed and replan_count < MAX_REPLAN:
+        add_log_entry(
+            "info",
+            f"DAG 路由→executor: 仍有 {len(failed)} 个失败节点，触发第 "
+            f"{replan_count + 1}/{MAX_REPLAN} 次局部重规划",
+        )
+        return "executor"
+
     # 全部终态 → 汇总结论（含失败节点也在 summarizer 兜底说明）
     add_log_entry("info", "DAG 路由→summarizer: 全部节点终态")
     return "summarizer"

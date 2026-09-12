@@ -22,6 +22,10 @@ STATUS_SUCCESS = "success"
 STATUS_FAILED = "failed"
 STATUS_SKIPPED = "skipped"
 
+# 单个计划的局部重规划次数上限（executor 入口与 route_after_executor 共用，
+# 保证"还有 failed 就回 executor 重规划"不会无限循环）
+MAX_REPLAN = 3
+
 
 # ---------------- 图结构 ----------------
 class DAG:
@@ -209,3 +213,38 @@ def compute_failure_skips(nodes: Dict[str, Dict], edges: List[Dict]) -> List[str
                 to_skip.add(nid)
                 changed = True
     return list(to_skip)
+
+
+# ---------------- ④ 契约（acceptance_criteria）解析 ----------------
+# 放在 core 而非 executor：纯函数、无依赖，planner（统计遵守率）与 executor（硬校验）都要用，
+# 放这里可避免 dag_planner → dag_executor 的跨模块耦合。
+def expected_artifacts(node: Dict) -> List[str]:
+    """从节点的验收标准/描述里解析出"契约要求产出的文件路径"。
+
+    契约前置：planner 被要求把产出文件路径写进 acceptance_criteria，这里优先取它；
+    旧计划（或规划器没按约定输出时）回退到 description 里扫 deliverables/ 路径。
+    """
+    import re
+    texts = [str(node.get("acceptance_criteria") or ""), str(node.get("description") or "")]
+    out: List[str] = []
+    for t in texts:
+        for m in re.findall(r"deliverables/[\w\-./]+", t, re.I):
+            p = m.strip().rstrip(".,;:、）)】」")
+            if p and p not in out:
+                out.append(p)
+    return out
+
+
+def missing_expected(declared: List[str], expected: List[str]) -> List[str]:
+    """declared 未覆盖的 expected 项。
+
+    容错两类写法差异：Windows 反斜杠、绝对路径 vs 相对路径
+    （模型很可能回传 "C:/.../deliverables/a.html" 或 "deliverables\\a.html"）。
+    """
+    norm = [str(d).replace("\\", "/").strip() for d in (declared or [])]
+    miss = []
+    for e in expected:
+        ee = str(e).replace("\\", "/").strip()
+        if not any(d == ee or d.endswith(ee) or ee.endswith(d) for d in norm):
+            miss.append(e)
+    return miss

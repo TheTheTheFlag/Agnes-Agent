@@ -486,7 +486,11 @@ async def command_endpoint(payload: dict):
         if not arg:
             return {"error": "用法: /delete <thread_id>"}
         deleted = await _delete_thread(arg)
-        return {"result": f"已删除会话 {arg}（messages={deleted['messages']} tasks={deleted['tasks']} checkpoints={deleted['checkpoints']}）", "deleted": deleted}
+        # 用 .get() 汇总，避免 store 侧增删计数键时这里再抛 KeyError
+        # （历史上曾因 store 去掉 'tasks' 键而让本接口 500）
+        detail = " ".join(f"{k}={deleted.get(k, 0)}"
+                          for k in ("messages", "summaries", "commands", "cache", "checkpoints"))
+        return {"result": f"已删除会话 {arg}（{detail}）", "deleted": deleted}
     return {"error": f"未知命令: /{name}，输入 /help 查看列表"}
 
 
