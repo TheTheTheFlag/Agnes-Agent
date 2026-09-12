@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>宝石消消乐 · Match-3</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <div class="game-shell">
+    <header class="topbar">
+      <h1 class="title">宝石消消乐</h1>
+      <div class="stats">
+        <div class="stat">
+          <span class="stat-label">分数</span>
+          <span class="stat-value" id="score">0</span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">关卡</span>
+          <span class="stat-value" id="level">1</span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">剩余步数</span>
+          <span class="stat-value" id="moves">30</span>
+        </div>
+      </div>
+    </header>
+
+    <div class="target-bar">
+      <span class="target-label">目标</span>
+      <span id="target">消除 3 个或以上相同宝石</span>
+    </div>
+
+    <main class="board-wrap">
+      <div id="board" class="board" aria-label="游戏棋盘" role="grid"></div>
+      <div id="overlay" class="overlay hidden">
+        <div class="overlay-card">
+          <h2 class="overlay-title">游戏结束</h2>
+          <p class="overlay-text">最终得分：<span id="finalScore">0</span></p>
+          <button type="button" class="btn btn-primary" id="overlayRestartBtn">再来一局</button>
+        </div>
+      </div>
+    </main>
+
+    <footer class="footer">
+      <button type="button" class="btn btn-primary" id="restartBtn">开始 / 重新开始</button>
+      <p class="hint">点击两个相邻宝石交换位置，凑成 3 个及以上同类即可消除。</p>
+    </footer>
+  </div>
+
+  <script src="./game.js" defer></script>
+</body>
+</html>

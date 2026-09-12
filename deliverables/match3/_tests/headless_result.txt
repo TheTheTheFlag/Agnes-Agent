@@ -1,0 +1,59 @@
+=== Match-3 headless 测试 ===
+被测文件: C:\Users\17625\Agnes-Agent\deliverables\match3\game.js
+
+PASS  全局暴露全部契约函数（18 个）
+PASS  bootstrap 后 #board 生成 64 个 .cell
+PASS  每个 .cell 内含 1 个 .gem 子元素
+PASS  cell 使用 .cell 基类
+PASS  cell 的 dataset.index 覆盖 0..63
+PASS  gem 使用 .gem-N 类（N∈0..5）
+PASS  棋盘为 8x8
+PASS  初始棋盘无任何三连
+PASS  初始棋盘存在可行操作 hasValidMove()
+PASS  初始无空位
+PASS  isAdjacent 相邻为真
+PASS  isAdjacent 斜向为假
+PASS  isAdjacent 相隔为假
+PASS  swapTiles 原地交换两格
+PASS  hasValidMove 不破坏棋盘状态
+PASS  findMatches 识别横三连
+PASS  findMatches 识别纵三连
+PASS  findMatches 结果去重（四连=4 格）
+PASS  clearMatches 置空数量正确（>=3）
+PASS  clearMatches 后出现空位
+PASS  applyGravity 返回发生移动
+PASS  applyGravity 后空位只在各列顶部
+PASS  refillBoard 补齐空位且无 null
+PASS  补齐后仍为 8x8
+PASS  存在可用的无效交换样例（前置条件）
+PASS  无效交换 attemptSwap 返回 false
+PASS  无效交换后棋盘完全复原
+PASS  存在可行交换样例（前置条件）
+PASS  有效交换 attemptSwap 返回 true
+PASS  连锁结束后棋盘无空位
+PASS  连锁结束后仍为 8x8
+PASS  连锁结束后无残留三连（已收敛到稳定）
+PASS  分数增加
+PASS  步数 -1
+PASS  #score 文本已同步
+PASS  #moves 文本已同步
+PASS  resolveCascades 至少执行 1 层连锁
+PASS  resolveCascades 后棋盘无空位、无残留三连
+PASS  resolveCascades 累加分数
+PASS  getScoreFor 连锁倍数生效
+PASS  达标后 level +1
+PASS  目标分随关卡递增（200*level）
+PASS  过关后步数重置
+PASS  #target 文案随关卡更新
+PASS  重开后 #overlay 带 hidden
+PASS  步数耗尽移除 hidden（显示遮罩）
+PASS  #finalScore 写入最终分
+PASS  两个重开按钮均绑定 click
+PASS  遮罩内“再来一局”可重开（恢复 hidden + 分数归零）
+PASS  底部“开始/重新开始”可重开
+PASS  game.js 无 import/export（普通脚本）
+PASS  game.js 顶部常量符合契约
+
+----------------------------------------
+总计: 52 项断言，通过 52，失败 0
+结论: 全部通过 ✅

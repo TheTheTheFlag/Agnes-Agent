@@ -491,25 +491,87 @@ function todoMark(status) {
   return "•";
 }
 
-// 把后端 DAG 节点快照（[{id, status, description}]）转成待办列表并刷新面板。
-// 过滤 skipped：这些节点已被"局部重规划替换"或"前置失败跳过"，属于作废节点，
-// 若照旧显示会把待办数量撑虚（例如 5 个作废 + 6 个新节点 = 11 项）并与新节点重复。
-// 状态映射：success→done、running→doing、failed→failed（红色叹号）、其余→todo。
+// 把后端 DAG 节点快照（[{id, status, description, replaces, edges: ...}]）转成待办列表并刷新面板。
+// 流程：
+//   1) 解析"被替代"关系：replaces 指向的旧节点不显示（被新节点替代）
+//   2) 过滤 skipped（作废节点不显示）
+//   3) Kahn 拓扑分层：同层保持原序，跨层按依赖排序
+//   4) 状态映射：success→done、running→doing、failed→failed（红 ✕）、其余→todo
 // 规划任务全程由这个函数驱动"动态变化"的待办列表（替代原先的 DAG 图）。
-function updateTodoFromNodes(nodes) {
+function updateTodoFromNodes(nodes, edges) {
   if (!Array.isArray(nodes) || !nodes.length) return;
-  const items = nodes
-    .filter((n) => (n.status || "") !== "skipped")
-    .map((n, i) => {
+
+  // 1) 解析"被替代"关系
+  const replacedIds = new Set();
+  nodes.forEach((n) => { if (n.replaces) replacedIds.add(String(n.replaces)); });
+
+  // 2) 过滤 skipped + 被替代的旧节点
+  const alive = nodes.filter(
+    (n) => (n.status || "") !== "skipped" && !replacedIds.has(String(n.id))
+  );
+  if (!alive.length) return;
+
+  // 3) 拓扑分层（业界 DAG 渲染统一做法：Kahn 拓扑分层 + 同层保序）
+  const layers = topoSortLayers(alive, Array.isArray(edges) ? edges : []);
+
+  // 4) 拍平成 items
+  const items = [];
+  for (const layer of layers) {
+    for (const n of layer) {
       const st = n.status || "todo";
       let status = "todo";
       if (st === "success") status = "done";
       else if (st === "running") status = "doing";
       else if (st === "failed") status = "failed";
-      const text = (n.description || n.desc || String(n.id)).trim();
-      return { id: n.id || String(i), text, status, rawStatus: st };
-    });
+      items.push({
+        id: n.id,
+        text: (n.description || n.desc || String(n.id)).trim(),
+        status,
+        rawStatus: st,
+        replaces: n.replaces || "",
+      });
+    }
+  }
   setTodos(items);
+}
+
+// Kahn 拓扑分层：返 [[上游层], [中层], [下游层], ...]，同层保持原数组序。
+// soft 边不参与入度计算（业界做法：软依赖不阻塞）。
+function topoSortLayers(nodes, edges) {
+  const idToNode = new Map(nodes.map((n) => [String(n.id), n]));
+  const indeg = new Map(nodes.map((n) => [String(n.id), 0]));
+  const adj = new Map(nodes.map((n) => [String(n.id), []]));
+  for (const e of edges) {
+    const f = String(e.from), t = String(e.to);
+    if (idToNode.has(f) && idToNode.has(t) && !e.soft) {
+      adj.get(f).push(idToNode.get(t));
+      indeg.set(t, indeg.get(t) + 1);
+    }
+  }
+  // 同层内按"原数组序"出列：维护一个 in-order 的初始 frontier
+  const ordered = nodes.map((n) => String(n.id));
+  const inFrontier = new Set(ordered.filter((id) => indeg.get(id) === 0));
+  const layers = [];
+  while (inFrontier.size) {
+    const layer = ordered.filter((id) => inFrontier.has(id)).map((id) => idToNode.get(id));
+    layers.push(layer);
+    const next = new Set();
+    for (const u of layer) {
+      for (const v of adj.get(String(u.id))) {
+        const d = indeg.get(String(v.id)) - 1;
+        indeg.set(String(v.id), d);
+        if (d === 0) next.add(String(v.id));
+      }
+    }
+    inFrontier.clear();
+    inFrontier.add(...next);
+  }
+  // 兜底：若有环（不该发生），剩余的放最后一层
+  const placed = new Set();
+  layers.forEach((l) => l.forEach((n) => placed.add(String(n.id))));
+  const remaining = nodes.filter((n) => !placed.has(String(n.id)));
+  if (remaining.length) layers.push(remaining);
+  return layers;
 }
 
 function renderTodoPanel() {
@@ -544,7 +606,13 @@ function renderTodoPanel() {
   const list = $("#todoList");
   if (list) {
     list.innerHTML = items.map((t) => {
-      return `<div class="todo-item ${t.status}"><span class="todo-status">${todoMark(t.status)}</span><span class="todo-text">${escapeHtml(t.text || t.id || "")}</span></div>`;
+      const mark = todoMark(t.status);
+      // "被替代"角标：局部重规划生成的新节点会标注它替代了哪个旧节点，
+      // 避免用户困惑"为什么 a1 和 design 看起来都在第一层"。
+      const replTag = t.replaces
+        ? `<span class="todo-repl" title="本次由局部重规划生成，替代原节点 ${escapeHtml(t.replaces)}">⟲ ${escapeHtml(t.replaces)}</span>`
+        : "";
+      return `<div class="todo-item ${t.status}"><span class="todo-status">${mark}</span><span class="todo-text">${escapeHtml(t.text || t.id || "")}</span>${replTag}</div>`;
     }).join("");
   }
   // 展开状态
@@ -967,11 +1035,12 @@ function handleChatEvent(evt) {
     State.currentAssistantEl = null;
   } else if (step === "dag_push") {
     // 规划开始时：用后端传来的节点结构初始化待办列表（替代原 DAG 图）
-    updateTodoFromNodes((evt.dag || {}).nodes || []);
+    if (Array.isArray((evt.dag || {}).edges)) window._currentEdges = evt.dag.edges;
+    updateTodoFromNodes((evt.dag || {}).nodes || [], window._currentEdges);
   } else if (step === "node_status") {
     // 执行中：用全量节点快照刷新待办状态（动态变化）；无全量快照时用单节点状态更新
     if (evt.nodes && evt.nodes.length) {
-      updateTodoFromNodes(evt.nodes);
+      updateTodoFromNodes(evt.nodes, window._currentEdges);
     } else if (evt.node_id) {
       State.todos = (State.todos || []).map((t) => {
         if (String(t.id) === String(evt.node_id)) {
@@ -2348,10 +2417,12 @@ function handleLiveEvent(evt) {
     if (State.drawerTab === "events") renderEventsTab(drawerBody);
   } else if (eType === "planner" || eType === "executor") {
     // 任务计划/子任务状态变化 → 刷新待办面板。
-    // 后端事件负载有两种形态：executor 全量快照用 `nodes`（[{id,status,description}]），
+    // 后端事件负载有两种形态：executor 全量快照用 `nodes`（[{id,status,description,replaces}]），
     // 旧版 subtasks 结构也兼容。统一转成待办列表驱动（替代 DAG 图）。
     if (eData.nodes && Array.isArray(eData.nodes) && eData.nodes.length) {
-      updateTodoFromNodes(eData.nodes);
+      // 缓存最新 edges（供 updateTodoFromNodes 做拓扑分层用）
+      if (Array.isArray(eData.edges)) window._currentEdges = eData.edges;
+      updateTodoFromNodes(eData.nodes, window._currentEdges);
     } else if (eData.subtasks && Array.isArray(eData.subtasks)) {
       const items = eData.subtasks.map((s) => ({
         id: s.id,

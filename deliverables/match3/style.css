@@ -1,0 +1,381 @@
+/* =========================================================
+   宝石消消乐 (Match-3) — 视觉样式
+   纯静态实现，无外部依赖（颜色/渐变全部由 CSS 生成）
+   ========================================================= */
+
+:root {
+  --bg-0: #10131a;
+  --bg-1: #1b2130;
+  --panel: rgba(255, 255, 255, 0.06);
+  --panel-strong: rgba(255, 255, 255, 0.12);
+  --text: #eaf0ff;
+  --text-dim: #9aa6bf;
+  --accent: #6ea8fe;
+  --accent-2: #8b5cf6;
+  --cell-gap: 6px;
+  --radius-lg: 18px;
+  --radius-md: 12px;
+  --board-size: 480px;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  min-height: 100%;
+  background:
+    radial-gradient(1200px 600px at 50% -20%, #223055 0%, transparent 60%),
+    linear-gradient(160deg, var(--bg-0), var(--bg-1));
+  color: var(--text);
+  font-family: "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* ---------- 布局 ---------- */
+.game-shell {
+  width: 100%;
+  max-width: 560px;
+  margin: 0 auto;
+  padding: 20px 16px 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.topbar { display: flex; flex-direction: column; gap: 12px; }
+
+.title {
+  margin: 0;
+  font-size: 26px;
+  font-weight: 800;
+  letter-spacing: 2px;
+  text-align: center;
+  background: linear-gradient(90deg, #7dd3fc, #a78bfa, #f0abfc);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  filter: drop-shadow(0 2px 8px rgba(139, 92, 246, 0.35));
+}
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+
+.stat {
+  background: var(--panel);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--radius-md);
+  padding: 8px 6px;
+  text-align: center;
+  backdrop-filter: blur(6px);
+}
+
+.stat-label {
+  display: block;
+  font-size: 12px;
+  color: var(--text-dim);
+  letter-spacing: 1px;
+  margin-bottom: 4px;
+}
+
+.stat-value {
+  display: block;
+  font-size: 22px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  color: #fff;
+  transition: transform 0.18s ease, color 0.18s ease;
+}
+
+.stat-value.bump { transform: scale(1.22); color: #ffd479; }
+
+/* ---------- 目标提示 ---------- */
+.target-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  background: linear-gradient(90deg, rgba(110, 168, 254, 0.18), rgba(139, 92, 246, 0.14));
+  border: 1px solid rgba(110, 168, 254, 0.28);
+  font-size: 14px;
+}
+
+.target-label {
+  flex: none;
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #0b1020;
+  font-weight: 800;
+  font-size: 12px;
+  letter-spacing: 1px;
+}
+
+#target { color: var(--text); }
+
+/* ---------- 棋盘 ---------- */
+.board-wrap {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.board {
+  /* 需求：CSS Grid 定义 8 列（8x8） */
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  grid-template-rows: repeat(8, 1fr);
+  gap: var(--cell-gap);
+  width: 100%;
+  max-width: var(--board-size);
+  aspect-ratio: 1 / 1;
+  padding: var(--cell-gap);
+  border-radius: var(--radius-lg);
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.10), rgba(255, 255, 255, 0.03));
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45), inset 0 0 40px rgba(110, 168, 254, 0.06);
+  touch-action: manipulation;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* ---------- 单元格 & 宝石 ---------- */
+.cell {
+  position: relative;
+  border-radius: var(--radius-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: clamp(16px, 4.2vw, 28px);
+  aspect-ratio: 1 / 1;
+  background: rgba(0, 0, 0, 0.22);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  cursor: pointer;
+  /* 掉落 / 位移过渡 */
+  transition: transform 0.18s ease, box-shadow 0.15s ease, filter 0.15s ease,
+              opacity 0.18s ease, background 0.18s ease;
+  will-change: transform, opacity;
+}
+
+/* 宝石 6 种类型：不同渐变 + 圆角 */
+.gem {
+  width: 100%;
+  height: 100%;
+  border-radius: var(--radius-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: inset 0 -4px 10px rgba(0, 0, 0, 0.28),
+              inset 0 4px 10px rgba(255, 255, 255, 0.28),
+              0 2px 6px rgba(0, 0, 0, 0.30);
+  transition: transform 0.16s ease, filter 0.16s ease, box-shadow 0.16s ease;
+}
+
+.gem-0 {
+  border-radius: 50%;
+  background: radial-gradient(circle at 32% 28%, #ffd6de, #ff5c7a 60%, #b81f3f);
+}
+.gem-1 {
+  border-radius: 30% 70% 70% 30% / 40% 40% 60% 60%;
+  background: radial-gradient(circle at 30% 26%, #d9fff0, #2ee6a8 58%, #0d8f66);
+}
+.gem-2 {
+  border-radius: 26%;
+  transform: rotate(45deg);
+  background: linear-gradient(140deg, #ffe9a8, #ffb020 55%, #c47a00);
+}
+.gem-3 {
+  border-radius: 50% 50% 42% 42%;
+  background: radial-gradient(circle at 32% 25%, #dbe9ff, #4c8dff 58%, #1b46b8);
+}
+.gem-4 {
+  border-radius: 22% 78% 30% 70% / 60% 30% 70% 40%;
+  background: radial-gradient(circle at 34% 28%, #f3d6ff, #a855f7 58%, #6b21a8);
+}
+.gem-5 {
+  border-radius: 18%;
+  background: linear-gradient(160deg, #d6fbff, #22d3ee 55%, #0e7490);
+}
+
+/* 宝石内的高光点 */
+.gem::after {
+  content: "";
+  position: absolute;
+  width: 26%;
+  height: 26%;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.75);
+  filter: blur(1px);
+  transform: translate(-32%, -40%);
+  pointer-events: none;
+}
+.cell .gem { position: relative; }
+
+/* ---------- 选中态 ---------- */
+.cell.selected {
+  transform: scale(1.08);
+  box-shadow: 0 0 0 3px #ffd479, 0 0 22px rgba(255, 212, 121, 0.75);
+  z-index: 3;
+}
+.cell.selected .gem { filter: brightness(1.18); }
+
+/* 可交换提示（可选，由 JS 添加） */
+.cell.hint { outline: 2px dashed rgba(255, 255, 255, 0.45); }
+
+/* ---------- 消除动画 ---------- */
+@keyframes clear-pop {
+  0%   { transform: scale(1);    opacity: 1; filter: brightness(1); }
+  35%  { transform: scale(1.28); opacity: 1; filter: brightness(1.9); }
+  100% { transform: scale(0.1);  opacity: 0; filter: brightness(2.4); }
+}
+
+.cell.clearing {
+  animation: clear-pop 0.34s cubic-bezier(0.34, 1.4, 0.5, 1) forwards;
+  pointer-events: none;
+  z-index: 2;
+}
+
+/* 粒子/爆闪层 */
+@keyframes burst-ring {
+  0%   { transform: scale(0.4); opacity: 0.85; }
+  100% { transform: scale(1.9); opacity: 0; }
+}
+.cell.clearing::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: radial-gradient(circle, rgba(255, 255, 255, 0.9), rgba(255, 255, 255, 0) 70%);
+  animation: burst-ring 0.34s ease-out forwards;
+  pointer-events: none;
+}
+
+/* ---------- 掉落 / 位移过渡 ---------- */
+.cell.falling { transition: transform 0.26s cubic-bezier(0.36, 0.07, 0.19, 0.97); }
+
+@keyframes drop-in {
+  0%   { transform: translateY(-120%) scale(0.85); opacity: 0; }
+  70%  { transform: translateY(6%) scale(1.02); opacity: 1; }
+  100% { transform: translateY(0) scale(1); opacity: 1; }
+}
+.cell.dropping { animation: drop-in 0.30s ease-out both; }
+
+@keyframes swap-bounce {
+  0%   { transform: scale(1); }
+  50%  { transform: scale(1.14); }
+  100% { transform: scale(1); }
+}
+.cell.swap { animation: swap-bounce 0.2s ease; }
+
+/* 无效交换抖动 */
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  25%      { transform: translateX(-5px); }
+  75%      { transform: translateX(5px); }
+}
+.cell.shake { animation: shake 0.24s ease; }
+
+/* ---------- 遮罩 / 游戏结束 ---------- */
+.overlay {
+  position: absolute;
+  inset: 0;
+  border-radius: var(--radius-lg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(8, 11, 20, 0.72);
+  backdrop-filter: blur(6px);
+  z-index: 10;
+  transition: opacity 0.25s ease, visibility 0.25s ease;
+}
+
+.overlay.hidden {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.overlay-card {
+  width: min(88%, 320px);
+  padding: 26px 22px;
+  border-radius: var(--radius-lg);
+  text-align: center;
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.05));
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
+  animation: card-in 0.3s cubic-bezier(0.34, 1.4, 0.5, 1);
+}
+
+@keyframes card-in {
+  from { transform: scale(0.85) translateY(12px); opacity: 0; }
+  to   { transform: scale(1) translateY(0); opacity: 1; }
+}
+
+.overlay-title {
+  margin: 0 0 10px;
+  font-size: 24px;
+  font-weight: 800;
+  background: linear-gradient(90deg, #7dd3fc, #a78bfa);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.overlay-text { margin: 0 0 18px; color: var(--text-dim); font-size: 15px; }
+#finalScore { color: #ffd479; font-weight: 800; font-size: 18px; }
+
+/* ---------- 按钮 ---------- */
+.btn {
+  font: inherit;
+  font-weight: 700;
+  letter-spacing: 1px;
+  padding: 12px 22px;
+  border: none;
+  border-radius: 999px;
+  cursor: pointer;
+  color: #0b1020;
+  background: linear-gradient(135deg, #7dd3fc, #6ea8fe 45%, #8b5cf6);
+  box-shadow: 0 8px 22px rgba(110, 168, 254, 0.35);
+  transition: transform 0.14s ease, box-shadow 0.14s ease, filter 0.14s ease;
+}
+
+.btn:hover { filter: brightness(1.07); box-shadow: 0 10px 26px rgba(110, 168, 254, 0.5); }
+.btn:active { transform: translateY(2px) scale(0.98); box-shadow: 0 4px 12px rgba(110, 168, 254, 0.4); }
+
+/* ---------- 底部 ---------- */
+.footer { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+#restartBtn { width: 100%; max-width: 320px; }
+.hint { margin: 0; font-size: 13px; color: var(--text-dim); text-align: center; }
+
+/* ---------- 响应式：移动端 ---------- */
+@media (max-width: 480px) {
+  :root { --cell-gap: 4px; --radius-md: 9px; --radius-lg: 14px; }
+  .game-shell { padding: 14px 10px 24px; gap: 10px; }
+  .title { font-size: 21px; }
+  .stat-value { font-size: 18px; }
+  .stat-label { font-size: 11px; }
+  .target-bar { font-size: 13px; padding: 8px 10px; }
+  .cell { font-size: clamp(14px, 5vw, 22px); }
+  .btn { padding: 11px 18px; }
+}
+
+@media (max-width: 340px) {
+  :root { --cell-gap: 3px; }
+  .stats { gap: 6px; }
+}
+
+/* 横屏手机：限制棋盘高度 */
+@media (max-height: 520px) and (orientation: landscape) {
+  .board { max-width: min(70vh, 420px); }
+  .game-shell { max-width: 90vh; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}

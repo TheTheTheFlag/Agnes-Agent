@@ -68,6 +68,7 @@ class DAGStorage:
                     status TEXT NOT NULL DEFAULT 'pending',
                     result TEXT,                         -- 节点结果
                     artifacts TEXT,                      -- 产出文件/引用（JSON 数组）
+                    replaces TEXT,                       -- 局部重规划时被替代的原节点 id（用于过滤 + 角标展示）
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (plan_id) REFERENCES dag_plans(id) ON DELETE CASCADE,
                     UNIQUE(plan_id, node_id)
@@ -87,13 +88,15 @@ class DAGStorage:
                 CREATE INDEX IF NOT EXISTS idx_dag_edges_plan ON dag_edges(plan_id);
             """)
 
-            # ---- dag_nodes 结构迁移：旧库补 acceptance_criteria 列 ----
+            # ---- dag_nodes 结构迁移：旧库补 acceptance_criteria / replaces 列 ----
             # 新库由上方 CREATE TABLE 直接带列；旧库（CREATE TABLE IF NOT EXISTS 不生效）
             # 必须 PRAGMA 检测后 ALTER 补列，否则 planner 写入的验收标准会被静默丢弃。
             try:
                 _dn_cols = {r[1] for r in conn.execute("PRAGMA table_info(dag_nodes)").fetchall()}
                 if "acceptance_criteria" not in _dn_cols:
                     conn.execute("ALTER TABLE dag_nodes ADD COLUMN acceptance_criteria TEXT")
+                if "replaces" not in _dn_cols:
+                    conn.execute("ALTER TABLE dag_nodes ADD COLUMN replaces TEXT")
             except Exception:
                 pass
 
@@ -158,36 +161,40 @@ class DAGStorage:
     # ---------------- nodes ----------------
     def add_node(self, plan_id: int, node_id: str, description: str, tool: str = None,
                  params: Dict = None, status: str = STATUS_PENDING,
-                 acceptance_criteria: str = None):
+                 acceptance_criteria: str = None, replaces: str = None):
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
                 """INSERT INTO dag_nodes
-                   (plan_id, node_id, description, acceptance_criteria, tool, params, status, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (plan_id, node_id, description, acceptance_criteria or None, tool,
-                 json.dumps(params, ensure_ascii=False) if params else None, status, _now()),
+                   (plan_id, node_id, description, acceptance_criteria, replaces,
+                    tool, params, status, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (plan_id, node_id, description, acceptance_criteria or None, replaces or None,
+                 tool, json.dumps(params, ensure_ascii=False) if params else None,
+                 status, _now()),
             )
 
     def get_nodes(self, plan_id: int) -> List[Dict]:
         with sqlite3.connect(self.db_path) as conn:
             rows = conn.execute(
-                "SELECT node_id, description, acceptance_criteria, tool, params, status, result, artifacts "
+                "SELECT node_id, description, acceptance_criteria, replaces, tool, "
+                "params, status, result, artifacts "
                 "FROM dag_nodes WHERE plan_id = ? ORDER BY id",
                 (plan_id,),
             ).fetchall()
         return [{
             "id": r[0], "description": r[1],
             "acceptance_criteria": r[2] or "",
-            "tool": r[3],
-            "params": json.loads(r[4]) if r[4] else {},
-            "status": r[5], "result": r[6],
-            "artifacts": json.loads(r[7]) if r[7] else [],
+            "replaces": r[3] or "",
+            "tool": r[4],
+            "params": json.loads(r[5]) if r[5] else {},
+            "status": r[6], "result": r[7],
+            "artifacts": json.loads(r[8]) if r[8] else [],
         } for r in rows]
 
     def get_node(self, plan_id: int, node_id: str) -> Optional[Dict]:
         with sqlite3.connect(self.db_path) as conn:
             r = conn.execute(
-                "SELECT node_id, description, acceptance_criteria, tool, params, status, result, artifacts "
+                "SELECT node_id, description, acceptance_criteria, replaces, tool, params, status, result, artifacts "
                 "FROM dag_nodes WHERE plan_id = ? AND node_id = ?",
                 (plan_id, node_id),
             ).fetchone()
@@ -196,10 +203,11 @@ class DAGStorage:
             return {
                 "id": r[0], "description": r[1],
                 "acceptance_criteria": r[2] or "",
-                "tool": r[3],
-                "params": json.loads(r[4]) if r[4] else {},
-                "status": r[5], "result": r[6],
-                "artifacts": json.loads(r[7]) if r[7] else [],
+                "replaces": r[3] or "",
+                "tool": r[4],
+                "params": json.loads(r[5]) if r[5] else {},
+                "status": r[6], "result": r[7],
+                "artifacts": json.loads(r[8]) if r[8] else [],
             }
 
     def set_node_status(self, plan_id: int, node_id: str, status: str,

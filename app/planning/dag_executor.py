@@ -93,7 +93,9 @@ def _run_node(thread_id: str, task_plan_id: int, node: Dict, goal: str,
     node_id = node["id"]
     description = node["description"]
     on_event("executor", {"subtask": node_id, "status": "running",
-                          "goal": goal[:80], "nodes": _snapshot_for_event(dag, task_plan_id)})
+                          "goal": goal[:80],
+                          "nodes": _snapshot_for_event(dag, task_plan_id),
+                          "edges": _snapshot_edges_for_event(dag, task_plan_id)})
     dag.set_node_status(task_plan_id, node_id, core.STATUS_RUNNING)
     dag.save_checkpoint(task_plan_id)
 
@@ -305,7 +307,8 @@ def _run_node(thread_id: str, task_plan_id: int, node: Dict, goal: str,
     dag.set_node_status(task_plan_id, node_id, status, result=final_result, artifacts=artifacts)
     dag.save_checkpoint(task_plan_id)
     on_event("executor", {"subtask": node_id, "status": status, "goal": goal[:80],
-                          "nodes": _snapshot_for_event(dag, task_plan_id)})
+                          "nodes": _snapshot_for_event(dag, task_plan_id),
+                          "edges": _snapshot_edges_for_event(dag, task_plan_id)})
     return node_id, status, final_result, artifacts
 
 
@@ -313,6 +316,12 @@ def _snapshot_for_event(dag: DAGStorage, plan_id: int) -> List[Dict]:
     """把当前 DAG 节点状态转成前端事件快照（vis-network 用）。"""
     return [{"id": n["id"], "status": n["status"], "description": n["description"][:40]}
             for n in dag.get_nodes(plan_id)]
+
+
+def _snapshot_edges_for_event(dag: DAGStorage, plan_id: int) -> List[Dict]:
+    """把当前 DAG 边转成前端事件快照（供前端 updateTodoFromNodes 做拓扑分层用）。"""
+    return [{"from": e["from"], "to": e["to"], "soft": bool(e.get("soft", False))}
+            for e in dag.get_edges(plan_id)]
 
 
 def create_executor(llm_builder, tools_list):
@@ -624,7 +633,8 @@ def _do_local_replan(plan: Dict, failed_ids: List[str], dag: DAGStorage,
         nid = n["id"]
         dag.add_node(plan["id"], nid, n["description"], tool=None, params={},
                      status=core.STATUS_PENDING,
-                     acceptance_criteria=n.get("acceptance_criteria"))
+                     acceptance_criteria=n.get("acceptance_criteria"),
+                     replaces=n.get("replaces"))
     for e in new_edges:
         dag.add_edge(plan["id"], e["from"], e["to"], soft=bool(e.get("soft")))
 

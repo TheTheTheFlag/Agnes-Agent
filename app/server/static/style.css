@@ -507,6 +507,22 @@ input, textarea { font-family: inherit; }
 .todo-item.done { color: var(--text); }
 .todo-item.failed { color: var(--danger); }
 .todo-item .todo-text { flex: 1; }
+/* "被替代"角标：局部重规划生成的新节点（如 a1）会带 replaces 字段指向原节点（如 design）。
+   显式标注让用户能一眼分辨"新生成的"和"原计划的"，而不是把两者混在一层。 */
+.todo-item .todo-repl {
+  flex: 0 0 auto;
+  font-size: 10.5px;
+  font-family: var(--mono);
+  color: var(--accent);
+  background: rgba(124, 92, 255, 0.10);
+  border: 1px solid rgba(124, 92, 255, 0.25);
+  padding: 1px 6px;
+  border-radius: 10px;
+  font-weight: 500;
+  cursor: help;
+  white-space: nowrap;
+}
+.todo-item.done .todo-repl { opacity: 0.75; }
 /* 有失败节点时徽章转红（与 .todo-badge.done 互斥：全完成时 done 优先） */
 .todo-badge.failed { background: var(--danger); }
 .messages-inner {
