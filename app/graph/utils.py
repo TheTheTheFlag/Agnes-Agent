@@ -39,14 +39,19 @@ KEEP_RECENT = 30
 MAX_TOOL_CALL_ROUNDS = 15
 
 def count_tokens(messages: List) -> int:
-    if tokenizer is None:
-        return 0
     text = ""
     for msg in messages:
         if hasattr(msg, 'content') and msg.content:
             text += str(msg.content)
         if hasattr(msg, 'type'):
             text += str(msg.type)
+    if tokenizer is None:
+        # 兜底估算：tiktoken 词表需要联网下载，离线/内网环境下 tokenizer 为 None。
+        # 此时**不能返回 0**——恒 0 会让所有 token 预算判断失效：
+        #   · ensure_token_limit 永不裁剪上下文 → 发给网关的 prompt 越堆越大 → 容易超时
+        #   · history 压缩的 token 触发条件永不成立
+        # 估算系数取 1/2：英文/代码约 1 token/4 字符，中文约 1 token/字，混合场景折中。
+        return max(1, len(text) // 2)
     return len(tokenizer.encode(text))
 
 

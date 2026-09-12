@@ -317,51 +317,19 @@ def chatbot(state: State, config: RunnableConfig):
                     break
     # 不再显示过渡消息"🚀 正在为你规划并执行"，直接让后续节点处理
 
-    # history_summary 触发：当上下文使用达到 MODEL_CONTEXT_LIMIT * 80% 时调用 LLM 压缩历史。
-    # 同时保留 120 秒的最小间隔作为辅助节流（避免极端情况频繁调用）。
-    if len(state["messages"]) > 0:
-        try:
-            import time as _time
-            _now = _time.time()
-            _mlen = len(state["messages"])
-            _gate = globals().setdefault("_summary_gate", {"ts": 0.0, "last_tokens": 0})
-            # 计算当前消息的 token 数
-            try:
-                _current_tokens = count_tokens(state["messages"])
-            except Exception:
-                _current_tokens = 0
-            # 触发条件：token 数达到上下文 80% 或距上次 120 秒
-            HISTORY_SUMMARY_TOKEN_RATIO = 0.8
-            HISTORY_SUMMARY_INTERVAL = 120  # 秒，最小间隔
-            HISTORY_SUMMARY_MIN_MESSAGES = 4  # 至少积累 4 条消息才触发
-            _token_threshold = MODEL_CONTEXT_LIMIT * HISTORY_SUMMARY_TOKEN_RATIO
-            _should_trigger = (
-                _mlen >= HISTORY_SUMMARY_MIN_MESSAGES and (
-                    _current_tokens >= _token_threshold
-                    or (_now - _gate["ts"] >= HISTORY_SUMMARY_INTERVAL and _current_tokens > 0)
-                )
-            )
-            if _should_trigger:
-                # 第一步：Importance 过滤（Q7）—— 让 LLM 对每条消息打 1-10 分
-                # 只保留 ≥7 分的重要消息，丢弃"好的/谢谢"等闲聊内容
-                _all_messages = state["messages"][-(HISTORY_SUMMARY_MIN_MESSAGES * 2):]
-                _scored = mm.evaluate_messages_importance(_all_messages, llm, min_score=7.0)
-                _important_messages = [item["msg"] for item in _scored]
-
-                # 第二步：压缩重要消息
-                if _important_messages:
-                    new_summary = mm.update_summary(
-                        thread_id,
-                        state.get("recent_summary", "无"),
-                        _important_messages,
-                        llm,
-                    )
-                    # 第三步：保存（带摘要的元数据评分，供未来检索排序）
-                    mm.save_history_summary_scored(thread_id, new_summary, importance_score=0.0, llm=llm)
-                    state["recent_summary"] = new_summary
-                    _gate.update(ts=_now, last_tokens=_current_tokens)
-        except Exception:
-            pass
+    # history_summary 压缩（context engineering，对齐业界做法）：
+    #   - 触发：只看"实际发送预算"(TOKEN_LIMIT) 的占比，**不再用 120 秒时间兜底**
+    #     （旧阈值用 MODEL_CONTEXT_LIMIT×0.8 = 419K，比工作上限 TOKEN_LIMIT(367K) 还高，
+    #      条件永不成立，实际退化成"每 120 秒必压一次"，短对话被反复压缩 3 次调用）
+    #   - 对象：只压 messages[:-KEEP_RECENT]，最近 30 条保留原文
+    #   - 代价：单次 LLM 调用（旧实现要 3 次：逐条打分 → 摘要 → 再给摘要评分）
+    #   - 位置：**后台线程**执行，不占用用户等待的同步路径
+    try:
+        from app.memory.compaction import compact_in_background
+        if compact_in_background(thread_id, state["messages"], llm, DB_PATH):
+            add_log_entry("info", "已触发后台历史压缩（不阻塞本轮回复）")
+    except Exception:
+        pass
 
     # 连续异常回复熔断：异常兜底文案首次照常落库、第二次替换为提示、其后跳过写入，
     # 避免"同一句兜底文案无限刷屏"（历史上最后几十条全被同一句占满 → 模型持续空返回 → 再刷屏）。

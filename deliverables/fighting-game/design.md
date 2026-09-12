@@ -1,350 +1,242 @@
-# 网页版格斗游戏 设计规格文档（Design Spec）
+# 网页版格斗游戏 · 设计规格（DESIGN.md）
 
-> 项目代号：**Web Fighter**（单页格斗）
-> 目标产物：`deliverables/fighting-game/index.html`（单文件、双击即玩）
+> 项目代号：**Web Fighter**　产物：`deliverables/fighting-game/`
+> 本文档是下游**唯一接口依据**，所有签名/常量以本文为准；`engine.js` 已实现部分**不得改动签名**，AI/UI 按本文补全。
 
 ---
 
-## 1. 技术选型
+## 1. 技术约束
 
-| 维度 | 选择 | 说明 |
+| 项 | 约束 |
+| --- | --- |
+| 形态 | 纯静态单页，无构建步骤；`file://` 双击 `index.html` 即可运行 |
+| 脚本引入 | `index.html` 用**普通 `<script src>`**，**按序**：`js/engine.js` → `js/ai.js` → `js/main.js` |
+| 禁用 | **禁用 ES 模块脚本**（即 script 的 type 属性不得取值 module）、**禁用任何外部资源外链**（不使用第三方分发域名/远程引用）、无网络请求、无外部字体/图片/音频 |
+| 资源 | 图形全部 Canvas 程序绘制；音效可选（WebAudio 合成，失败静默降级） |
+| 命名空间 | 全局挂载 `window.FG`，三模块互不 `import`，仅通过 `window.FG` 通信 |
+| 渲染 | Canvas 2D；逻辑分辨率 **960 × 540**，CSS 等比缩放适配窗口 |
+| 兼容 | Chrome / Edge / Firefox / Safari 近两年版本 |
+
+`index.html` 需提供的 DOM 结构（**id 必须一致**，供 `main.js`/`UI` 绑定）：
+
+| DOM id | 元素 | 用途 |
 | --- | --- | --- |
-| 载体 | **单个 HTML 文件** | HTML + CSS + JS 全部内联，零外部文件 |
-| 渲染 | **Canvas 2D API** | `getContext('2d')`，逻辑分辨率 960 × 540，CSS 等比缩放适配窗口 |
-| 语言 | **原生 JavaScript (ES2020)** | 不使用任何框架 / 库 / CDN |
-| 依赖 | **无外部依赖** | 无 `<script src>`、无网络请求、无字体文件（用系统字体） |
-| 构建 | **无构建步骤** | 不需要 npm / webpack / 编译，保存即运行 |
-| 入口 | **`<body onload>` / `window.addEventListener('load')`** | 双击 `index.html` 直接开始 |
-| 音频 | 可选，用 **WebAudio 合成音效**（`OscillatorNode`） | 无外部音频文件，失败时静默降级 |
-
-**运行方式**：双击 `deliverables/fighting-game/index.html`（或拖入浏览器）即可，兼容 Chrome / Edge / Firefox / Safari 近两年版本。
-
-**坐标系约定**：原点 `(0,0)` 在**画布左上角**，x 向右为正，y 向下为正。地面线 `GROUND_Y = 460`（角色脚底所在的 y）。所有"判定盒相对坐标"均以**角色脚底中心**为参考点，`x` 向右为正，`y` 向上为正（与屏幕 y 相反，写代码时用 `hitbox.y - GROUND_Y + pos.y` 换算）。
-
-**时间单位**：全部逻辑以**帧（frame）**为单位，`FPS = 60`，`1 帧 ≈ 16.667 ms`。
+| `stage` | `<canvas>` | 主画布，`width=960 height=540` |
+| `hp1` / `hp2` | `<div>` | P1 / P2 血条填充宽度（0~100%） |
+| `name1` / `name2` | `<div>` | P1 / P2 角色名 |
+| `timer` | `<div>` | 中央倒计时数字 |
+| `overlay` | `<div>` | 覆盖层：开始/Round/FIGHT/KO/胜负文字 |
+| `btnStart` | `<button>` | 开始对战 |
+| `btnRestart` | `<button>` | 重新开始 |
+| `[data-char]` | 多个 `<button>` | 选人按钮，`data-char="<角色id>"` |
 
 ---
 
-## 2. 角色设定
-
-游戏提供 2 名可选角色，属性如下（均可在选人界面选择，AI 默认使用对手方）：
-
-### 2.1 属性表
-
-| 属性 | 含义 | 拳手 Ryu0 | 腿王 Lei |
-| --- | --- | --- | --- |
-| `hp` | 最大血量 | **1000** | **950** |
-| `walkSpeed` | 地面移动速度 (px/帧) | **3.4** | **4.1** |
-| `jumpVelocity` | 跳跃初速（向上，px/帧） | **-15.0** | **-16.5** |
-| `damageScale` | 攻击力系数（乘到招式伤害上） | **1.00** | **0.92** |
-| `weight` | 体重系数（影响被击退与受击硬直） | **1.00** | **0.88** |
-| `width` × `height` | 碰撞体（hurtbox 主体）宽 × 高 | **64 × 130** | **58 × 138** |
-| `facing` | 始终面向对手 | 自动翻转 | 自动翻转 |
-| 描述 | 定位 | 均衡型，重拳与波动拳强势 | 速度型，腿法与跳跃机动强势 |
-
-> 说明：`damageScale` 用于统一调整招式强度，实际伤害 = `move.damage × damageScale` 后取整。`weight` 越小受击击退与硬直越长（越"轻"）。
-
-### 2.2 角色外观（程序绘制，画笔简笔风格）
-
-- **拳手 Ryu0**：白道服 + 红头带，主色 `#e8e8e8` / 强调 `#d33`，圆头 + 简易躯干/四肢线段。
-- **腿王 Lei**：蓝黄配色裤装 + 黄腰带，主色 `#3a6fd8` / 强调 `#f2c200`，瘦高身材。
-- 绘制方式：用 `ctx.fillRect` / `arc` / `lineTo` 组合，按状态切换姿态（站立/前倾/抬腿/跳跃/受击后仰/倒地）。
-
----
-
-## 3. 招式表
-
-**通用字段说明**
-- **触发按键**：以 P1 为例（P2/AI 复用同一套动作接口，见 §4.2）。
-- **startup / active / recovery**：启动帧 / 有效帧 / 收招帧（单位：帧）。
-- **伤害**：基础值，实际伤害 = `× damageScale` 后取整。
-- **击退**：命中且未防御时对手被推开的水平距离（px；防御时 ×0.35）。
-- **hitbox(x, y, w, h)**：命中判定盒，`x` 为水平偏移（正=朝向方向），`y` 为**相对脚底的高度**（负值=位于胸口高度），`w/h` 为宽高，单位 px。
-- **空中**：是否可在空中使用。
-
-### 3.1 拳手 Ryu0
-
-| 招式 | 触发按键 | startup | active | recovery | 伤害 | 击退 | hitbox(x, y, w, h) | 空中 | 备注 |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| **轻拳 (Jab)** | `J` | 4 | 3 | 6 | 40 | 18 | (40, -95, 50, 30) | 否 | 快速起手，可连点三段后强制小收招 |
-| **重拳 (Fierce)** | `K` | 10 | 4 | 16 | 110 | 70 | (52, -100, 60, 40) | 否 | 高伤害高硬直，命中后对手进入 14 帧 hitstun |
-| **踢击 (Roundhouse)** | `L` | 8 | 5 | 14 | 85 | 55 | (58, -75, 66, 42) | **可**（空中版伤害 ×1.1） | 地面扫踢范围长，空中作为下劈腿 |
-| **必杀技·波动拳 (Hadou)** | `S + K`（下+重拳） | 14 | 6 | 22 | 130 | 45 | (70, -90, 70, 46) 生成一个向前飞行的气弹 | 否 | 发射投射物 `projectile`，命中/超时后消失 |
-
-### 3.2 腿王 Lei
-
-| 招式 | 触发按键 | startup | active | recovery | 伤害 | 击退 | hitbox(x, y, w, h) | 空中 | 备注 |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| **轻拳 (Quick Jab)** | `J` | 3 | 3 | 5 | 32 | 14 | (36, -92, 44, 26) | 否 | 起手最快，用于打断对手前摇 |
-| **重拳 (Straight)** | `K` | 9 | 4 | 15 | 95 | 60 | (50, -98, 56, 34) | 否 | 拳速略慢但确认性强 |
-| **踢击 (High Kick)** | `L` | 6 | 5 | 12 | 90 | 62 | (62, -105, 70, 38) | **可**（空中版伤害 ×1.15） | 高踢腿，判定位置高，可对空 |
-| **必杀技·旋风腿 (Cyclone)** | `S + L`（下+踢） | 12 | 8 | 24 | 145 | 80 | (54, -100, 74, 70) 多段判定（每 4 帧一次） | 否 | 大范围旋转腿，收招长易被反击 |
-
-> **连招/取消规则**：轻攻击在 `active` 帧命中后，可在 `recovery` 前三帧被下一招取消（cancel），形成 `轻→重→必杀` 连段；必杀技不可取消。
-
----
-
-## 4. 核心架构
-
-### 4.1 游戏主循环（固定时间步）
+## 2. 全局命名空间与接口
 
 ```js
-const FPS = 60, STEP = 1000 / FPS;
+window.FG = { Engine, AI, UI };
+```
+
+### 2.1 FG.Engine（engine.js，已实现，签名冻结）
+
+```js
+FG.Engine.createFighter({ id, x, facing, stats })   // → fighter
+FG.Engine.stepFighter(fighter, input, opponent, dt) // dt 固定 1/60，原地更新 fighter，无返回
+FG.Engine.detectHit(a, b)                           // → { hit, damage, knockback, hitstun }
+FG.Engine.drawFighter(ctx, fighter)                 // 依据 fighter 状态绘制，无返回
+FG.Engine.MOVES                                     // 招式表，见 2.3
+```
+
+**fighter 字段表**（`createFighter` 产物，`stepFighter` 原地修改）：
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `id` | string | 角色 id（`balanced` / `heavy` / `speed`） |
+| `x` | number | 水平位置（角色脚底中心，px） |
+| `y` | number | 纵向位置（脚底 y，px） |
+| `vx` / `vy` | number | 速度（px/帧） |
+| `hp` / `maxHp` | number | 当前 / 最大血量 |
+| `state` | string | `idle`/`walk`/`jump`/`attack`/`hitstun`/`blockstun`/`ko` |
+| `stateTimer` | number | 当前状态已持续帧数 |
+| `facing` | number | `1`=朝右，`-1`=朝左 |
+| `hitbox` | object\|null | 当前生效判定框 `{x,y,w,h}`（相对脚底，y 向上为正） |
+| `hitstun` | number | 剩余受击硬直帧 |
+| `blocking` | boolean | 是否处于防御/格挡姿态 |
+| `onGround` | boolean | 是否在地面 |
+| `cooldowns` | object | 各招式冷却计数 `{ light, heavy, kick, special }` |
+| `isAI` | boolean | 是否由 AI 驱动（true 时输入来自 `FG.AI.decide`） |
+
+### 2.2 输入对象（人机共用）
+
+```js
+// 每帧为每个 fighter 构造，人类与 AI 走同一路径
+{ left, right, jump, crouch,          // 布尔：方向/下蹲
+  light, heavy, kick, special,        // 布尔：攻击键（上升沿为 true）
+  block }                             // 布尔：防御（S 长按）
+```
+
+### 2.3 FG.Engine.MOVES（招式数据结构，已实现）
+
+`window.FG.Engine.MOVES` 为对象，键为招式名，每条**必须**含以下字段（**不得新增/改名**）：
+
+```js
+FG.Engine.MOVES[name] = {
+  name,      // string  招式显示名
+  startup,   // number  启动帧（帧）
+  active,    // number  有效帧（帧）
+  recovery,  // number  收招帧（帧）
+  damage,    // number  基础伤害
+  range,     // number  水平判定范围（px，相对角色中心，朝向为正）
+  knockback, // number  命中击退（px/帧）
+  hitstun,   // number  命中后对手硬直帧数
+  input      // string  触发指令，如 'J' / 'K' / 'L' / 'U'
+};
+```
+
+### 2.4 FG.AI（ai.js，本节点补全）
+
+```js
+FG.AI.decide(self, opponent, dt)   // → input 对象（见 2.2）
+FG.AI.setDifficulty(level)         // level: 'easy' | 'normal' | 'hard'
+FG.AI.reset()                      // 重置内部历史快照/冷却，用于开局
+```
+
+`decide` 每逻辑帧对 `self.isAI === true` 的 fighter 调用一次，返回与人类**完全相同的 input 对象**；内部维护延迟快照队列（见 §5）。
+
+### 2.5 FG.UI（main.js 内实现）
+
+```js
+FG.UI.init(dom)                    // 绑定 stage/hp1/hp2/name1/name2/timer/overlay 等
+FG.UI.setHealth(side, hp, maxHp)   // side: 1|2 → 写 hp1/hp2 宽度%
+FG.UI.setName(side, name)          // → 写 name1/name2
+FG.UI.setTimer(seconds)            // → 写 timer 文本
+FG.UI.showOverlay(text, kind)      // kind: 'round'|'fight'|'ko'|'win'|'lose'; text 为空则隐藏
+FG.UI.onSelect(cb)                 // 绑定 [data-char] 按钮与 btnStart
+FG.UI.onRestart(cb)                // 绑定 btnRestart
+```
+
+---
+
+## 3. 角色数值表（≥3 名）
+
+| 属性 | 均衡型 `balanced`（隆） | 重击型 `heavy`（铁拳） | 速攻型 `speed`（春丽） |
+| --- | --- | --- | --- |
+| `hp`(maxHp) | 1000 | 1200 | 850 |
+| 移速 moveSpeed (px/帧) | 3.2 | 2.4 | 4.2 |
+| 跳跃初速 jump (px/帧) | -15.0 | -13.5 | -16.5 |
+| 伤害系数 | 1.00 | 1.25 | 0.85 |
+| 受击重量（越小越飘） | 1.00 | 1.30 | 0.80 |
+| 专属必杀 | **波动拳** 发射前飞气弹 (special) | **铁山靠** 霸体突进 (special) | **百裂脚** 多段连踢 (special) |
+| 定位差异 | 攻守均衡，招式帧数标准 | 慢而重，靠伤害与格挡反击 | 快而脆，起手快、连段强 |
+
+**角色行一览（3 名，一角色一行）**：
+
+| 角色行 | 角色 id | 显示名 | 定位 |
+| --- | --- | --- | --- |
+| 1 | `balanced` | 隆 | 均衡型 |
+| 2 | `heavy` | 铁拳 | 重击型 |
+| 3 | `speed` | 春丽 | 速攻型 |
+
+差异实现要点：`stats` 传入 `createFighter`；伤害 = `move.damage × 伤害系数` 取整；`heavy` 受击击退 ×0.77，`speed` 受击僵直更长。
+
+---
+
+## 4. 键位映射表
+
+P1 键盘（P2/AI 复用同一 input 接口，AI 输入由 `FG.AI.decide` 产生）：
+
+| 动作 | input 字段 | P1 按键 |
+| --- | --- | --- |
+| 左移 | `left` | `A` |
+| 右移 | `right` | `D` |
+| 跳跃 | `jump` | `W` |
+| 蹲下/防御 | `crouch` / `block` | `S`（长按=防御） |
+| 轻拳 | `light` | `J` |
+| 重拳 | `heavy` | `K` |
+| 踢腿 | `kick` | `L` |
+| 必杀 | `special` | `U` |
+
+- **AI 输入来源**：AI 为 `self.isAI=true` 的 fighter，每逻辑帧调用 `FG.AI.decide(self, opponent, 1/60)` 返回 input，与 P1 完全同构。
+- 边缘触发：攻击键 `light/heavy/kick/special` 仅在**按下那一帧**为 true。
+- 键位一览（8 个键全部出现）：A / D / W / S / J / K / L / U —— 即 `A`=left、`D`=right、`W`=jump、`S`=crouch/block、`J`=light、`K`=heavy、`L`=kick、`U`=special。
+
+---
+
+## 5. 固定 60FPS 逻辑步长
+
+主循环（`main.js`）：`requestAnimationFrame` + 累积器，逻辑固定 `dt = 1/60`。
+
+```js
+const STEP = 1 / 60;            // 固定逻辑步长（秒）
+const MAX_FRAME = 0.25;         // 单帧最大补偿上限（秒），防卡顿后追帧雪崩
 let acc = 0, last = performance.now();
 
 function loop(now) {
-  acc += now - last;
+  let frame = (now - last) / 1000;
   last = now;
-  // 固定步推进，保证不同刷新率下物理/判定一致
-  while (acc >= STEP) {
-    update(STEP / 1000);   // 以"帧"为单位更新
+  if (frame > MAX_FRAME) frame = MAX_FRAME; // 上限钳制
+  acc += frame;
+  while (acc >= STEP) {                      // 固定步推进
+    update(STEP);                            // 输入 → AI → stepFighter → 碰撞 → 计时/胜负
     acc -= STEP;
   }
-  render();                 // 渲染与逻辑解耦
+  render();                                  // Canvas 渲染与逻辑解耦
   requestAnimationFrame(loop);
 }
 requestAnimationFrame(loop);
 ```
 
-- `update()` 每个固定步 = 1 帧：处理输入 → 角色状态机 → 物理 → 碰撞 → AI → 计时/胜负。
-- 渲染帧率自适应，逻辑恒为 60 帧/秒，避免"高刷屏招式变快"。
-
-### 4.2 输入层
-
-**P1 键盘映射表**（方向键用 WASD，攻击用 JKL）：
-
-| 动作 | P1 按键 | P2 按键（可选双人） |
-| --- | --- | --- |
-| 左移 | `A` | `←` |
-| 右移 | `D` | `→` |
-| 下蹲（必杀技前缀） | `S` | `↓` |
-| 跳跃 | `W` | `↑` |
-| 轻拳 | `J` | 数字键 `1` |
-| 重拳 | `K` | `数字键 2` |
-| 踢击 | `L` | `数字键 3` |
-| 开始/确认 | `Enter` | `Enter` |
-
-**输入抽象**：每帧为每个角色生成统一的动作对象，P1（键鼠）与 P2/AI **共用同一接口**，AI 只需构造同样的对象即可：
-
-```js
-// 每个角色每帧拿到一个 input 对象
-{ left, right, down, jump,       // 布尔：本帧是否按下
-  light, heavy, kick,            // 布尔：攻击键（上升沿触发）
-  jumpPressed, ... }
-```
-
-实现要点：维护 `keydown/keyup` 的物理按键状态，再在每帧生成"边缘触发"（pressed 只在按下的那一帧为 true）。AI 直接返回一个 `input` 对象，因此**AI 与人类玩家走完全相同的动作路径**，无需为 AI 写第二套逻辑。
-
-### 4.3 角色状态机
-
-**状态集合**：`idle` / `walk` / `jump` / `attack` / `hitstun` / `blockstun` / `ko`（另有 `crouch` / `block` 作为复用状态）。
-
-```
-        ┌───────── 输入方向 ─────────┐
-        ▼                            │
-     [walk] ⇄ (无输入) ⇄ [idle] ─────┘
-        │  │
-   按 W  │  │ 按攻击键
-        ▼  ▼
-     [jump]      [attack] --startup/active/recovery--> 回到 idle/walk
-        │            │ 命中对手
-  落地→idle          ▼
-                 (对手) [hitstun] --硬直结束--> [idle]
-                 (对手) [blockstun] --硬直结束--> [idle]
-   任一状态 HP≤0 → [ko]（最高优先级，锁定）
-```
-
-**状态转移条件表**
-
-| 当前状态 | 触发条件 | 目标状态 |
-| --- | --- | --- |
-| `idle` | 按住左/右 且 `canMove` | `walk` |
-| `idle` | 按跳跃键且在地面 | `jump`（施加 `jumpVelocity`） |
-| `idle` / `walk` | 按攻击键且在地面 | `attack`（加载对应招式帧数据） |
-| `walk` | 松开方向 | `idle` |
-| `jump` | `vy ≥ 0` 且 `y ≥ GROUND_Y` | `idle`（落地，可接空中招式） |
-| `attack` | 招式帧计数走完（active+recovery 结束） | `idle` |
-| `attack` | 招式命中且满足取消规则 | `attack`（下一招） |
-| `任何状态` | 受到攻击命中 | `hitstun`（时长=招式的 hitstun 帧） |
-| `任何状态` | 保持"防御"（背离方向）时受击 | `blockstun`（时长更短） |
-| `任何状态` | `hp ≤ 0` | `ko`（锁死，播放倒地） |
-
-> 每个状态持有 `stateFrame` 计数器，用来推进招式帧与硬直计时。
-
-### 4.4 物理层
-
-| 参数 | 值 | 说明 |
-| --- | --- | --- |
-| `GRAVITY` | `0.9` px/帧² | 每帧 `vy += GRAVITY` |
-| `GROUND_Y` | `460` | 地面线 y，脚底不能低于此 |
-| `GROUND_FRICTION` | `0.80` | 落地后水平速度乘以此数（空中为 `0.98`） |
-| `MAX_FALL` | `20` | 下落速度上限 |
-| `WALL_LEFT/RIGHT` | `40 / 920` | 角色中心 x 的边界，限制在场内 |
-| `PUSH_APART` | 双方重叠时各推开 | 防止两个角色站进同一位置 |
-
-更新顺序：`vy += GRAVITY` → `x += vx` → `y += vy` → 地面判定 → 摩擦衰减 → 边界钳制。
-
-### 4.5 碰撞检测（AABB，hitbox vs hurtbox）
-
-- **hurtbox（受击盒）**：随角色状态/姿态变化，默认 `(x-w/2, y-h, w, h)`（脚底对齐 `GROUND_Y`）。下蹲时高度 ×0.6。
-- **AABB 相交判定**：
-
-```js
-function aabb(a, b) {
-  return a.x < b.x + b.w && a.x + a.w > b.x &&
-         a.y < b.y + b.h && a.y + a.h > b.y;
-}
-```
-
-- **命中流程**（每帧）：对攻击者所有处于 `active` 帧的 hitbox，与对手 hurtbox 逐一 AABB 相交测试；
-  - 相交且对手未在 `hitstun/blockstun/ko` → 判定为**命中**；
-  - 对手处于防御姿态且背向 → 判定 **blockstun**（伤害 ×0.15，击退 ×0.35，无 hitstun）；
-  - 否则 → 施加伤害、击退速度、进入 `hitstun`；
-  - 同一招的一次 `active` 内每个 hitbox 只命中一次（用 `hitIds` 去重）。
-- **投射物**：必杀技气弹是移动的 AABB，命中后消失并结算。
+- `dt` 恒为 `1/60`，任何刷新率下招式/物理帧数一致。
+- `MAX_FRAME` 上限：切后台/卡顿后最多补 15 帧，避免“快进”。
 
 ---
 
-## 5. AI 对手规则
+## 6. 胜负规则
 
-AI 采用**状态机 + 距离判定 + 随机权重决策**，并以 **反应延迟** 模拟"人类反应"，难度分级通过**反应延迟**与**攻击欲望概率**区分。
-
-### 5.1 距离判定（以水平距离 `dx = |px - ai.x|` 划分）
-
-| 区域 | 条件 | AI 倾向 |
-| --- | --- | --- |
-| **远 (far)** | `dx > 300` | 前进逼近 / 概率发波（若有必杀投射物）/ 偶尔后撤 |
-| **中 (mid)** | `150 < dx ≤ 300` | 试探性前进、随机轻攻击 / 跳跃接近 |
-| **近 (near)** | `dx ≤ 150` | 高概率攻击、格挡、后跳脱离 |
-
-### 5.2 决策流程（每帧执行）
-
-1. **感知**：读取玩家位置、是否出招、距离区域。
-2. **反应延迟**：AI 不立即响应，而是读取 **N 帧前**的玩家输入快照（`delayFrames`），因此玩家前摇看得见、能被躲。
-3. **决策（加权随机）**：在允许动作集合中按权重抽签：
-   - `approach`（前进）、`retreat`（后撤）、`jump`（跳跃）、
-   - `light` / `heavy` / `kick` / `special`（攻击）、`block`（防御）。
-   - 核心权重 = 距离区域基础权重 × 难度系数 × 当前情境修正（对手在 hitstun 时攻击权重 ↑，自己血少时更保守）。
-4. **攻击欲望门限**：生成随机数 `r ∈ [0,1]`，若 `r < aggression` 才执行攻击，否则执行移动/防御。
-5. **决策冷却**：一次决策后进入 `decisionCooldown` 帧，期间不重新决策（避免抖动）。
-
-### 5.3 难度分级参数（具体数值）
-
-| 参数 | 简单 (Easy) | 普通 (Normal) | 困难 (Hard) |
-| --- | --- | --- | --- |
-| `delayFrames`（反应延迟，帧） | **20** | **12** | **6** |
-| `aggression`（攻击欲望概率） | **0.30** | **0.55** | **0.80** |
-| `decisionCooldown`（决策冷却，帧） | **24** | **16** | **10** |
-| `blockChance`（受击时格挡概率） | **0.15** | **0.40** | **0.70** |
-| `specialChance`（近/中距离放必杀概率） | **0.10** | **0.25** | **0.45** |
-| `mistakeChance`（空挥/误判概率） | **0.25** | **0.10** | **0.02** |
-
-> 默认反应延迟约 **12 帧（≈200 ms）** 即"普通"难度。难度提升时反应更快、攻击更凶、格挡更准、失误更少。
-
-### 5.4 AI 主循环伪码
-
-```js
-function aiThink(ai, player, diff) {
-  const snap = history.get(ai.stateFrame - diff.delayFrames) // 读取延迟快照
-  const dx = Math.abs(snap.px - ai.x);
-  const zone = dx > 300 ? 'far' : dx > 150 ? 'mid' : 'near';
-
-  if (ai.step < ai.thinkCd) { ai.step++; return lastInput; }  // 冷却中复用上次决策
-  const r = Math.random();
-  let act;
-  if (r < diff.aggression) {           // 攻击
-    act = pickAttack(zone, diff);       // 远近用不同招（近=轻/重，远=必杀）
-  } else {
-    act = pickMove(zone, diff);         // approach / retreat / jump / block
-  }
-  if (Math.random() < diff.mistakeChance) act = randomIdle(); // 失误：空挥/发呆
-  ai.thinkCd = diff.decisionCooldown;
-  return inputFromAction(act);          // 转为与玩家一致的 input 对象
-}
-```
-
----
-
-## 6. 胜负判定
-
-### 6.1 三条核心规则
-
-1. **KO 判定**：任一角色血量归零（`hp ≤ 0`）→ 立即判定 **KO**，回合由血量尚存方获胜。KO 时屏幕中央放大显示 `KO!`，角色播放倒地动画。
-2. **时间到判定**：每回合 **60 秒** 倒计时（`3600 帧`）。计时归零时双方均未 KO → **血量多者胜**（`hpP1 > hpP2` → P1 胜；反之 P2 胜；**相等则判平局 `DRAW`**，该回合不记分或重打）。
-3. **三局两胜（2/3）赛制**：先拿到 **2 个回合胜利**者赢得整场比赛（`wins = 2`）。
-
-### 6.2 回合与赛后流程
-
-```
-[选人画面] → Round 1 "FIGHT!" → 回合进行 → KO / 时间到
-   → 展示 "KO!" 或 "TIME UP" → 记分 +1（胜方圆点点亮）
-   → 若某方 wins == 2 → 进入结算：显示 "YOU WIN!" / "YOU LOSE!"
-   → 按 Enter/R 重新开始（重置血量、计时、回合数、角色位置）→ 回到 Round 1
-```
-
-- 回合间插播 `Round N` + `FIGHT!` 文字动画（约 1.5 秒，期间锁定输入）。
-- 结算画面显示：获胜方、总比分（如 2:1）、最大连击数。
-- 重新开始：按 `Enter` 或 `R` 键回到选人/Round 1，所有状态完全重置。
-
-### 6.3 状态标记
-
-| 常量 | 值 | 含义 |
-| --- | --- | --- |
-| `ROUND_TIME` | `3600` 帧（60 s） | 单回合时长 |
-| `ROUNDS_TO_WIN` | `2` | 三局两胜 |
-| `gameState` | `select / intro / fight / roundEnd / matchEnd` | 主状态机 |
-
----
-
-## 7. UI 布局
-
-逻辑画面 960 × 540，自顶向下布局：
-
-```
-┌──────────────────────────────────────────────────────────┐
-│ [P1 血条 ████████████░░]   ⏱ 59   ⊙●    [░░████████████ P2] │  ← 顶部信息栏
-│         ↑ 残影(缓动)      回合/计时   胜场圆点                │
-│                                                          │
-│                    （战斗区域）                            │
-│                                                          │
-│                      [ KO! ] 大字提示                     │
-│ ────────────────────────────────────────────────────────  │  ← GROUND_Y=460
-│   P1: A/D 移动  W 跳  J轻 K重 L踢  S+K/S+L 必杀  Enter    │  ← 底部按键提示
-└──────────────────────────────────────────────────────────┘
-```
-
-### 7.1 组成元素
-
-- **双血条**：P1 靠左、P2 靠右（镜像），固定在顶部 y≈30，宽 380、高 26。
-  - **缓动残影（damage trail）**：血条分两层——前景为实际血量（立即减少），后景"残影"以 `±2px/帧`（或 `lerp 0.08`）**延迟收缩**，展现最近受到的伤害差值（黄/红渐变色）。残影追上实际值后隐藏。
-  - 血量低于 30% 时血条颜色变红并轻微闪烁。
-- **中央倒计时**：屏幕顶部居中，显示剩余秒数（`ceil(timer/60)`），字号 40，颜色随剩余时间由白转黄转红（`<10s` 变红 + 脉动）。
-- **回合胜利圆点**：在计时两侧各显示 `ROUNDS_TO_WIN` 个小圆点，某方赢一回合点亮对应一个（实心亮色 / 空心灰）。
-- **底部按键提示**：底部条显示 P1 操作说明（`A/D 移动 · W 跳 · J 轻拳 · K 重拳 · L 踢击 · S+踢/拳 必杀 · Enter 开始/重来`），选人界面额外提示选择键。
-- **文字提示层**（居中大字，逐帧动画，带缩放/淡出）：
-  - 回合开始：`Round 1` → `FIGHT!`
-  - 命中提示：`KO!`（带震动特效）
-  - 时间到：`TIME UP`
-  - 结算：`YOU WIN!` / `YOU LOSE!` / `DRAW`
-- **辅助 HUD**（可选）：命中连击计数（`COMBO n`）、命中特效（白闪/火花粒子）。
-
-### 7.2 视觉风格
-
-- 深色背景 + 渐变天空 + 简单地面纹理，霓虹描边的血条，像素/简笔混合风。
-- 所有 UI 均在 Canvas 内绘制（`ctx.fillText`），无需 DOM；选人界面可用同一 Canvas 状态切换实现。
-
----
-
-## 附录：关键常量速查
-
-| 常量 | 值 |
+| 规则 | 判定 |
 | --- | --- |
-| `LOGICAL_W × LOGICAL_H` | 960 × 540 |
-| `FPS` / `STEP` | 60 / 16.667 ms |
-| `GROUND_Y` | 460 |
-| `GRAVITY` | 0.9 px/帧² |
-| `GROUND_FRICTION` | 0.80 |
-| `ROUND_TIME` | 3600 帧（60 s） |
-| `ROUNDS_TO_WIN` | 2 |
-| `delayFrames`（默认/普通） | 12 |
-| 角色 | 拳手 Ryu0（HP 1000）、腿王 Lei（HP 950） |
+| KO | 任一 `hp ≤ 0` → 该角色判负，回合结束，胜方记 1 分 |
+| 时间到 | 单回合 **99 秒**倒计时（`99 × 60 = 5940` 帧）归零：`hp` 高者胜；**相等则平局**（DRAW，双方不计分或重开该回合） |
+| 赛制 | **三局两胜**：先得 **2 分**者赢得整场（`ROUNDS_TO_WIN = 2`） |
+| 结束流程 | KO/时间到 → 显示 `KO!`/`TIME UP` → 记分（`overlay` 更新圆点）→ 未满 2 分则下一回合（`Round N` + `FIGHT!`，锁输入约 1.5s）；满 2 分 → `overlay` 显示 `YOU WIN!`/`YOU LOSE!`，点击 `btnRestart` 重置 |
+
+关键常量：`ROUND_TIME_SECONDS = 99`、`ROUND_TIME_FRAMES = 5940`、`ROUNDS_TO_WIN = 2`。
+
+---
+
+## 7. 画布坐标系与尺寸
+
+| 项 | 值 |
+| --- | --- |
+| 逻辑尺寸 | **960 × 540**（`stage.width=960 height=540`） |
+| 原点 | 画布**左上角** `(0,0)`；x **向右**为正，y **向下**为正 |
+| 地面线 `GROUND_Y` | **460**（角色脚底所在 y；脚底不得低于此） |
+| 左/右边界 | 角色中心 x ∈ `[40, 920]` |
+| 重力 `GRAVITY` | 0.9 px/帧² |
+| 高度约定 | 判定框 `y` 相对脚底，**向上为正**（写码时换算 `screenY = y - GROUND_Y`） |
+
+HUD 布局：血条 `hp1` 左上、`hp2` 右上（镜像）；`timer` 顶部居中；`name1/name2` 血条内；`overlay` 居中大字；底部为按键提示。
+
+---
+
+## 招式表（Markdown，≥4 招，含 damage 与 startup/active/recovery）
+
+> damage 为基础值，实际伤害 = `damage × 角色伤害系数` 取整；range 为水平判定范围 px；均含 `startup/active/recovery` 三个帧数。
+
+| 招式 | input | startup | active | recovery | damage | range | knockback | hitstun |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 轻拳 (Jab) | `J` | 4 | 3 | 6 | 40 | 50 | 4 | 10 |
+| 重拳 (Fierce) | `K` | 10 | 4 | 16 | 110 | 62 | 9 | 16 |
+| 踢腿 (Kick) | `L` | 8 | 5 | 14 | 85 | 70 | 7 | 14 |
+| 必杀 (Special) | `U` | 12 | 6 | 22 | 130 | 78 | 6 | 18 |
+
+（以上为均衡型示例；重击型全体 ×1.25、速攻型 ×0.85，帧数表由 `FG.Engine.MOVES` 提供，`FG.Engine.detectHit` 消费这些字段。）
+
+---
+
+## 附录：模块职责与初始化顺序
+
+1. `engine.js` 先加载，挂载 `FG.Engine`（含 `MOVES`）。
+2. `ai.js` 加载，挂载 `FG.AI`（依赖 `FG.Engine`，仅读 `MOVES`/fighter）。
+3. `main.js` 加载：`FG.UI.init(dom)` → 选人（`onSelect`）→ `btnStart` 启动主循环 → 每帧 `update` 内对 `isAI` 方调用 `FG.AI.decide`。
