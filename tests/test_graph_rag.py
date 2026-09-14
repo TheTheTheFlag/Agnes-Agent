@@ -10,6 +10,7 @@
 全部走 mock，不触网、不初始化真实 LightRAG 实例。
 """
 import asyncio
+import time
 import unittest
 from unittest import mock
 
@@ -113,6 +114,74 @@ class LightgraphQueryTest(unittest.TestCase):
         self.assertLessEqual(ctx.count("\n"), 10)
         grt.lightrag_query.return_value = ""
         self.assertEqual(grt.get_l6_context("tid", "q"), "")
+
+
+class GraphToolsTest(unittest.TestCase):
+    """LLM 侧工具：record_graph / lightgraph_query 的线程定位与转发。"""
+
+    def setUp(self):
+        self._thread_patch = mock.patch("app.tools.graph_rag_tools._resolve_thread")
+        self._resolve = self._thread_patch.start()
+        self._patchers = [
+            mock.patch.object(grt, "get_lightrag", return_value=object()),
+            mock.patch.object(grt, "lightrag_insert"),
+            mock.patch.object(grt, "lightrag_query"),
+        ]
+        for p in self._patchers:
+            p.start()
+        self.addCleanup(mock.patch.stopall)
+
+    def test_tools_registered(self):
+        from app.tools import tools
+        names = {t.name for t in tools}
+        self.assertIn("record_graph", names)
+        self.assertIn("lightgraph_query", names)
+
+    def test_lightgraph_query_without_thread(self):
+        from app.tools.graph_rag_tools import lightgraph_query
+        self._resolve.return_value = ""
+        out = lightgraph_query.invoke({"query": "HarmonyOS 支持谁"})
+        self.assertIn("未定位到当前会话", out)
+        grt.lightrag_query.assert_not_called()
+
+    def test_record_graph_without_thread(self):
+        from app.tools.graph_rag_tools import record_graph
+        self._resolve.return_value = ""
+        out = record_graph.invoke({"triplets_json": "[]"})
+        self.assertIn("未定位到当前会话", out)
+        grt.lightrag_insert.assert_not_called()
+
+    def test_lightgraph_query_forwards_thread(self):
+        from app.tools.graph_rag_tools import lightgraph_query
+        self._resolve.return_value = "t1"
+        grt.lightrag_query.return_value = "Entity: A supports B"
+        out = lightgraph_query.invoke({"query": "q1", "top_k": 6})
+        self.assertEqual(out, "Entity: A supports B")
+        grt.lightrag_query.assert_called_once_with("t1", "q1", top_k=6)
+
+    def test_record_graph_forwards_thread(self):
+        from app.tools.graph_rag_tools import record_graph
+        self._resolve.return_value = "t1"
+        out = record_graph.invoke({"triplets_json": '[{"head":"A","rel":"r","tail":"B"}]', "source": "llm_extracted"})
+        self.assertEqual(out, "已记录 1 条实体关系")
+        docs = grt.lightrag_insert.call_args[0][1]
+        self.assertEqual(docs, ["A r B (来源: llm_extracted)"])
+        self.assertEqual(grt.lightrag_insert.call_args[0][0], "t1")
+
+    def test_feed_turn_async_writes_in_background(self):
+        grt._feed_turn_async("t2", "用户问 HarmonyOS 5.0 是否支持 DeepSeek", "是的，支持。")
+        deadline = time.time() + 3
+        while not grt.lightrag_insert.called and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(grt.lightrag_insert.called, "后台喂图线程应完成一次 ainsert 调用")
+        args = grt.lightrag_insert.call_args[0]
+        self.assertEqual(args[0], "t2")
+        self.assertIn("HarmonyOS 5.0", args[1][0])
+
+    def test_feed_turn_async_skips_short_text(self):
+        grt._feed_turn_async("t2", "hi", "")
+        time.sleep(0.1)
+        grt.lightrag_insert.assert_not_called()
 
 
 class GraphAPITest(unittest.TestCase):

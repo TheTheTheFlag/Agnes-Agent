@@ -22,6 +22,9 @@ data/*.db-wal
 data/.model_config
 # L6 知识图谱持久化（每会话一个子目录），不入仓
 lightrag_storage/
+# 本地 Neo4j 运行环境（JDK + 图数据库），不入仓
+neo4j/
+.runtime/
 # 面板登录凭据（首次设置时写入；PBKDF2 哈希，不含明文）
 # 注意：gitignore 不支持行尾注释，规则与说明必须各占一行，否则整行会被当成路径模式
 data/auth.json

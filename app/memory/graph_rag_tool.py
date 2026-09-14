@@ -1,6 +1,7 @@
 """app.memory.graph_rag_tool — GraphRAG（L6）层：把对话知识落成 LightRAG 图谱 + 查询接口。
 
 设计：
+  0. 全量喂养：chatbot 每轮把 用户消息+助手回答 异步喂进 LightRAG（_feed_turn_async），图谱随对话自动长。
   1. record_graph 工具：让 LLM 在合适时机显式"记住"几个实体关系（比如从搜索结果里抽三元组）。
      LLM 调用这个工具后，内容会被写进 LightRAG 的文本库，触发自动的实体提取 + 关系抽取。
   2. lightgraph_query 工具：给 LLM 提供一个直接查图检索的能力——当用户问"上次你提到的 HarmonyOS 5.0 支持哪家大模型"这类跨会话/跨文档关联问题时使用。
@@ -13,6 +14,7 @@
 """
 from __future__ import annotations
 import json
+import threading
 from typing import Any, Dict, List, Optional
 
 from app.memory.ligraphrag_adapter import get_lightrag, clear_instance, lightrag_insert, lightrag_query
@@ -80,6 +82,33 @@ def _try_ingest_lightrag(thread_id: str, text: str) -> None:
         lightrag_insert(thread_id, [text[:4000]])
     except Exception:
         pass
+
+
+def _feed_turn_async(thread_id: str, user_text: str, assistant_text: str) -> None:
+    """对话全量喂养（L6）：每个回合把 用户消息 + 助手回答 塞进 LightRAG 建图。
+
+    在后台 daemon 线程里执行，不阻塞主回复；LightRAG 自动做实体/关系抽取，
+    让图谱随对话自然增长。失败静默吞掉（图谱只是增强，不能拖垮主流程）。
+    """
+    if not thread_id:
+        return
+    parts = []
+    if user_text:
+        parts.append(f"[用户] {user_text.strip()[:2000]}")
+    if assistant_text:
+        parts.append(f"[助手] {assistant_text.strip()[:4000]}")
+    text = "\n".join(p for p in parts if p)
+    if len(text) < 30:
+        return
+
+    def _run() -> None:
+        try:
+            rag = get_lightrag(thread_id)
+            lightrag_insert(thread_id, [text[:6000]])
+        except Exception:
+            pass  # 静默：图谱不可用时不阻塞对话
+
+    threading.Thread(target=_run, name=f"lightrag-feed-{thread_id[:8]}", daemon=True).start()
 
 
 def _triage_triplets_json(raw: str) -> list:

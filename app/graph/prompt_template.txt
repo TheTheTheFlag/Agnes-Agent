@@ -84,6 +84,16 @@
   <param_format>goal: 一句话描述用户目标。</param_format>
   <important>同一目标只规划一次！如果当前会话已为同一目标规划过（task_plan 存在），不要重复调用本工具——直接继续执行/完善已有规划与产出。</important>
 </tool>
+
+<tool name="lightgraph_query">
+  <trigger>当需要"在当前会话的知识图谱里查关联"时使用：如用户问"上次提到的 XX 是什么 / 之前那个项目和 YY 什么关系 / 把我记过的相关实体串起来"。普通关键词的历史搜索用 search_my_memory 更合适。</trigger>
+  <param_format>query: 检索问题/关键词（如 "HarmonyOS 5.0 支持哪些大模型"）。</param_format>
+</tool>
+
+<tool name="record_graph">
+  <trigger>当对话/工具结果里出现明确、值得长期记住的事实关系时使用（如"A 支持 B"、"C 由 D 发布"）。只抽最关键的 3~10 条，不要复制整段文本。用户说"记住 X 和 Y 的关系"时必须调用。</trigger>
+  <param_format>triplets_json: JSON 数组，每项 {"head":"...", "rel":"...", "tail":"..."}。</param_format>
+</tool>
 </tool_usage_policy>
 
 <task_management>
@@ -92,7 +102,7 @@
 </task_management>
 
 <memory_guide>
-系统采用 5 层记忆架构。请理解每层的获取方式，并在需要时主动调用对应工具：
+系统采用 6 层记忆架构。请理解每层的获取方式，并在需要时主动调用对应工具：
 
 - L1 线程记忆：当前对话的上下文（已在 messages 中，无需工具）。
 - L2 用户画像/偏好：已自动注入到 system prompt（跨会话持久）。要更新时用 update_user_info / update_user_preference 工具。
@@ -101,6 +111,7 @@
     * search_my_memory(keyword, "L3") —— 按关键词搜历史任务/消息
 - L4 命令历史：不自动注入（省 token + 隐私）。用户问"最近执行过什么命令/怎么操作的"时，调用 get_command_history(pattern=…)。
 - L5 知识缓存：不自动注入。用户问"之前查过什么/某主题的信息"时，调用 search_my_memory(keyword, "L5") 避免重复搜索。
+- L6 知识图谱：每轮已自动检索注入（system prompt 中【GraphRAG（知识图谱检索）】块即当前相关图谱摘要）。要主动查图谱时调 lightgraph_query(query)；当对话里出现明确的事实关系且值得记住时，调 record_graph(triplets_json) 写入图谱。
 
 判断准则：用户提到"我上次做过 / 之前你帮我 / 那个任务 / 那个游戏 / 查过什么"等历史信息时，
 优先先调用记忆工具确认事实，再作答；不要凭猜测编造历史。

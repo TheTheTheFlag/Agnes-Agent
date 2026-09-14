@@ -17,6 +17,7 @@ LightRAG（hku-webdatalab/lightRAG）是最新的 GraphRAG 实现（v1.x），�
 from __future__ import annotations
 import asyncio
 import json
+import logging
 import os
 import threading
 from typing import Any, List, Optional
@@ -249,6 +250,23 @@ def _run_on_worker(coro: Any, timeout: float = 300.0) -> Any:
 _lock = threading.Lock()
 _instances: dict = {}
 
+# 当前会话上下文：chatbot 节点每轮进入时 set，供 record_graph / lightgraph_query 工具定位当前线程。
+# 用锁保护（多线程并发会话时取"最后活跃"的会话，与 .thread_id 文件的全局语义一致）。
+_cur_thread: Optional[str] = None
+_cur_thread_lock = threading.Lock()
+
+
+def set_current_context(thread_id: Optional[str]) -> None:
+    """记录当前正在处理的会话（每轮 graph 节点入口调用）。"""
+    global _cur_thread
+    with _cur_thread_lock:
+        _cur_thread = thread_id
+
+
+def get_current_context() -> Optional[str]:
+    with _cur_thread_lock:
+        return _cur_thread
+
 
 def build_lightrag_instance(thread_id: str) -> Any:
     """为某会话创建 LightRAG 实例（首次创建后缓存，后续复用）。"""
@@ -275,6 +293,9 @@ def build_lightrag_instance(thread_id: str) -> Any:
         rerank = _make_rerank_func()
         kwargs = {
             "working_dir": work_dir,
+            # workspace 用于 Neo4j 节点 label 等隔离维度；显式传 thread_id，
+            # 避免所有会话共用默认 "base" label 导致图互相污染
+            "workspace": thread_id,
             "llm_model_func": llm,
             "llm_model_kwargs": {
                 "base_url": os.getenv("OPENAI_BASE_URL", ""),
@@ -298,6 +319,16 @@ def build_lightrag_instance(thread_id: str) -> Any:
         }
         if rerank is not None:
             kwargs["rerank_model_func"] = rerank
+        # 图谱存储后端：默认 NetworkX(本地 JSON/GraphML)；GRAPH_STORAGE=neo4j 时走项目内 Neo4j
+        graph_backend = os.getenv("GRAPH_STORAGE", "networkx").strip().lower()
+        if graph_backend == "neo4j":
+            missing = [k for k in ("NEO4J_URI", "NEO4J_USERNAME", "NEO4J_PASSWORD") if not os.getenv(k)]
+            if missing:
+                logging.getLogger(__name__).warning(
+                    "GRAPH_STORAGE=neo4j 但缺少 %s，回退 NetworkX", ", ".join(missing)
+                )
+            else:
+                kwargs["graph_storage"] = "Neo4JStorage"
         inst = _lh.LightRAG(**kwargs)
         _instances[thread_id] = inst
         return inst
@@ -345,7 +376,8 @@ def graph_snapshot(thread_id: str) -> dict:
     """导出某会话当前知识图谱的节点/边列表（只在 worker loop 上读，线程安全）。
 
     返回 {nodes: [{id, name, kind, attrs}], edges: [{id, from_id, to_id, label, attrs}]}，
-    供 /api/graph/nodes、/api/graph/edges 使用。
+    供 /api/graph/nodes、/api/graph/edges 使用。NetworkX 存储读内网 Graph 对象；
+    Neo4J 存储读 Cypher 快照。
     """
     def _read() -> dict:
         rag = get_lightrag(thread_id)
@@ -377,12 +409,53 @@ def graph_snapshot(thread_id: str) -> dict:
             await rag.initialize_storages()
         except Exception:
             pass  # 已初始化过时由 LightRAG 内部容忍；失败交 _read 兜底
+        storage = getattr(rag, "chunk_entity_relation_graph", None)
+        if storage is not None and type(storage).__name__ == "Neo4JStorage":
+            return await _neo4j_snapshot(storage)
         return _read()
 
     try:
         return _run_on_worker(_ensure_then_read(), timeout=120)
     except Exception:
         return {"nodes": [], "edges": []}
+
+
+async def _neo4j_snapshot(storage: Any) -> dict:
+    """从 Neo4JStorage 读全图快照（worker loop 上的 async Cypher 读取）。
+
+    LightRAG 的 Neo4j 节点属性含 entity_id/kind/description 等，边属性含
+    source/target/description 等。
+    """
+    try:
+        nodes = await storage.get_all_nodes() or []
+        edges = await storage.get_all_edges() or []
+    except Exception:
+        return {"nodes": [], "edges": []}
+    node_list = []
+    for n in nodes:
+        nid = str(n.get("id") or n.get("entity_id") or "")
+        if not nid:
+            continue
+        node_list.append({
+            "id": nid,
+            "name": str(n.get("name") or nid),
+            "kind": str(n.get("kind") or "Entity"),
+            "attrs": json.dumps(n, ensure_ascii=False, default=str),
+        })
+    edge_list = []
+    for e in edges:
+        src = str(e.get("source") or "")
+        tgt = str(e.get("target") or "")
+        if not src or not tgt:
+            continue
+        edge_list.append({
+            "id": f"{src}|{tgt}",
+            "from_id": src,
+            "to_id": tgt,
+            "label": str((e.get("description") or "") or ""),
+            "attrs": json.dumps(e, ensure_ascii=False, default=str),
+        })
+    return {"nodes": node_list[:500], "edges": edge_list[:1000]}
 
 
 def clear_instance(thread_id: str) -> None:

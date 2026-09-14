@@ -55,6 +55,12 @@ print(f"LLM 类型: {type(llm)} | provider={_LLM_PROVIDER} model={_LLM_MODEL or 
 def chatbot(state: State, config: RunnableConfig):
     thread_id = config["configurable"]["thread_id"]
     state["thread_id"] = thread_id
+    # L6 GraphRAG 工具定位当前会话（record_graph / lightgraph_query 依赖）
+    try:
+        from app.memory.ligraphrag_adapter import set_current_context
+        set_current_context(thread_id)
+    except Exception:
+        pass
     # trace：chatbot 节点进入
     try:
         from app.trace import record_node_start
@@ -298,6 +304,13 @@ def chatbot(state: State, config: RunnableConfig):
 
     content = re.sub(r'<tool_call>.*?</tool_call>', '', content, flags=re.DOTALL | re.IGNORECASE).strip()
     content = re.sub(r'<tool_calls>.*?</tool_calls>', '', content, flags=re.DOTALL | re.IGNORECASE).strip()
+    # L6 对话全量喂养：把本回合（用户消息 + 助手回答）异步写进 LightRAG 建图。
+    # 后台 daemon 线程执行、失败静默，不阻塞主流程。
+    try:
+        from app.memory.graph_rag_tool import _feed_turn_async
+        _feed_turn_async(thread_id, user_content, content)
+    except Exception:
+        pass
     # 不再设置默认内容"已处理完毕。"，让空内容直接触发规划跳转
 
     # 检测规划触发（两种来源，结果等价）：
