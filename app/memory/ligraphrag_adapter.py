@@ -16,11 +16,14 @@ LightRAG（hku-webdatalab/lightRAG）是最新的 GraphRAG 实现（v1.x），�
 """
 from __future__ import annotations
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import threading
 from typing import Any, List, Optional
+
+import httpx
 
 from app.config import DB_PATH
 
@@ -45,6 +48,15 @@ def _load_dotenv() -> None:
     except Exception:
         pass
     os.environ["_ENV_LOADED"] = "1"
+
+
+def _faiss_available() -> bool:
+    """faiss-cpu 是否可用（决定向量后端默认值）。"""
+    try:
+        import faiss  # noqa: F401
+        return True
+    except Exception:
+        return False
 
 
 def _resolve_llm() -> Any:
@@ -319,6 +331,22 @@ def build_lightrag_instance(thread_id: str) -> Any:
         }
         if rerank is not None:
             kwargs["rerank_model_func"] = rerank
+        # 每知识库检索配置覆盖（kb_meta.json 里的 config 段；新建库/默认库读默认值）
+        _kb_cfg = (kb_meta(thread_id).get("config") or {})
+        if _kb_cfg.get("top_k"):
+            kwargs["top_k"] = int(_kb_cfg["top_k"])
+        if _kb_cfg.get("chunk_token_size"):
+            kwargs["chunk_token_size"] = int(_kb_cfg["chunk_token_size"])
+        if _kb_cfg.get("chunk_overlap_token_size"):
+            kwargs["chunk_overlap_token_size"] = int(_kb_cfg["chunk_overlap_token_size"])
+        if _kb_cfg.get("entity_extract_max_entities"):
+            kwargs["entity_extract_max_entities"] = int(_kb_cfg["entity_extract_max_entities"])
+        if _kb_cfg.get("max_entity_tokens"):
+            kwargs["max_entity_tokens"] = int(_kb_cfg["max_entity_tokens"])
+        if _kb_cfg.get("max_relation_tokens"):
+            kwargs["max_relation_tokens"] = int(_kb_cfg["max_relation_tokens"])
+        if _kb_cfg.get("rerank") is False:
+            kwargs.pop("rerank_model_func", None)
         # 图谱存储后端：默认 NetworkX(本地 JSON/GraphML)；GRAPH_STORAGE=neo4j 时走项目内 Neo4j
         graph_backend = os.getenv("GRAPH_STORAGE", "networkx").strip().lower()
         if graph_backend == "neo4j":
@@ -329,6 +357,15 @@ def build_lightrag_instance(thread_id: str) -> Any:
                 )
             else:
                 kwargs["graph_storage"] = "Neo4JStorage"
+        # 向量存储后端：默认 faiss（未安装则回退 nano）；VECTOR_STORAGE=faiss|nano 可显式控制。
+        # 注意：切换后端后旧向量索引不迁移，需在知识库页对文档执行"重建"重新嵌入。
+        vec_backend = os.getenv("VECTOR_STORAGE", "").strip().lower() or (
+            "faiss" if _faiss_available() else "nano")
+        if vec_backend == "faiss":
+            if _faiss_available():
+                kwargs["vector_storage"] = "FaissVectorDBStorage"
+            else:
+                logging.getLogger(__name__).warning("VECTOR_STORAGE=faiss 但未安装 faiss-cpu，回退 NanoVectorDB")
         inst = _lh.LightRAG(**kwargs)
         _instances[thread_id] = inst
         return inst
@@ -467,3 +504,607 @@ def clear_instance(thread_id: str) -> None:
 def reset_all() -> None:
     with _lock:
         _instances.clear()
+
+
+# ==================== 知识库管理（KB） ====================
+
+
+def _storage_root() -> str:
+    """lightrag_storage 根目录（即项目根/lightrag_storage）。"""
+    root = os.path.dirname(os.path.dirname(str(DB_PATH)))
+    return os.path.join(root, "lightrag_storage")
+
+
+def _workspace_dir(thread_id: str) -> str:
+    """某会话的 workspace 数据目录（hku 版把数据落在 working_dir/workspace/ 下）。"""
+    return os.path.join(_storage_root(), thread_id, thread_id)
+
+
+def kb_threads() -> list:
+    """列出所有已有会话（按目录修改时间倒序）。"""
+    root = _storage_root()
+    out = []
+    if os.path.isdir(root):
+        try:
+            entries = sorted(
+                [(n, os.path.getmtime(os.path.join(root, n)))
+                 for n in os.listdir(root)
+                 if os.path.isdir(os.path.join(root, n)) and not n.startswith(".")],
+                key=lambda kv: kv[1], reverse=True,
+            )
+        except Exception:
+            entries = []
+        for n, mtime in entries:
+            out.append({
+                "id": n,
+                "label": n[:13],
+                "dir": os.path.join(root, n),
+                "mtime": _iso_dt(mtime),
+            })
+    return out
+
+
+def _iso_dt(ts: float) -> str:
+    try:
+        import datetime
+        return datetime.datetime.fromtimestamp(ts).isoformat(timespec="seconds")
+    except Exception:
+        return ""
+
+
+def _read_json_if_exists(path: str) -> dict:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _doc_id_for_text(text: str) -> str:
+    """与 LightRAG 一致的 doc 主键：md5(内容)，前缀 'doc-'。"""
+    return "doc-" + hashlib.md5(text.encode("utf-8")).hexdigest()
+
+
+def kb_status(thread_id: str) -> dict:
+    """会话知识库概况：文档/分块/实体/关系/图谱/后端信息。"""
+    rag = get_lightrag(thread_id)
+    try:
+        _ensure_initialized(thread_id)
+    except Exception:
+        pass
+    ws = _workspace_dir(thread_id)
+    docs = _read_json_if_exists(os.path.join(ws, "kv_store_doc_status.json"))
+    chunks = _read_json_if_exists(os.path.join(ws, "kv_store_text_chunks.json"))
+    entities = _read_json_if_exists(os.path.join(ws, "kv_store_full_entities.json"))
+    relations = _read_json_if_exists(os.path.join(ws, "kv_store_full_relations.json"))
+    snap = {}
+    try:
+        snap = graph_snapshot(thread_id)
+    except Exception:
+        pass
+    vec_cls = type(getattr(rag, "entities_vdb", None)).__name__ if getattr(rag, "entities_vdb", None) else "?"
+    graph_cls = type(getattr(rag, "chunk_entity_relation_graph", None)).__name__ if getattr(rag, "chunk_entity_relation_graph", None) else "?"
+    status_counts: dict = {}
+    for rec in docs.values():
+        st = (rec.get("status") or "unknown").lower()
+        status_counts[st] = status_counts.get(st, 0) + 1
+    meta = kb_meta(thread_id)
+    return {
+        "thread_id": thread_id,
+        "name": meta.get("name") or thread_id[:13],
+        "description": meta.get("description") or "",
+        "vector_backend": "faiss" if vec_cls == "FaissVectorDBStorage" else ("nano" if vec_cls == "NanoVectorDBStorage" else vec_cls),
+        "graph_backend": "neo4j" if graph_cls == "Neo4JStorage" else ("networkx" if graph_cls == "NetworkXStorage" else graph_cls),
+        "doc_count": len(docs),
+        "doc_statuses": status_counts,
+        "chunk_count": len(chunks),
+        "entity_count": len(entities),
+        "relation_count": len(relations),
+        "graph_nodes": len(snap.get("nodes", [])),
+        "graph_edges": len(snap.get("edges", [])),
+        "workspace_dir": ws,
+    }
+
+
+def kb_documents(thread_id: str, page: int = 1, page_size: int = 50) -> dict:
+    """某会话的文档列表（分页，按更新时间倒序）。"""
+    page = max(1, int(page))
+    page_size = min(200, max(10, int(page_size)))
+    docs_raw = _read_json_if_exists(os.path.join(_workspace_dir(thread_id), "kv_store_doc_status.json"))
+    items = sorted(docs_raw.items(),
+                   key=lambda kv: str((kv[1] or {}).get("updated_at", "") or ""), reverse=True)
+    total = len(items)
+    page_items = items[(page - 1) * page_size: page * page_size]
+    docs = []
+    for doc_id, rec in page_items:
+        rec = rec or {}
+        nid = str(doc_id)
+        if not nid.startswith("doc-"):
+            nid = "doc-" + nid
+        docs.append({
+            "id": nid,
+            "title": str(rec.get("file_path") or rec.get("content_summary") or nid)[:120],
+            "file_path": str(rec.get("file_path") or "")[:120],
+            "status": str(rec.get("status") or "unknown"),
+            "error_msg": str(rec.get("error_msg") or ""),
+            "content_summary": str(rec.get("content_summary") or ""),
+            "content_length": int(rec.get("content_length") or 0),
+            "chunks_count": int(rec.get("chunks_count") or (rec.get("chunks_list") and len(rec["chunks_list"])) or 0),
+            "created_at": rec.get("created_at") or "",
+            "updated_at": rec.get("updated_at") or "",
+            "track_id": rec.get("track_id") or "",
+        })
+    return {"thread_id": thread_id, "total": total, "page": page, "page_size": page_size, "docs": docs}
+
+
+def kb_chunks(thread_id: str, doc_id: str = "") -> dict:
+    """某文档的分块列表（内容 + token 数）；doc_id 为空时返回该知识库全部切片。"""
+    nid = ""
+    if doc_id:
+        nid = doc_id if str(doc_id).startswith("doc-") else "doc-" + str(doc_id)
+    chunks = _read_json_if_exists(os.path.join(_workspace_dir(thread_id), "kv_store_text_chunks.json"))
+    out = []
+    for key, rec in chunks.items():
+        rec = rec or {}
+        if nid:
+            if not str(key).startswith(nid + "-"):
+                continue
+        out.append({
+            "id": str(key),
+            "doc_id": nid or str(rec.get("full_doc_id") or ""),
+            "order": int(rec.get("chunk_order_index") or 0),
+            "tokens": int(rec.get("tokens") or 0),
+            "content": str(rec.get("content") or ""),
+        })
+    if nid:
+        out.sort(key=lambda c: c["order"])
+    else:
+        out.sort(key=lambda c: (c["doc_id"], c["order"]))
+    return {"doc_id": nid or "", "total": len(out), "chunks": out}
+
+
+def kb_search(thread_id: str, query: str, top_k: int = 8) -> dict:
+    """检索测试：混合检索文本 + 原始向量命中（分块/实体/关系）。"""
+    query = (query or "").strip()
+    if not query:
+        return {"hybrid": "", "vector_hits": []}
+    rag = get_lightrag(thread_id)
+    try:
+        _ensure_initialized(thread_id)
+    except Exception:
+        pass
+
+    def _vec_hits(vdb, k: int) -> list:
+        try:
+            rows = _run_on_worker(vdb.query(query, int(k)), timeout=60) or []
+        except Exception:
+            return []
+        out = []
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            nid = str(r.get("id") or "")
+            out.append({
+                "id": nid,
+                "score": float(r.get("distance") if "distance" in r else r.get("score", 0)) or 0.0,
+                "content": str(r.get("content") or r.get("text") or "")[:300] or nid,
+            })
+        return out
+
+    hybrid = ""
+    try:
+        hybrid = str(lightrag_query(thread_id, query, top_k=top_k, mode="hybrid"))
+    except Exception:
+        pass
+    return {
+        "hybrid": hybrid,
+        "vector_hits": {
+            "chunks": _vec_hits(getattr(rag, "chunks_vdb", None), top_k),
+            "entities": _vec_hits(getattr(rag, "entities_vdb", None), top_k),
+            "relations": _vec_hits(getattr(rag, "relationships_vdb", None), top_k),
+        },
+    }
+
+
+def kb_ingest(thread_id: str, texts: List[str]) -> dict:
+    """向会话知识库喂入文本（同步，含建图）；返回生成的 doc_id 列表。"""
+    texts = [t for t in (texts or []) if isinstance(t, str) and t.strip()]
+    if not texts:
+        return {"ok": False, "error": "没有可喂入的文本", "doc_ids": []}
+    try:
+        lightrag_insert(thread_id, texts)
+    except Exception as e:
+        return {"ok": False, "error": f"喂入失败: {e}", "doc_ids": []}
+    return {"ok": True, "doc_ids": [_doc_id_for_text(t) for t in texts]}
+
+
+def kb_delete_doc(thread_id: str, doc_id: str) -> dict:
+    """删除某文档及其分块/图谱/向量数据。"""
+    nid = doc_id if str(doc_id).startswith("doc-") else "doc-" + str(doc_id)
+    rag = get_lightrag(thread_id)
+    try:
+        _ensure_initialized(thread_id)
+    except Exception:
+        pass
+    try:
+        _run_on_worker(rag.adelete_by_doc_id(nid), timeout=180)
+        return {"ok": True, "doc_id": nid}
+    except Exception as e:
+        return {"ok": False, "doc_id": nid, "error": f"删除失败: {e}"}
+
+
+def kb_reprocess(thread_id: str, doc_id: str) -> dict:
+    """重建某文档：先删除、再按原内容重新喂入（向量后端切换后用于重新嵌入）。"""
+    nid = doc_id if str(doc_id).startswith("doc-") else "doc-" + str(doc_id)
+    rag = get_lightrag(thread_id)
+    try:
+        _ensure_initialized(thread_id)
+    except Exception:
+        pass
+    try:
+        rec = _run_on_worker(rag.full_docs.get_by_id(nid), timeout=60)
+    except Exception:
+        rec = None
+    content = (rec or {}).get("content") if isinstance(rec, dict) else None
+    if not content:
+        return {"ok": False, "doc_id": nid, "error": "找不到原文档内容"}
+    try:
+        _run_on_worker(rag.adelete_by_doc_id(nid), timeout=180)
+    except Exception:
+        pass
+    try:
+        lightrag_insert(thread_id, [str(content)])
+        return {"ok": True, "doc_id": nid}
+    except Exception as e:
+        return {"ok": False, "doc_id": nid, "error": f"重建失败: {e}"}
+
+
+# ==================== RAG 管理台（dashboard / 知识库元信息 / 检索调试） ====================
+
+_KB_DEFAULT_CONFIG = {
+    "top_k": 12,
+    "threshold": 0.2,           # 相似度阈值（余弦，前端"仅检索"过滤用）
+    "rerank": True,             # 重排开关（应用于实例构建）
+    "hybrid": True,             # 混合检索默认开关（检索调试面板默认 mode）
+    "chunk_token_size": 600,
+    "chunk_overlap_token_size": 80,
+    "entity_extract_max_entities": 30,
+    "max_entity_tokens": 3000,
+    "max_relation_tokens": 5000,
+}
+
+
+def _kb_meta_path(thread_id: str) -> str:
+    return os.path.join(_storage_root(), thread_id, "kb_meta.json")
+
+
+def kb_meta(thread_id: str) -> dict:
+    """读某知识库元信息（kb_meta.json）；不存在则返回带默认名的占位。"""
+    p = _kb_meta_path(thread_id)
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return {"name": thread_id[:13], "description": "", "config": _KB_DEFAULT_CONFIG, "created_at": ""}
+
+
+def kb_save_meta(thread_id: str, meta: dict) -> None:
+    os.makedirs(os.path.dirname(_kb_meta_path(thread_id)), exist_ok=True)
+    with open(_kb_meta_path(thread_id), "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+
+
+def kb_get_config(thread_id: str) -> dict:
+    meta = kb_meta(thread_id)
+    cfg = dict(_KB_DEFAULT_CONFIG)
+    cfg.update(meta.get("config") or {})
+    return cfg
+
+
+def kb_set_config(thread_id: str, cfg: dict) -> dict:
+    clean = {k: v for k, v in (cfg or {}).items() if k in _KB_DEFAULT_CONFIG}
+    meta = kb_meta(thread_id)
+    meta["config"] = {**_KB_DEFAULT_CONFIG, **(meta.get("config") or {}), **clean}
+    kb_save_meta(thread_id, meta)
+    # 检索配置作用于实例构建；已有实例需重建才生效
+    clear_instance(thread_id)
+    return kb_get_config(thread_id)
+
+
+def kb_create(thread_id: Optional[str] = None, name: str = "", description: str = "") -> dict:
+    """新建知识库：生成 thread_id、建目录结构、写元信息。"""
+    import uuid
+    tid = (thread_id or "").strip() or uuid.uuid4().hex[:20]
+    ws = _workspace_dir(tid)
+    os.makedirs(ws, exist_ok=True)
+    meta = {
+        "name": (name or "").strip() or tid[:13],
+        "description": (description or "").strip(),
+        "config": _KB_DEFAULT_CONFIG,
+        "created_at": __import__("datetime").datetime.now().isoformat(timespec="seconds"),
+    }
+    kb_save_meta(tid, meta)
+    return {"ok": True, "thread_id": tid, "name": meta["name"], "description": meta["description"]}
+
+
+def kb_list() -> list:
+    """所有知识库：元信息 + 轻量计数（直接扫文件，不初始化实例）。"""
+    out = []
+    for t in kb_threads():
+        tid = t["id"]
+        ws = _workspace_dir(tid)
+        docs = _read_json_if_exists(os.path.join(ws, "kv_store_doc_status.json"))
+        chunks = _read_json_if_exists(os.path.join(ws, "kv_store_text_chunks.json"))
+        entities = _read_json_if_exists(os.path.join(ws, "kv_store_full_entities.json"))
+        relations = _read_json_if_exists(os.path.join(ws, "kv_store_full_relations.json"))
+        meta = kb_meta(tid)
+        st_counts = {}
+        for rec in docs.values():
+            k = str((rec or {}).get("status") or "unknown").lower()
+            st_counts[k] = st_counts.get(k, 0) + 1
+        out.append({
+            "thread_id": tid,
+            "name": meta.get("name") or tid[:13],
+            "description": meta.get("description") or "",
+            "doc_count": len(docs),
+            "chunk_count": len(chunks),
+            "entity_count": len(entities),
+            "relation_count": len(relations),
+            "status_counts": st_counts,
+            "created_at": meta.get("created_at") or "",
+            "updated_at": t.get("mtime") or "",
+        })
+    return out
+
+
+def kb_delete_thread(thread_id: str) -> dict:
+    """删除整个知识库（本地目录 + 尽力删 Neo4j 该 label 节点 + 清除实例）。"""
+    import shutil
+    tid = str(thread_id)
+    root_dir = os.path.join(_storage_root(), tid)
+    # 尽力删 Neo4j 节点（label=thread_id，需反引号）
+    try:
+        _run_on_worker(_neo4j_delete_workspace(tid), timeout=120)
+    except Exception:
+        pass
+    if os.path.isdir(root_dir):
+        try:
+            shutil.rmtree(root_dir, ignore_errors=True)
+        except Exception:
+            pass
+    clear_instance(tid)
+    return {"ok": True, "thread_id": tid}
+
+
+async def _neo4j_delete_workspace(tid: str) -> None:
+    """Neo4j 侧删除某 workspace label 的全部节点（尽力而为，失败不影响本地删除）。"""
+    label = str(tid).replace("`", "")
+    if not (os.getenv("NEO4J_URI") or ""):
+        return
+    try:
+        from neo4j import GraphDatabase
+        driver = GraphDatabase.driver(
+            os.getenv("NEO4J_URI", "bolt://localhost:7687"),
+            auth=(os.getenv("NEO4J_USERNAME", "neo4j"), os.getenv("NEO4J_PASSWORD", "")),
+        )
+        db = os.getenv("NEO4J_DATABASE", "neo4j")
+        try:
+            with driver.session(database=db) as ses:
+                ses.run(f"MATCH (n:`{label}`) DETACH DELETE n")
+        finally:
+            driver.close()
+    except Exception as e:
+        logging.getLogger(__name__).warning("Neo4j 清理 label=%s 失败: %s", tid, e)
+
+
+def kb_dashboard() -> dict:
+    """全局大盘：跨库统计 + 7 日问答/文档趋势 + 反馈占比。"""
+    libs = kb_list()
+    doc_total = sum(d["doc_count"] for d in libs)
+    chunk_total = sum(d["chunk_count"] for d in libs)
+    entity_total = sum(d["entity_count"] for d in libs)
+    relation_total = sum(d["relation_count"] for d in libs)
+    status_total = {}
+    for d in libs:
+        for k, v in (d.get("status_counts") or {}).items():
+            status_total[k] = status_total.get(k, 0) + v
+    messages7, docs7 = _trends_7d()
+    fb = _feedback_stats()
+    return {
+        "kb_count": len(libs),
+        "doc_total": doc_total,
+        "chunk_total": chunk_total,
+        "entity_total": entity_total,
+        "relation_total": relation_total,
+        "status_counts": status_total,
+        "trend_days": [m[0] for m in messages7],
+        "trend_qa": [m[1] for m in messages7],
+        "trend_docs": [d[1] for d in docs7],
+        "feedback": fb,
+        "vector_backend": os.getenv("VECTOR_STORAGE", "faiss"),
+        "graph_backend": os.getenv("GRAPH_STORAGE", "neo4j"),
+    }
+
+
+def _trends_7d():
+    """近 7 天：{(月-日): 问答次数(user 消息数)} 与 文档新增数（按 doc 创建日）。"""
+    from datetime import date, datetime, timedelta
+    today = date.today()
+    days = [(today - timedelta(days=i)).isoformat() for i in range(6, -1, -1)]
+    qa = {d: 0 for d in days}
+    docs = {d: 0 for d in days}
+
+    try:
+        import sqlite3
+        with sqlite3.connect(str(DB_PATH)) as conn:
+            rows = conn.execute(
+                "SELECT substr(timestamp,1,10) AS d, COUNT(*) FROM messages "
+                "WHERE role='user' GROUP BY substr(timestamp,1,10)").fetchall()
+        for d, n in rows:
+            if isinstance(d, str) and d in qa:
+                qa[d] = int(n or 0)
+    except Exception:
+        pass
+
+    for t in kb_threads():
+        try:
+            recs = _read_json_if_exists(os.path.join(_workspace_dir(t["id"]), "kv_store_doc_status.json"))
+        except Exception:
+            continue
+        for rec in recs.values():
+            ct = str((rec or {}).get("created_at") or "")[:10]
+            if ct in docs:
+                docs[ct] += 1
+    labels = []
+    for d in days:
+        try:
+            labels.append(str(int(d[5:7])) + "-" + str(int(d[8:10])))
+        except Exception:
+            labels.append(d)
+    return (list(zip(labels, [qa[d] for d in days])) or []), \
+           (list(zip(labels, [docs[d] for d in days])) or [])
+
+
+def _feedback_stats() -> dict:
+    try:
+        import sqlite3
+        with sqlite3.connect(str(DB_PATH)) as conn:
+            rows = conn.execute(
+                "SELECT verdict, COUNT(*) FROM qa_feedback GROUP BY verdict").fetchall()
+        cnt = {"like": 0, "dislike": 0}
+        for v, n in rows:
+            if v in cnt:
+                cnt[v] = int(n or 0)
+        total = cnt["like"] + cnt["dislike"]
+        ratio = round(cnt["like"] / (total or 1) * 100, 1)
+        return {"like": cnt["like"], "dislike": cnt["dislike"], "total": total, "ratio": ratio}
+    except Exception:
+        return {"like": 0, "dislike": 0, "total": 0, "ratio": 0.0}
+
+
+_QA_FEEDBACK_SQL = """
+CREATE TABLE IF NOT EXISTS qa_feedback (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    thread_id TEXT NOT NULL,
+    query TEXT NOT NULL,
+    answer TEXT,
+    verdict TEXT NOT NULL,
+    top_k INTEGER,
+    mode TEXT,
+    note TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+"""
+
+
+def kb_feedback(thread_id: str, query: str, answer: str, verdict: str,
+                top_k: int = 0, mode: str = "", note: str = "") -> dict:
+    import sqlite3
+    verdict = "like" if verdict == "like" else "dislike"
+    with sqlite3.connect(str(DB_PATH)) as conn:
+        conn.execute(_QA_FEEDBACK_SQL)
+        cur = conn.execute(
+            "INSERT INTO qa_feedback (thread_id, query, answer, verdict, top_k, mode, note) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (thread_id, query, answer, verdict, int(top_k or 0), mode, note))
+        conn.commit()
+        new_id = cur.lastrowid
+    return {"ok": True, "id": new_id, "verdict": verdict}
+
+
+def kb_feedback_list(thread_id: Optional[str] = None, limit: int = 100) -> list:
+    import sqlite3
+    try:
+        with sqlite3.connect(str(DB_PATH)) as conn:
+            conn.row_factory = sqlite3.Row
+            if thread_id:
+                rows = conn.execute(
+                    "SELECT * FROM qa_feedback WHERE thread_id=? ORDER BY id DESC LIMIT ?",
+                    (thread_id, limit)).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM qa_feedback ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+            return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+def kb_import_url(thread_id: str, url: str) -> dict:
+    """抓取 URL 网页正文并喂入知识库。"""
+    import urllib.parse
+    import re
+    url = (url or "").strip()
+    if not url.startswith(("http://", "https://")):
+        return {"ok": False, "error": "URL 需以 http(s):// 开头"}
+    try:
+        resp = httpx.get(url, timeout=30, follow_redirects=True,
+                         headers={"User-Agent": "Mozilla/5.0"})
+        resp.raise_for_status()
+        ctype = resp.headers.get("content-type", "")
+        text = resp.text
+        if "html" in ctype:
+            text = re.sub(r"<script[\s\S]*?</script>|<style[\s\S]*?</style>", " ", text, flags=re.I)
+            text = re.sub(r"<[^>]+>", " ", text)
+            text = re.sub(r"\s+", " ", text)
+            text = text.strip()
+        if not text.strip():
+            return {"ok": False, "error": "页面没有可提取的文本内容"}
+        return kb_ingest(thread_id, [f"[来源URL: {url}]\n{text}"])
+    except Exception as e:
+        return {"ok": False, "error": f"抓取失败: {e}"}
+
+
+def kb_delete_chunk(thread_id: str, chunk_key: str) -> dict:
+    """删除某个切片：KV + 向量 + 所属文档的 chunks 计数。"""
+    key = str(chunk_key)
+    rag = get_lightrag(thread_id)
+    try:
+        _ensure_initialized(thread_id)
+    except Exception:
+        pass
+    doc_id = str(key).split("-chunk-")[0]
+    try:
+        rec = _run_on_worker(rag.doc_status.get_by_id(doc_id), timeout=60)
+        if isinstance(rec, dict):
+            chunks_list = list(rec.get("chunks_list") or [])
+            if chunks_list and key in chunks_list:
+                chunks_list.remove(key)
+                rec["chunks_list"] = chunks_list
+                rec["chunks_count"] = max(0, int(rec.get("chunks_count") or 1) - 1)
+                _run_on_worker(rag.doc_status.upsert({doc_id: rec}), timeout=60)
+        _run_on_worker(rag.text_chunks.delete([key]), timeout=60)
+        _run_on_worker(rag.chunks_vdb.delete([key]), timeout=60)
+        return {"ok": True, "doc_id": doc_id, "chunk_key": key}
+    except Exception as e:
+        return {"ok": False, "chunk_key": key, "error": f"删除切片失败: {e}"}
+
+
+def kb_edit_chunk(thread_id: str, chunk_key: str, content: str, tags: str = "") -> dict:
+    """编辑某个切片：更新 KV 文本 + 重新嵌入向量。"""
+    key = str(chunk_key)
+    if not (content or "").strip():
+        return {"ok": False, "chunk_key": key, "error": "内容为空"}
+    rag = get_lightrag(thread_id)
+    try:
+        _ensure_initialized(thread_id)
+    except Exception:
+        pass
+    try:
+        rec = _run_on_worker(rag.text_chunks.get_by_id(key), timeout=60)
+        if not isinstance(rec, dict):
+            return {"ok": False, "chunk_key": key, "error": "找不到该切片"}
+        rec["content"] = content
+        if tags:
+            rec["tags"] = [t.strip() for t in tags.split(",") if t.strip()]
+        _run_on_worker(rag.text_chunks.upsert({key: rec}), timeout=60)
+        # 重新嵌入该切片（vdb.upsert 内部会 embedding + 写索引）
+        vrec = dict(rec)
+        vrec.pop("content", None)
+        _run_on_worker(rag.chunks_vdb.upsert({key: {"content": content, **vrec}}), timeout=120)
+        return {"ok": True, "chunk_key": key}
+    except Exception as e:
+        return {"ok": False, "chunk_key": key, "error": f"编辑切片失败: {e}"}

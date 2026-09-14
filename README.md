@@ -344,7 +344,7 @@ Agnes-Agent/
 │       ├── config.py              # 模型目录管理（自定义来源，无内置厂商）
 │       └── static/                # 前端（index.html + app.js + style.css）
 ├── data/                          # 运行时数据（memory.db / checkpoints.db / traces/）
-├── lightrag_storage/              # L6 知识图谱持久化（每会话一个子目录：KV/向量 vdb_*.json）
+├── lightrag_storage/              # L6 知识图谱持久化（每会话一个子目录：KV + 向量索引 faiss_index_*/ 或 vdb_*）
 ├── neo4j/                         # 本地 Neo4j 5.26 图数据库（后端 GRAPH_STORAGE=neo4j 时使用；gitignored）
 ├── .runtime/                      # 本地 JDK21（Neo4j 运行时依赖；gitignored）
 ├── deliverables/                  # Agent 生成的交付物（如 snake_game/）

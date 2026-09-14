@@ -25,6 +25,15 @@ dependencies = [
     "requests>=2.31.0",
     "watchfiles",
     "python-multipart>=0.0.32",
+    "pypdf>=6.18.1",
+    "markitdown>=0.1.7",
+    "python-docx>=1.1.0",
+    "python-pptx>=1.0.0",
+    "openpyxl>=3.1.0",
+    "pdfminer.six>=20240706",
+    "ebooklib>=0.19",
+    "nbformat>=5.10",
+    "mammoth>=1.9.0",
     "lightrag-hku>=1.5.7",
 ]
 

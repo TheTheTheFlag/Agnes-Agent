@@ -9,7 +9,7 @@
 |------|------|
 | **引擎** | [LightRAG](https://github.com/HKUDS/LightRAG)（`lightrag-hku>=1.5.7`），实体提取 → 知识图谱 + 向量索引双路召回 |
 | **桥接** | `app/memory/ligraphrag_adapter.py` 把项目现有的 LLM / Embedding / Rerank 网关包装成 LightRAG 需要的角色 |
-| **存储** | 图存储后端可选：`neo4j`（默认，项目内本地 Neo4j 5.26，Bolt 7687）或 `networkx`（本地 GraphML）＋ `lightrag_storage/<thread_id>/`（KV/向量仍在本地，每会话独立，重启不丢） |
+| **存储** | 图存储后端可选：`neo4j`（默认，项目内本地 Neo4j 5.26，Bolt 7687）或 `networkx`（本地 GraphML）＋ 向量后端可选：`faiss`（默认，本地索引）或 `nano`（NanoVectorDB JSON）＋ `lightrag_storage/<thread_id>/`（KV 仍在本地，每会话独立，重启不丢） |
 | **召回** | 向量 + 图谱双路（`mode="hybrid"`）+ SiliconFlow Rerank 重排 |
 | **隔离** | 按 thread 分桶（workdir + 空间 label），不同会话知识不串扰；实例按需懒加载并常驻 worker 线程 |
 
@@ -96,6 +96,7 @@ LLM 工具描述见 `graph_rag_tool.py` 底部的 `RECORD_GRAPH_DESC` / `LIGHTGR
 | `RERANK_BASE_URL/API_KEY/MODEL` | 重排（默认 `BAAI/bge-reranker-v2-m3`） | 同上 |
 | `GRAPH_STORAGE` | 图后端：`neo4j`（默认）\|`networkx` | `.env` |
 | `NEO4J_URI/USERNAME/PASSWORD/DATABASE` | Neo4j 连接（`NEO4J_DATABASE=neo4j` 默认库） | `.env` |
+| `VECTOR_STORAGE` | 向量后端：`faiss`（默认）\|`nano` | `.env` |
 
 LLM 角色直接复用项目当前主模型（无需额外配置）。
 
@@ -109,6 +110,42 @@ LLM 角色直接复用项目当前主模型（无需额外配置）。
 | L4 Procedural | 命令历史 | ❌（靠工具查询） |
 | L5 Semantic | 外部知识缓存（tavily 结果等） | ❌（靠工具查询） |
 | **L6 Graph** | **实体关系知识图谱** | **✅ 自动检索注入** |
+
+## 知识库管理页（RAG 管理台）
+
+导航：调试面板「🗂️ RAG 管理」tab（`renderRagTab`，`app/server/static/rag-admin.js`），
+以**会话 = 知识库**建模（每个 thread 目录一份独立索引/图谱）。面板内左侧二级菜单 + hash 路由：
+
+| Hash 路由 | 页面 |
+|----------|------|
+| `#/rag-admin/dashboard` | 大盘首页：知识库/文档/切片/实体/关系统计、近 7 日问答与文档新增、问答反馈👍👎占比、解析成功率 |
+| `#/rag-admin/kb` | 知识库列表（文档/切片/实体/关系数、解析状态、更新时间、打开/删除整库，含 Neo4j 图与向量一并清理） |
+| `#/rag-admin/kb/create` | 新建知识库（自动生成独立 thread 空间） |
+| `#/rag-admin/kb/<tid>/documents` | 文档：上传/批量上传/导入 URL/粘贴喂入/重建/预览切片/删除/失败重试（解析中自动轮询刷新） |
+| `#/rag-admin/kb/<tid>/chunks` | 切片：按文档筛选、编辑（保存后重新向量化）、删除、打标签 |
+| `#/rag-admin/kb/<tid>/config` | 检索配置：top_k / 阈值 / 重排 / 混合检索 / 分块参数 / 实体关系提取限额（保存即重建实例） |
+| `#/rag-admin/kb/<tid>/test` | 检索调试：`仅检索`（向量命中 + 阈值过滤）/ `完整问答`（真实链路 + 耗时 + 召回展示 + 👍👎落库） |
+
+后端路由（`app/server/api/kb.py`）：如上表之外另有 `GET/POST /config`、`GET/POST /feedback`、
+`GET /list`、`GET /dashboard`、`POST /delete_kb`、`POST /import_url`、
+`POST /chunk_delete /chunk_edit`、`POST /answer`（返回 answer/mode/top_k/elapsed_ms）。
+配置存 `lightrag_storage/<tid>/kb_meta.json`，`build_lightrag_instance` 构建时覆盖实例参数。
+
+关键点：切换 `VECTOR_STORAGE` 后**旧向量不自动迁移**，需对文档执行「重建」重新嵌入
+（已有轻量冒烟验证：FAISS 后端下 reprocess 后 `kv_search` 的 chunks/entities/relations 命中恢复）。
+
+支持的文件类型（`POST /api/kb/ingest_file` / 对话上传）：
+
+| 分类 | 扩展名 | 处理方式 |
+|------|--------|---------|
+| 纯文本 | `.txt .md .json .csv .html .htm` | 直接读 |
+| Adobe PDF | `.pdf` | 优先 `pypdf` 直抽文本，抽空白/失败时走 markitdown |
+| Office/电子书 | `.docx .pptx .xlsx .xls .epub .ipynb` | **Microsoft MarkItDown**（`markitdown` 库）转 Markdown 后建库 |
+
+MarkItDown 为微软开源文档→Markdown 转换器，格式后端：mammoth/python-docx（docx）、python-pptx（pptx）、openpyxl（xlsx/xls）、pdfminer.six（pdf）、ebooklib（epub）、nbformat（ipynb）。扫描件/无文本层/加密文件会明确报「无法提取文本」。
+
+问答反馈落库 `memory.db` 表 `qa_feedback`（thread_id/query/answer/verdict/top_k/mode/note/created_at），
+大盘「反馈占比」与其挂钩。
 
 ## 已知限制
 
@@ -124,3 +161,4 @@ LLM 角色直接复用项目当前主模型（无需额外配置）。
 
 `tests/test_graph_rag.py`（全 mock、不触网）：三元组解析 / record_graph 降级 /
 lightgraph_query 命中约定 / L6 注入格式 / API 端点数据结构与空图降级。
+`tests/test_kb.py`：KB 适配层（doc id / 文档分页 / 分块排序 / 状态聚合 / 喂入删除）/ KB API 端点转发与参数钳制。

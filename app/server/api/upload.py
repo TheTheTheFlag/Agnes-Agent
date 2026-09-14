@@ -20,6 +20,7 @@ MAX_SIZE = 20 * 1024 * 1024  # 20MB
 _ALLOWED_EXT = {
     ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg",
     ".pdf", ".txt", ".md", ".json", ".csv", ".html",
+    ".docx", ".pptx", ".xlsx", ".xls", ".epub", ".ipynb",
 }
 _EXT_RE = re.compile(r"^[A-Za-z0-9]{1,10}$")
 

@@ -136,7 +136,7 @@ async function apiPost(url, body) {
   });
   if (r.status === 401) return onUnauthorized();
   const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+  if (!r.ok) throw new Error(data.error || data.detail || `HTTP ${r.status}`);
   return data;
 }
 
@@ -2645,6 +2645,7 @@ const DRAWER_LOADERS = {
   memory: renderMemoryTab,
   memorydb: renderMemoryDBTab,
   graph: renderGraphTab,
+  rag: renderRagTab,
   tools: renderToolsTab,
   skills: renderSkillsTab,
   sched: renderSchedTab,
@@ -2662,6 +2663,7 @@ const DRAWER_TABS = [
   { id: "memory", label: "记忆", icon: "🧠" },
   { id: "memorydb", label: "Memory DB", icon: "🗄️" },
   { id: "graph", label: "图谱", icon: "🕸" },
+  { id: "rag", label: "RAG 管理", icon: "🗂️" },
   { id: "tools", label: "工具", icon: "🔧" },
   { id: "skills", label: "技能", icon: "✨" },
   { id: "sched", label: "定时任务", icon: "🗓️" },
