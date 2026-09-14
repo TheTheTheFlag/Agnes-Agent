@@ -8,14 +8,14 @@
      把命中实体/关系摘要拼入 "=== 分层记忆注入 ===" 块末尾（L6 层）。
 
 存储：
-  LightRAG 把知识持久化在 data/lightrag_storage/<thread_id>/ 下（JsonKV + NetworkX + NanoVectorDB），
+  LightRAG 把知识持久化在 <repo_root>/lightrag_storage/<thread_id>/ 下（JsonKV + NetworkX + NanoVectorDB），
   进程重启后图谱不丢。每个 thread 独立索引，避免不同会话的知识串扰。
 """
 from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional
 
-from app.memory.ligraphrag_adapter import get_lightrag, clear_instance
+from app.memory.ligraphrag_adapter import get_lightrag, clear_instance, lightrag_insert, lightrag_query
 
 
 def lightgraph_query(thread_id: str, query: str, top_k: int = 12) -> str:
@@ -26,9 +26,8 @@ def lightgraph_query(thread_id: str, query: str, top_k: int = 12) -> str:
     """
     try:
         rag = get_lightrag(thread_id)
-        result = rag.query(query, param=None, top_k=top_k)
-        # LightRAG v1.x 的 query() 返回 str（文本）或 dict（取决于 mode）；
-        # 统一转 str 返回，前端/系统 prompt 都按文本解析。
+        result = lightrag_query(thread_id, query, top_k=top_k)
+        # LightRAG v1.5.7 的 aquery 返回 QueryResult/str；转换并截断避免撑爆 system prompt。
         ctx = str(result or "").strip()
         return ctx if ctx else ""
     except Exception as e:
@@ -52,7 +51,7 @@ def record_graph(thread_id: str, triplets_json: str, source: str = "user") -> st
         return "无有效三元组"
     try:
         rag = get_lightrag(thread_id)
-        # LightRAG 的 insert() 接受纯文本；我们把三元组序列化成可读文本再喂进去
+        # LightRAG 的 ainsert 接受纯文本；我们把三元组序列化成可读文本再喂进去
         docs = []
         for t in triplets:
             head = str(t.get("head", "")).strip()
@@ -63,7 +62,7 @@ def record_graph(thread_id: str, triplets_json: str, source: str = "user") -> st
             docs.append(f"{head} {rel} {tail} (来源: {source})")
         if not docs:
             return "无有效三元组（需要 head/rel/tail 全非空）"
-        rag.insert(docs)
+        lightrag_insert(thread_id, docs)
         return f"已记录 {len(docs)} 条实体关系"
     except Exception as e:
         return f"写入失败：{e}"
@@ -78,7 +77,7 @@ def _try_ingest_lightrag(thread_id: str, text: str) -> None:
     try:
         rag = get_lightrag(thread_id)
         # LightRAG 内部会做 chunking + 实体提取 + 关系抽取，这里只喂文本
-        rag.insert([text[:4000]])
+        lightrag_insert(thread_id, [text[:4000]])
     except Exception:
         pass
 

@@ -2545,6 +2545,97 @@ async function renderDisplayTab(el) {
   });
 }
 
+/* ---- 图谱（GraphRAG / L6） ---- */
+const GRAPH_KIND_COLORS = {
+  Person: "#7c5cff",
+  Organization: "#5a9cff",
+  Location: "#34c08b",
+  Event: "#ff9f43",
+  Concept: "#ff6b6b",
+  Method: "#22b8b8",
+  Content: "#f783ac",
+  Data: "#74b816",
+  Artifact: "#a0619a",
+  Creature: "#b0965e",
+  NaturalObject: "#6aa84f",
+  Other: "#95a5a6",
+};
+
+let _graphNetwork = null;
+let _graphRefreshKey = 0;
+
+async function renderGraphTab(el) {
+  _graphNetwork = null;
+  if (!State.threadId) {
+    el.innerHTML = `<div class="d-empty">请先选择/创建一个会话，图谱会随着对话自动构建。</div>`;
+    return;
+  }
+  el.innerHTML = `
+    <div class="d-row" style="justify-content:space-between;flex-wrap:wrap;gap:8px">
+      <div class="d-empty" style="margin:0">会话 <b>${escapeHtml(State.threadId)}</b> 的知识图谱</div>
+      <button class="d-btn" id="graphRefresh">刷新</button>
+    </div>
+    <div class="d-empty" id="graphHint" style="margin-top:8px">加载中…</div>
+    <div id="graphCanvas" style="height:520px;border:1px solid var(--border,#333);border-radius:8px;background:#fff;margin-top:8px"></div>`;
+
+  const render = async (force) => {
+    if (force) _graphRefreshKey++;
+    const canvas = $("#graphCanvas", el);
+    const hint = $("#graphHint", el);
+    const key = _graphRefreshKey;
+    if (!State.threadId) { hint.textContent = "未选择会话"; return; }
+    const updateNodeText = (nodesRes, edgesRes) => {
+      const n = (nodesRes && nodesRes.node_count) || 0;
+      const e = (edgesRes && edgesRes.edge_count) || 0;
+      hint.textContent = n + e ? `图谱已构建：${n} 个实体，${e} 条关系（可拖动查看）` : "当前会话还没有图谱数据，发几条消息后自动生成。";
+    };
+    try {
+      const q = new URLSearchParams({ thread_id: State.threadId });
+      const [nodesRes, edgesRes] = await Promise.all([
+        apiGet("/api/graph/nodes?" + q.toString()),
+        apiGet("/api/graph/edges?" + q.toString()),
+      ]);
+      if (key !== _graphRefreshKey) return; // 期间切换过会话/刷新，丢弃旧结果
+      const nodes = (nodesRes.nodes || []).map((nd) => ({
+        id: nd.id,
+        label: nd.name,
+        color: { background: GRAPH_KIND_COLORS[nd.kind] || GRAPH_KIND_COLORS.Other, border: "#333" },
+        title: `类型: ${nd.kind}`,
+        shape: "dot",
+        size: 18,
+      }));
+      const edges = (edgesRes.edges || []).map((ed) => ({
+        id: ed.id,
+        from: ed.from_id,
+        to: ed.to_id,
+        label: ed.label || "",
+        arrows: "to",
+        font: { size: 12 },
+      }));
+      updateNodeText(nodesRes, edgesRes);
+      const data = { nodes: new vis.DataSet(nodes), edges: new vis.DataSet(edges) };
+      const options = {
+        autoResize: true,
+        nodes: { font: { color: "#222", size: 14 }, borderWidth: 1 },
+        edges: { color: { color: "#9aa" }, smooth: { enabled: true, type: "dynamic" } },
+        interaction: { hover: true, tooltipDelay: 120, dragNodes: true },
+        physics: { enabled: true, stabilization: { iterations: 120 }, barnesHut: { gravitationalConstant: -4200, springLength: 120 } },
+      };
+      if (_graphNetwork) _graphNetwork.destroy();
+      _graphNetwork = new vis.Network(canvas, data, options);
+    } catch (err) {
+      if (key !== _graphRefreshKey) return;
+      hint.textContent = "图谱加载失败";
+      const hintbox = $("#graphHint", el);
+      if (hintbox) hintbox.textContent = `图谱加载失败：${err.message}`;
+    }
+  };
+
+  const btn = $("#graphRefresh", el);
+  if (btn) btn.addEventListener("click", () => render(true));
+  await render(false);
+}
+
 /* ---- 抽屉 tab 注册表 ---- */
 const DRAWER_LOADERS = {
   state: renderStateTab,
@@ -2553,6 +2644,7 @@ const DRAWER_LOADERS = {
   trace: renderTraceTab,
   memory: renderMemoryTab,
   memorydb: renderMemoryDBTab,
+  graph: renderGraphTab,
   tools: renderToolsTab,
   skills: renderSkillsTab,
   sched: renderSchedTab,
@@ -2569,6 +2661,7 @@ const DRAWER_TABS = [
   // { id: "trace", label: "追踪", icon: "🧭" },
   { id: "memory", label: "记忆", icon: "🧠" },
   { id: "memorydb", label: "Memory DB", icon: "🗄️" },
+  { id: "graph", label: "图谱", icon: "🕸" },
   { id: "tools", label: "工具", icon: "🔧" },
   { id: "skills", label: "技能", icon: "✨" },
   { id: "sched", label: "定时任务", icon: "🗓️" },

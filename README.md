@@ -62,7 +62,7 @@ Web 面板（http://localhost:8000）：
 - ✅ **模型自决路由**：无硬编码意图分类，LLM 自行决定"直接回答 / 调工具 / 进入多步规划"
 - ✅ **DAG 模式多步规划**：planner 把目标拆成 `nodes + edges`，executor 按拓扑层并行执行；支持软依赖、失败隔离、局部重规划（上限 3 次）与验收契约硬校验 —— 详见 [DAG 模式设计理念](#-dag-模式plan-and-execute设计理念)
 - ✅ **自定义 ReAct 循环**：亲手实现思考—行动—观察闭环（`ReActLoop`），支持工具安全拦截、人工审批、连续拒绝熔断、迭代上限防死循环
-- ✅ **5 层记忆系统**：L1 对话消息 / L2 用户画像 / L3 任务历史（dag_plans） / L4 命令历史 / L5 语义缓存（tavily 搜索结果），详细见 [docs/l5-semantic-cache.md](docs/l5-semantic-cache.md)
+- ✅ **6 层记忆系统**：L1 对话消息 / L2 用户画像 / L3 任务历史（dag_plans） / L4 命令历史 / L5 语义缓存（tavily 搜索结果，详见 [docs/l5-semantic-cache.md](docs/l5-semantic-cache.md)） / L6 知识图谱 GraphRAG（实体关系图谱 + 混合检索，详见 [docs/l6-graphrag.md](docs/l6-graphrag.md)）
 - ✅ **多 Key 自动轮换**：api_key 逗号分隔，限流/超时/鉴权自动换 key + 指数退避重试
 - ✅ **沉浸式 Web 面板**：流式对话、工具状态行、审批卡片、State/日志/记忆/定时任务调试抽屉、模型一键切换
 - ✅ **标准 cron 定时任务**：`*/5 * * * *` 常规 cron 语法驱动 Agent 周期性执行任务
@@ -181,6 +181,8 @@ flowchart TB
 | `planning/dag_storage.py` | DAG 持久化层（SQLite） | 三表 `dag_plans`/`dag_nodes`/`dag_edges` + 轻量 checkpoint；启动时回收 running 悬空节点；文本字段入库前统一归一 |
 | `planning/dag_summarizer.py` | 任务交付汇总 | 汇总各节点结果与**真实落盘**的产物；存在 failed 节点时不调 LLM，直接结构化说明，避免"把失败讲成成功" |
 | `memory/memory_manager.py` | 5 层记忆 | L2 自动注入 / L5 语义缓存（tavily 搜索结果） / history_summary 压缩历史 |
+| `memory/graph_rag_tool.py` | L6 图谱工具 + 被动注入 | `record_graph` / `lightgraph_query` 工具 + 每轮 L6 检索注入（失败静默降级） |
+| `memory/ligraphrag_adapter.py` | LightRAG 桥接层 | 专属 worker 事件循环跑 `ainsert/aquery`；Embedding(vstack) / Rerank / 主模型 LLM 三件套包装；按 thread 分桶持久化 |
 | `llm/llm_factory.py` | 多 Key 轮换 | 401/429/5xx 换 key，指数退避（2^n+jitter，上限 30s） |
 | `server/api/chat.py` | SSE 流式推送 | `updates` + `messages` 双通道；工具事件监听桥 |
 
@@ -331,7 +333,8 @@ Agnes-Agent/
 │   ├── config.py                  # 配置中心（路径统一指向 data/）
 │   ├── graph/                     # LangGraph 工作流（节点 + 路由 + 状态）
 │   ├── llm/                       # LLM 纯工厂（多 key 轮换，零配置）
-│   ├── memory/                    # 5 层记忆管理器（SQLite）
+│   ├── memory/                    # 6 层记忆管理器（SQLite）
+│   │                              #   + ligraphrag_adapter(LightRAG 桥) + graph_rag_tool(L6 图谱工具)
 │   ├── planning/                  # DAG 模式：dag_planner/dag_executor/dag_summarizer
 │   │                              #   + dag_core(DAG 计算) + dag_storage(三表+checkpoint) + react_loop
 │   ├── tools/                     # 工具集（搜索/命令/文件/记忆/规划触发…）+ 技能路由/SkillHub 工具
@@ -341,6 +344,7 @@ Agnes-Agent/
 │       ├── config.py              # 模型目录管理（自定义来源，无内置厂商）
 │       └── static/                # 前端（index.html + app.js + style.css）
 ├── data/                          # 运行时数据（memory.db / checkpoints.db / traces/）
+├── lightrag_storage/              # L6 知识图谱持久化（每会话一个子目录：GraphML + vdb_*.json）
 ├── deliverables/                  # Agent 生成的交付物（如 snake_game/）
 ├── tests/                         # pytest 回归测试
 ├── pyproject.toml                 # 项目元数据 + 依赖
