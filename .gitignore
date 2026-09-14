@@ -11,12 +11,21 @@ wheels/
 .venv
 .env
 
+# 编辑器 / IDE 配置
+.idea/
+.vscode/
+
 # 运行时数据（Agent 记忆/会话，不进版本库）
 data/*.db
 data/*.db-shm
 data/*.db-wal
 data/.model_config
-data/traces/   # 持久化 trace 文件（每会话一个 JSONL），不入仓
+# 面板登录凭据（首次设置时写入；PBKDF2 哈希，不含明文）
+# 注意：gitignore 不支持行尾注释，规则与说明必须各占一行，否则整行会被当成路径模式
+data/auth.json
+data/auth.json.tmp
+# 持久化 trace 文件（每会话一个 JSONL），不入仓
+data/traces/
 
 # 本地状态与日志
 .thread_id

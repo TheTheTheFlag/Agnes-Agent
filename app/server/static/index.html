@@ -150,11 +150,12 @@
     <div class="login-logo">
       <svg viewBox="0 0 32 32" width="36" height="36"><rect width="32" height="32" rx="8" fill="url(#brandGrad)"/><path d="M10 21l6-10 6 10" stroke="white" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
     </div>
-    <h2 class="login-title">Agnes Agent</h2>
-    <p class="login-sub">调试面板 · 登录后使用</p>
+    <h2 class="login-title" id="loginTitle">Agnes Agent</h2>
+    <p class="login-sub" id="loginSub">调试面板 · 登录后使用</p>
     <form id="loginForm" autocomplete="off">
       <input id="loginUser" type="text" placeholder="账号" autocomplete="username" spellcheck="false">
       <input id="loginPass" type="password" placeholder="密码" autocomplete="current-password">
+      <input id="loginPass2" type="password" placeholder="确认密码" autocomplete="new-password" class="hidden">
       <div id="loginError" class="login-error hidden"></div>
       <button id="btnLogin" type="submit">登 录</button>
     </form>

@@ -99,6 +99,15 @@ def chatbot(state: State, config: RunnableConfig):
     if memory_injection:
         memory_section = "\n\n=== 分层记忆注入 ===\n" + "\n\n".join(memory_injection.values())
 
+    # L6 GraphRAG 知识注入：每轮构造 prompt 时查一次 LightRAG，把命中实体/关系摘要拼入 system prompt。
+    try:
+        from app.memory.graph_rag_tool import get_l6_context
+        l6_ctx = get_l6_context(thread_id, user_content, limit_chars=1200)
+        if l6_ctx:
+            memory_section += "\n\n" + l6_ctx
+    except Exception:
+        pass
+
     cwd = os.getcwd()
     deliverables_dir = os.path.join(cwd, "deliverables")
     os.makedirs(deliverables_dir, exist_ok=True)
@@ -182,6 +191,12 @@ def chatbot(state: State, config: RunnableConfig):
                 # 写 L5 语义缓存（tavily_tool 的注册名是 tavily_search）
                 query = params.get("query") or params.get("q") or json.dumps(params, ensure_ascii=False)[:200]
                 mm.cache_knowledge(source="tavily", query=query, content=str(result)[:8000])
+                # L6 被动注入：搜索结果自动进 LightRAG，触发实体/关系抽取
+                try:
+                    from app.memory.graph_rag_tool import _try_ingest_lightrag
+                    _try_ingest_lightrag(thread_id, f"搜索：{query}\n结果：{str(result)[:2000]}")
+                except Exception:
+                    pass
         except Exception as e:
             logger.error(f"写入失败: {e}")
         # 审计：所有工具调用都记入操作历史（便于完整审查 Agent 行为）

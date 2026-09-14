@@ -141,10 +141,27 @@ async function apiPost(url, body) {
 }
 
 /* ==================== 登录 ==================== */
-function showLogin() {
+// 登录遮罩有两种形态：
+//   initialized=true  → 常规登录
+//   initialized=false → 首次使用，设置账号密码（提交到 /api/auth/setup，凭据存 data/auth.json）
+let _loginNeedsSetup = false;
+
+function showLogin(initialized) {
+  // 不传参时沿用上一次已知状态（如登出后返回登录页）
+  if (typeof initialized === "boolean") _loginNeedsSetup = !initialized;
+  const setup = _loginNeedsSetup;
+  $("#loginTitle").textContent = setup ? "首次使用" : "Agnes Agent";
+  $("#loginSub").textContent = setup
+    ? "设置面板账号密码（保存在 data/auth.json，PBKDF2 哈希）"
+    : "调试面板 · 登录后使用";
+  $("#loginPass2").classList.toggle("hidden", !setup);
+  $("#loginUser").placeholder = setup ? "设置账号" : "账号";
+  $("#loginPass").placeholder = setup ? `设置密码（至少 6 位）` : "密码";
+  $("#btnLogin").textContent = setup ? "创建并登录" : "登 录";
   $("#loginOverlay").classList.remove("hidden");
   $("#loginError").classList.add("hidden");
   $("#loginPass").value = "";
+  $("#loginPass2").value = "";
   setTimeout(() => { const u = $("#loginUser"); if (u) u.focus(); }, 60);
 }
 
@@ -152,13 +169,14 @@ function hideLogin() {
   $("#loginOverlay").classList.add("hidden");
 }
 
-async function checkAuth() {
+// 返回 {authenticated, initialized}；请求失败按"未登录但已初始化"处理，避免误导用户去重设账号
+async function fetchAuthStatus() {
   try {
     const r = await fetch("/api/auth/status");
     const d = await r.json().catch(() => ({}));
-    return !!d.authenticated;
+    return { authenticated: !!d.authenticated, initialized: d.initialized !== false };
   } catch (e) {
-    return false;
+    return { authenticated: false, initialized: true };
   }
 }
 
@@ -168,16 +186,24 @@ function bindAuthEvents() {
     const btn = $("#btnLogin");
     btn.disabled = true;
     $("#loginError").classList.add("hidden");
+    const setup = _loginNeedsSetup;
+    const payload = {
+      username: $("#loginUser").value.trim(),
+      password: $("#loginPass").value,
+    };
+    if (setup) payload.confirm = $("#loginPass2").value;
     try {
-      const r = await fetch("/api/auth/login", {
+      const r = await fetch(setup ? "/api/auth/setup" : "/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username: $("#loginUser").value.trim(), password: $("#loginPass").value }),
+        body: JSON.stringify(payload),
       });
       const d = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(d.error || "登录失败");
+      if (!r.ok) throw new Error(d.error || (setup ? "设置失败" : "登录失败"));
+      _loginNeedsSetup = false;
+      if (setup) toast("账号已设置，凭据保存在 data/auth.json", "success");
       hideLogin();
-      init();   // 登录成功 → 初始化主界面
+      init();   // 登录/设置成功 → 初始化主界面
     } catch (err) {
       $("#loginError").textContent = err.message || "登录失败";
       $("#loginError").classList.remove("hidden");
@@ -187,7 +213,7 @@ function bindAuthEvents() {
   });
   $("#btnLogout").addEventListener("click", async () => {
     try { await fetch("/api/auth/logout", { method: "POST" }); } catch (e) { /* 忽略 */ }
-    showLogin();
+    showLogin(true);
   });
 }
 
@@ -2538,7 +2564,9 @@ const DRAWER_TABS = [
   { id: "state", label: "State", icon: "📊" },
   { id: "display", label: "显示", icon: "🖥️" },
   { id: "prompt", label: "提示词", icon: "📄" },
-  { id: "trace", label: "追踪", icon: "🧭" },
+  // 追踪 tab 已隐藏：renderTraceTab 与 DRAWER_LOADERS.trace 保留，
+  // 需要时把下面这行取消注释即可恢复（也可用 activateTab("trace") 临时打开）。
+  // { id: "trace", label: "追踪", icon: "🧭" },
   { id: "memory", label: "记忆", icon: "🧠" },
   { id: "memorydb", label: "Memory DB", icon: "🗄️" },
   { id: "tools", label: "工具", icon: "🔧" },
@@ -2665,9 +2693,10 @@ function bindEvents() {
 
 /* ==================== 初始化 ==================== */
 async function init() {
-  // 登录校验：未登录先显示登录界面，登录成功后再走主流程
-  if (!(await checkAuth())) {
-    showLogin();
+  // 登录校验：未登录先显示登录/首次设置界面，成功后再走主流程
+  const auth_ = await fetchAuthStatus();
+  if (!auth_.authenticated) {
+    showLogin(auth_.initialized);   // 未初始化 → 引导用户设置账号密码
     return;
   }
 

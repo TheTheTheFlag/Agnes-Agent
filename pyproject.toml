@@ -25,6 +25,7 @@ dependencies = [
     "requests>=2.31.0",
     "watchfiles",
     "python-multipart>=0.0.32",
+    "lightrag-hku>=1.5.7",
 ]
 
 [dependency-groups]
