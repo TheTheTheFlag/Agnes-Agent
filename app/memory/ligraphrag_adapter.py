@@ -470,6 +470,11 @@ def build_lightrag_instance(thread_id: str) -> Any:
             kwargs["max_relation_tokens"] = int(_kb_cfg["max_relation_tokens"])
         if _kb_cfg.get("rerank") is False:
             kwargs.pop("rerank_model_func", None)
+        # 实体/关系抽取的类型指引（含同义/大小写变体合并规则），经 addon_params 注入：
+        # 知识库级覆盖优先，未配置用内置默认。旧 LightRAG 命名变体膨胀的根因在于
+        # 每 chunk 独立抽取，这里从 prompt 层面尽量收敛。
+        guidance = (_kb_cfg.get("entity_types_guidance") or _DEFAULT_ENTITY_TYPES_GUIDANCE).strip()
+        kwargs["addon_params"] = {"entity_types_guidance": guidance}
         # 图谱存储后端：默认 NetworkX(本地 JSON/GraphML)；GRAPH_STORAGE=neo4j 时走项目内 Neo4j
         graph_backend = os.getenv("GRAPH_STORAGE", "networkx").strip().lower()
         if graph_backend == "neo4j":
@@ -517,10 +522,66 @@ def _ensure_initialized(thread_id: str) -> None:
 
 
 def lightrag_insert(thread_id: str, texts: List[str]) -> Any:
-    """同步桥：在 worker loop 上执行 ainsert。"""
+    """同步桥：在 worker loop 上执行 ainsert。
+
+    入库前先对文本做术语还原（normalize_terms）：把同一概念的常见变体
+    （RAG/Rag、GraphRAG/GraphRag 等）统一成规范名，从源头压掉图谱里的
+    冗余实体节点（见 app.memory.entity_normalizer）。
+    入库后再执行一次图谱级变体合并（merge_entity_variants），把依然漏网
+    的大小写变体节点（如 GraphRAG / GraphRag）并在图上合二为一。
+    """
     _ensure_initialized(thread_id)
     rag = get_lightrag(thread_id)
-    return _run_on_worker(rag.ainsert(texts), timeout=600)
+    from app.memory.entity_normalizer import normalize_terms
+    texts = [normalize_terms(t or "") for t in texts if t]
+    if not texts:
+        return None
+    result = _run_on_worker(rag.ainsert(texts), timeout=600)
+    try:
+        merge_entity_variants(thread_id)
+    except Exception:
+        pass  # 合并是优化项，失败不阻塞主链路
+    return result
+
+
+def merge_entity_variants(thread_id: str) -> dict:
+    """把图上现存的大小写/拼写变体实体并入规范名节点（图谱级后置合并）。
+
+    与插入前 normalize_terms 的前置还原组成"双保险"：前置让 LLM 抽取时
+    尽量只看到规范名，后置把依然生成的变体节点在图上合二为一。
+    返回 {规范名: [已合并的变体列表]}，无变体则为空 dict。
+    """
+    from app.memory.entity_normalizer import canonical_variants
+
+    try:
+        rag = get_lightrag(thread_id)
+    except Exception:
+        return {}
+
+    variant_map = canonical_variants()
+    merged: dict = {}
+
+    async def _do_merge() -> dict:
+        g = getattr(rag.chunk_entity_relation_graph, "_graph", None)
+        if g is None:
+            return {}
+        for canonical, variants in variant_map.items():
+            present = [v for v in variants if v in g]
+            if present:
+                try:
+                    await rag.amerge_entities(
+                        present, canonical,
+                        merge_strategy={"description": "concatenate", "entity_type": "keep_first"},
+                    )
+                    merged[canonical] = present
+                except Exception:
+                    continue
+        return merged
+
+    try:
+        return _run_on_worker(_do_merge(), timeout=120)
+    except Exception:
+        return merged
 
 
 def lightrag_query(thread_id: str, query: str, top_k: int = 12, mode: str = "hybrid") -> Any:
@@ -927,6 +988,35 @@ def kb_reprocess(thread_id: str, doc_id: str) -> dict:
 
 # ==================== RAG 管理台（dashboard / 知识库元信息 / 检索调试） ====================
 
+# 实体抽取的类型指引，注入每次实体/关系抽取 prompt 的 ---Entity Types--- 段。
+# 相比 LightRAG 默认值，额外强约束"同义/大小写变体合并为一个实体名"，
+# 抑制同一概念被抽成 RAG/Rag、GraphRAG/GraphRag、Microsoft/Microsoft
+# Research 等多个节点导致的图谱膨胀。用户可在 kb_meta.json 的
+# config.entity_types_guidance 里按知识库覆盖。
+_DEFAULT_ENTITY_TYPES_GUIDANCE = """Classify each entity using one of the following types. If no type fits, use `Other`.
+
+- Person: Human individuals, real or fictional
+- Creature: Non-human living beings (animals, mythical beings, etc.)
+- Organization: Companies, institutions, government bodies, groups
+- Location: Geographic places (cities, countries, buildings, regions)
+- Event: Occurrences, incidents, ceremonies, meetings
+- Concept: Abstract ideas, theories, principles, beliefs
+- Method: Procedures, techniques, algorithms, workflows
+- Content: Creative or informational works (books, articles, films, reports)
+- Data: Quantitative or structured information (statistics, datasets, measurements)
+- Artifact: Physical or digital objects created by humans (tools, software, devices)
+- NaturalObject: Natural non-living objects (minerals, celestial bodies, chemical compounds)
+
+Consolidation rules (apply BEFORE outputting any entity):
+- Case/accent variants of the same term are ONE entity: choose ONE canonical name
+  (prefer the widely used official form, e.g. `RAG`, `KAG`, `OAG`, `GraphRAG`
+  or the full spelled-out term) and use it consistently everywhere.
+- Abbreviations and their full forms (e.g. `LLM` and `Large Language Model`)
+  are merged into ONE entity using a single canonical name.
+- Different spelling of the same real-world object (e.g. `GraphRAG` vs
+  `GraphRag` vs `Graphrag`) must NOT produce separate entities.
+- Only create a new entity when it is a genuinely different concept."""
+
 _KB_DEFAULT_CONFIG = {
     "top_k": 12,
     "threshold": 0.2,           # 相似度阈值（余弦，前端"仅检索"过滤用）
@@ -938,6 +1028,7 @@ _KB_DEFAULT_CONFIG = {
     "entity_extract_max_entities": 30,
     "max_entity_tokens": 3000,
     "max_relation_tokens": 5000,
+    "entity_types_guidance": _DEFAULT_ENTITY_TYPES_GUIDANCE,
 }
 
 
