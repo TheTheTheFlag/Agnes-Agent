@@ -61,6 +61,29 @@ LLM 工具描述见 `graph_rag_tool.py` 底部的 `RECORD_GRAPH_DESC` / `LIGHTGR
   因此所有 `ainsert/aquery/initialize_storages` 都提交到一条专属 worker 线程的常驻 loop 执行
   （`_run_on_worker` 用 `run_coroutine_threadsafe`），避免跨循环锁报错。
 
+### 分块与上下文（recursive + 元数据前缀）
+
+LightRAG 1.5.7 的 `ainsert` 强制走固定 token 窗口（`F(legacy)`），会让长文档按 600 token
+硬切、破坏语义边界。适配层通过自定义 `chunking_func`（`_make_chunking_func`）解决，无需改
+`lightrag_insert` 调用方式。可在 RAG 管理台「分块参数 → 分块策略」选择（`kb_meta.json` 的
+`config.chunking_strategy`，默认 `R`）：
+
+| 策略 | 含义 | 说明 |
+|------|------|------|
+| `R` | 递归字符分块（默认） | 按分隔符级联切分（段落 → 换行 → 中文句读 `。！？；，` → 空格 → 字符兜底），chunk 尽量落在自然边界 |
+| `F` | 固定 Token 窗口 | LightRAG 原生 legacy chunker（`chunking_by_token_size`），按 600 token 硬切 |
+| `V` | 语义向量分块 | SemanticChunker（需 `langchain-experimental`，未装时告警并回退 `R`） |
+| `P` | 段落语义分块 | 需结构化解析的 `.blocks.jsonl` 侧车；纯文本无侧车时 LightRAG 内部回退 `R` |
+| `C` | 自定义 | 与 `R` 同引擎（递归 + 定位前缀），显式声明走自定义扩展点 |
+
+- **元数据前缀（低成本版 Contextual Retrieval）**：`kb_ingest` 喂入前自动给每条文档首行加
+  `[文档定位] <首行摘要>`（`_with_doc_locator`），分块函数会把该行前置到每个 chunk
+  并重算 token 数——所有策略统一生效。孤立 chunk 向量化时仍携带整篇主题上下文，检索命中
+  孤立片段也能"定位"到出处。对话/工具喂养走 `lightrag_insert` 不加前缀（仅文档喂入才有）。
+- **doc_id 一致性**：`kb_ingest` 在加前缀后计算 `doc_id`（`_doc_id_for_text` 对实际存储
+  content 做 md5），与 LightRAG 内部 `compute_mdhash_id` 一致；`doc_status` 的展示摘要仍用原始文本。
+- 切换策略只影响之后新喂入的文档；旧 chunk 保持原策略切分。
+
 ### 图读取（`graph_snapshot`）
 
 - **Neo4j 后端**（默认）：走 `Neo4JStorage.get_all_nodes()/get_all_edges()` 的 Cypher 全图查询

@@ -130,9 +130,13 @@ class IngestDeleteTest(unittest.TestCase):
     def test_ingest_forwards_to_insert(self):
         with mock.patch.object(L, "lightrag_insert") as ins:
             r = L.kb_ingest("tid", ["  ", "hello"])
-        ins.assert_called_once_with("tid", ["hello"])
+        cf = ins.call_args
+        self.assertEqual(cf[0][0], "tid")
+        self.assertEqual(len(cf[0][1]), 1)
+        self.assertTrue(cf[0][1][0].startswith("[文档定位] "))
+        self.assertTrue(cf[0][1][0].endswith("hello"))
         self.assertTrue(r["ok"])
-        self.assertEqual(r["doc_ids"], [L._doc_id_for_text("hello")])
+        self.assertEqual(r["doc_ids"], [L._doc_id_for_text(cf[0][1][0])])
 
     def test_ingest_failure_degrades(self):
         with mock.patch.object(L, "lightrag_insert", side_effect=RuntimeError("boom")):

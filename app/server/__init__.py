@@ -426,11 +426,8 @@ _MEMORY_TABLES = {
         "pk": "id",
         "columns": ["id", "content", "category", "importance", "source", "thread_id", "access_count", "last_accessed_at", "created_at", "updated_at"],
     },
-    "memory_chunks": {
-        "label": "长期记忆 · 语义索引块",
-        "pk": "id",
-        "columns": ["id", "kind", "thread_id", "ref_id", "text", "embedding_dim", "created_at"],
-    },
+    # 原 memory_chunks 冗余索引表已合并回权威表删除（向量存 memory_facts.embedding /
+    # dag_plans.embedding），"长期记忆 · 语义索引块"入口同步移除。
     # 工具调用审计改由 L1 messages 事件承载（kind='tool_call'），
     # 原 L4 command_history / L5 semantic_cache 表与白名单已移除。
 }

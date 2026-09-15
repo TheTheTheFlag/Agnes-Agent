@@ -272,6 +272,121 @@ _cur_thread: Optional[str] = None
 _cur_thread_lock = threading.Lock()
 
 
+_DOC_LOCATOR_PREFIX = "[文档定位]"
+
+# recursive 分块的分隔符级联：长到短，段落 → 换行 → 中文句读 → 空格 → 字符兜底。
+# 与 LightRAG DEFAULT_R_SEPARATORS 保持一致的 CJK 友好语义。
+_CJK_R_SEPARATORS = ["\n\n", "\n", "。", "！", "？", "；", "，", " ", ""]
+
+
+def _extract_doc_locator(content: str) -> str:
+    """从文本首行提取 '[文档定位] ...' 行，作为每个 chunk 的元数据前缀；无则返回空。"""
+    if not content:
+        return ""
+    first = content.split("\n", 1)[0].strip()
+    if first.startswith(_DOC_LOCATOR_PREFIX) and len(first) > len(_DOC_LOCATOR_PREFIX):
+        return first
+    return ""
+
+
+_CHUNK_STRATEGIES = ("F", "R", "V", "P", "C")
+_CHUNK_STRATEGY_DEFAULT = "R"
+_CHUNK_STRATEGY_LABELS = {
+    "F": "固定 Token 窗口（LightRAG 默认）",
+    "R": "递归字符分块（推荐，段落/句读边界）",
+    "V": "语义向量分块（需 langchain-experimental，缺依赖时回退 R）",
+    "P": "段落语义分块（需结构化解析 blocks，纯文本时回退 R）",
+    "C": "自定义分块（当前实现 = 递归 + 定位前缀）",
+}
+
+
+def _make_chunking_func(strategy: str):
+    """按策略返回绑定好的自定义分块函数（LightRAG legacy 6-arg 扩展点）。
+
+    - ``F`` 固定 token 窗口（LightRAG 原生 legacy chunker）；
+    - ``R`` 递归字符分块（默认）+ 元数据前缀；
+    - ``V`` 语义向量分块（SemanticChunker）；未装 langchain-experimental 时回退 R；
+    - ``P`` 段落语义分块；无 ``.blocks.jsonl`` 侧车文件时 LightRAG 内部回退 R；
+    - ``C`` 自定义实现（与 R 相同引擎：递归 + 定位前缀）。
+
+    所有策略统一：若文档首行带 ``[文档定位] ...``，把它前置到每个 chunk 并重算
+    token 数，让孤立 chunk 向量化时仍带全文主题上下文（低成本版 Contextual Retrieval）。
+    """
+    strategy = (strategy or _CHUNK_STRATEGY_DEFAULT).upper()
+    if strategy not in _CHUNK_STRATEGIES:
+        strategy = _CHUNK_STRATEGY_DEFAULT
+
+    def _apply_locator(chunks: list, locator: str, tokenizer: Any) -> list:
+        if locator:
+            for ch in chunks:
+                ch["content"] = f"{locator}\n{ch['content']}"
+                ch["tokens"] = len(tokenizer.encode(ch["content"]))
+        return chunks
+
+    def _chunking_func(
+        tokenizer: Any,
+        content: str,
+        split_by_character: Optional[str] = None,
+        split_by_character_only: bool = False,
+        chunk_overlap_token_size: int = 80,
+        chunk_token_size: int = 600,
+    ):
+        from lightrag.chunker.recursive_character import chunking_by_recursive_character
+        from lightrag.chunker.token_size import chunking_by_token_size
+
+        locator = _extract_doc_locator(content)
+        body = content.split("\n", 1)[1] if locator else content
+        size = int(chunk_token_size)
+        overlap = int(chunk_overlap_token_size)
+        eff_strat = strategy
+
+        if eff_strat == "F":
+            chunks = chunking_by_token_size(
+                tokenizer, body, split_by_character, split_by_character_only,
+                overlap, size,
+            )
+            return _apply_locator(chunks, locator, tokenizer)
+
+        if eff_strat == "V":
+            try:
+                import langchain_experimental  # noqa: F401  # 探测依赖
+            except ImportError:
+                logging.getLogger(__name__).warning(
+                    "chunking_strategy=V 但未安装 langchain-experimental，回退 R"
+                )
+                eff_strat = "R"
+            else:
+                from lightrag.chunker.semantic_vector import chunking_by_semantic_vector
+
+                async def _v():
+                    raw = await chunking_by_semantic_vector(
+                        tokenizer, body, chunk_token_size=size,
+                        embedding_func=_make_embedding_func(),
+                    )
+                    return _apply_locator(raw, locator, tokenizer)
+
+                return _v()  # pipeline 会 await 该协程
+
+        if eff_strat == "P":
+            from lightrag.chunker.paragraph_semantic import chunking_by_paragraph_semantic
+            chunks = chunking_by_paragraph_semantic(
+                tokenizer, body, chunk_token_size=size,
+                blocks_path=None, chunk_overlap_token_size=overlap,
+            )
+            return _apply_locator(chunks, locator, tokenizer)
+
+        # R / C：递归字符分块 + 定位前缀
+        chunks = chunking_by_recursive_character(
+            tokenizer, body,
+            chunk_token_size=size, chunk_overlap_token_size=overlap,
+            separators=list(_CJK_R_SEPARATORS),
+        )
+        return _apply_locator(chunks, locator, tokenizer)
+
+    _chunking_func.__name__ = f"_chunking_func_{strategy.lower()}"
+    return _chunking_func
+
+
 def set_current_context(thread_id: Optional[str]) -> None:
     """记录当前正在处理的会话（每轮 graph 节点入口调用）。"""
     global _cur_thread
@@ -329,6 +444,7 @@ def build_lightrag_instance(thread_id: str) -> Any:
             "entity_extract_max_gleaning": 1,
             "chunk_token_size": 600,
             "chunk_overlap_token_size": 80,
+            "chunking_func": _make_chunking_func(_CHUNK_STRATEGY_DEFAULT),
             "enable_llm_cache": True,
             "enable_llm_cache_for_entity_extract": True,
             "entity_extraction_use_json": True,
@@ -337,6 +453,9 @@ def build_lightrag_instance(thread_id: str) -> Any:
             kwargs["rerank_model_func"] = rerank
         # 每知识库检索配置覆盖（kb_meta.json 里的 config 段；新建库/默认库读默认值）
         _kb_cfg = (kb_meta(thread_id).get("config") or {})
+        # 分块策略：按知识库配置重建 chunking_func（默认 R）
+        _strat = str(_kb_cfg.get("chunking_strategy") or _CHUNK_STRATEGY_DEFAULT).upper()
+        kwargs["chunking_func"] = _make_chunking_func(_strat)
         if _kb_cfg.get("top_k"):
             kwargs["top_k"] = int(_kb_cfg["top_k"])
         if _kb_cfg.get("chunk_token_size"):
@@ -711,16 +830,29 @@ def kb_search(thread_id: str, query: str, top_k: int = 8) -> dict:
     }
 
 
+def _with_doc_locator(text: str) -> str:
+    """给知识库文档文本加 '[文档定位] ...' 元数据头（供 _chunking_func 逐块前置）。"""
+    summary = text.strip().replace("\n", " ")[:40]
+    return f"{_DOC_LOCATOR_PREFIX} {summary}\n{text}"
+
+
 def kb_ingest(thread_id: str, texts: List[str]) -> dict:
-    """向会话知识库喂入文本（同步，含建图）；返回生成的 doc_id 列表。"""
+    """向会话知识库喂入文本（同步，含建图）；返回生成的 doc_id 列表。
+
+    每条文本自动加上 '[文档定位] <摘要>' 元数据头：_chunking_func 会把该行
+    前置到每个 chunk，让孤立片段向量化时仍保留全文主题上下文。
+    """
     texts = [t for t in (texts or []) if isinstance(t, str) and t.strip()]
     if not texts:
         return {"ok": False, "error": "没有可喂入的文本", "doc_ids": []}
-    doc_ids = [_doc_id_for_text(t) for t in texts]
+    # doc_id 依据加入定位头后的实际 content 计算，与 LightRAG 内部一致
+    prefixed = [_with_doc_locator(t) for t in texts]
+    doc_ids = [_doc_id_for_text(t) for t in prefixed]
     try:
-        lightrag_insert(thread_id, texts)
+        lightrag_insert(thread_id, prefixed)
     except Exception as e:
         return {"ok": False, "error": f"喂入失败: {e}", "doc_ids": []}
+    # label 用原始文本摘要（不带定位头），doc_ids 用加头后的
     _patch_text_doc_paths(thread_id, texts, doc_ids)
     return {"ok": True, "doc_ids": doc_ids}
 
@@ -802,6 +934,7 @@ _KB_DEFAULT_CONFIG = {
     "hybrid": True,             # 混合检索默认开关（检索调试面板默认 mode）
     "chunk_token_size": 600,
     "chunk_overlap_token_size": 80,
+    "chunking_strategy": _CHUNK_STRATEGY_DEFAULT,
     "entity_extract_max_entities": 30,
     "max_entity_tokens": 3000,
     "max_relation_tokens": 5000,

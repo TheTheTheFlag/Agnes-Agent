@@ -68,6 +68,8 @@ class MemoryManager:
                 CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
 
                 -- ====== 长期记忆：固化的事实/偏好（成熟记忆） ======
+                -- 向量直接存本表（embedding/embedding_dim），不再复制到 memory_chunks 冗余表：
+                -- 检索、删除、衰减同表一致，避免"幽灵记忆"（已被遗忘的事实仍被语义检索命中）。
                 CREATE TABLE IF NOT EXISTS memory_facts (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     content TEXT NOT NULL UNIQUE,
@@ -78,23 +80,11 @@ class MemoryManager:
                     access_count INTEGER DEFAULT 0,
                     last_accessed_at TIMESTAMP,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    embedding BLOB,                 -- np.float32 bytes（embedding_dim * 4）
+                    embedding_dim INTEGER DEFAULT 0
                 );
                 CREATE INDEX IF NOT EXISTS idx_memory_facts_importance ON memory_facts(importance);
-
-                -- ====== 语义检索索引：对话块/任务目标/事实的向量副本 ======
-                CREATE TABLE IF NOT EXISTS memory_chunks (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    kind TEXT NOT NULL,             -- conversation | task | fact
-                    thread_id TEXT DEFAULT '',
-                    ref_id INTEGER,
-                    text TEXT NOT NULL,
-                    embedding BLOB,                 -- np.float32 bytes（embedding_dim * 4）
-                    embedding_dim INTEGER DEFAULT 0,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-                CREATE INDEX IF NOT EXISTS idx_memory_chunks_kind ON memory_chunks(kind);
-                CREATE INDEX IF NOT EXISTS idx_memory_chunks_thread ON memory_chunks(thread_id);
             """)
 
             # ---- messages 表结构迁移：旧库补 kind/meta 列（事件气泡持久化用）----
@@ -124,6 +114,76 @@ class MemoryManager:
                     conn.execute("CREATE INDEX IF NOT EXISTS idx_history_summaries_importance ON history_summaries(importance_score)")
                 except Exception:
                     pass
+            except Exception:
+                pass
+
+            # ---- memory_facts 结构迁移：旧库补 embedding/embedding_dim 列 ----
+            try:
+                _mf_cols = {r[1] for r in conn.execute("PRAGMA table_info(memory_facts)").fetchall()}
+                if "embedding" not in _mf_cols:
+                    conn.execute("ALTER TABLE memory_facts ADD COLUMN embedding BLOB")
+                if "embedding_dim" not in _mf_cols:
+                    conn.execute("ALTER TABLE memory_facts ADD COLUMN embedding_dim INTEGER DEFAULT 0")
+            except Exception:
+                pass
+
+            # ---- memory_chunks 冗余索引表合并回权威表后删除 ----
+            # 旧架构把 fact/task 的文本+向量复制进 memory_chunks 做语义检索，导致
+            # 删除/衰减 memory_facts 时不同步清块 → 幽灵记忆。现在向量直接存权威表，
+            # 这里把历史 memory_chunks 数据回填后 DROP（幂等：表不存在则跳过）。
+            try:
+                _has_chunks = any(
+                    r[0].lower() == "memory_chunks"
+                    for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+                )
+                if _has_chunks:
+                    # fact 块 → memory_facts.embedding（按 ref_id 对应）
+                    conn.execute(
+                        """UPDATE memory_facts
+                           SET embedding = (
+                               SELECT mc.embedding FROM memory_chunks mc
+                               WHERE mc.kind = 'fact' AND mc.ref_id = memory_facts.id
+                               ORDER BY mc.id DESC LIMIT 1
+                           ),
+                           embedding_dim = (
+                               SELECT mc.embedding_dim FROM memory_chunks mc
+                               WHERE mc.kind = 'fact' AND mc.ref_id = memory_facts.id
+                               ORDER BY mc.id DESC LIMIT 1
+                           )
+                           WHERE EXISTS (
+                               SELECT 1 FROM memory_chunks mc
+                               WHERE mc.kind = 'fact' AND mc.ref_id = memory_facts.id
+                               AND mc.embedding IS NOT NULL
+                           )"""
+                    )
+                    # task 块 → dag_plans.embedding（按 ref_id 对应）
+                    try:
+                        _dp_cols = {r[1] for r in conn.execute("PRAGMA table_info(dag_plans)").fetchall()}
+                        if "embedding" not in _dp_cols:
+                            conn.execute("ALTER TABLE dag_plans ADD COLUMN embedding BLOB")
+                        if "embedding_dim" not in _dp_cols:
+                            conn.execute("ALTER TABLE dag_plans ADD COLUMN embedding_dim INTEGER DEFAULT 0")
+                        conn.execute(
+                            """UPDATE dag_plans
+                               SET embedding = (
+                                   SELECT mc.embedding FROM memory_chunks mc
+                                   WHERE mc.kind = 'task' AND mc.ref_id = dag_plans.id
+                                   ORDER BY mc.id DESC LIMIT 1
+                               ),
+                               embedding_dim = (
+                                   SELECT mc.embedding_dim FROM memory_chunks mc
+                                   WHERE mc.kind = 'task' AND mc.ref_id = dag_plans.id
+                                   ORDER BY mc.id DESC LIMIT 1
+                               )
+                               WHERE EXISTS (
+                                   SELECT 1 FROM memory_chunks mc
+                                   WHERE mc.kind = 'task' AND mc.ref_id = dag_plans.id
+                                   AND mc.embedding IS NOT NULL
+                               )"""
+                        )
+                    except Exception:
+                        pass
+                    conn.execute("DROP TABLE memory_chunks")
             except Exception:
                 pass
 
@@ -745,50 +805,67 @@ class MemoryManager:
             conn.commit()
         return {"decayed": decayed, "deleted": deleted}
 
-    def add_memory_chunk(self, kind: str, thread_id: str, text: str,
-                         ref_id: int = None, embedding: bytes = None,
-                         embedding_dim: int = 0) -> int:
-        """插入一条语义检索块（对话/任务/事实）。embedding 可后补（先插文本再回填向量）。"""
-        with sqlite3.connect(self.db_path) as conn:
-            cur = conn.execute(
-                """INSERT INTO memory_chunks (kind, thread_id, ref_id, text, embedding, embedding_dim)
-                   VALUES (?,?,?,?,?,?)""",
-                (kind, thread_id or "", ref_id, text, embedding, embedding_dim)
-            )
-            return cur.lastrowid
-
-    def update_chunk_embedding(self, chunk_id: int, embedding: bytes, embedding_dim: int) -> None:
+    def set_fact_embedding(self, fact_id: int, embedding: bytes, embedding_dim: int) -> None:
+        """把向量写入 memory_facts（向量直接存权威表，不再复制到 memory_chunks）。"""
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
-                "UPDATE memory_chunks SET embedding = ?, embedding_dim = ? WHERE id = ?",
-                (embedding, embedding_dim, chunk_id)
+                "UPDATE memory_facts SET embedding = ?, embedding_dim = ? WHERE id = ?",
+                (embedding, embedding_dim, fact_id)
+            )
+
+    def set_plan_embedding(self, plan_id: int, embedding: bytes, embedding_dim: int) -> None:
+        """把向量写入 dag_plans（任务目标向量直接存权威表）。"""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE dag_plans SET embedding = ?, embedding_dim = ? WHERE id = ?",
+                (embedding, embedding_dim, plan_id)
             )
 
     def get_embedding_chunks(self, kinds: tuple = None, thread_id: str = None,
                              limit: int = 2000) -> List[Dict]:
-        """读取带向量的检索块（embedding IS NOT NULL）。kinds 过滤如 ('conversation','task')。"""
-        sql = "SELECT id, kind, thread_id, ref_id, text, embedding, embedding_dim FROM memory_chunks WHERE embedding IS NOT NULL"
-        params: list = []
-        if kinds:
-            placeholders = ",".join("?" for _ in kinds)
-            sql += f" AND kind IN ({placeholders})"
-            params.extend(kinds)
-        if thread_id:
-            sql += " AND thread_id = ?"
-            params.append(thread_id)
-        sql += " ORDER BY id DESC LIMIT ?"
-        params.append(limit)
+        """读取带向量的检索记录（来自权威表，kind 过滤如 ('fact','task')）。
+
+        向量的权威来源已在 memory_facts.embedding / dag_plans.embedding，
+        memory_chunks 冗余表已废弃删除。返回维度与旧索引块一致，调用方无需改动。
+        """
+        albums: List[Dict] = []
+        if kinds is None:
+            kinds = ("fact", "task")
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
-            rows = conn.execute(sql, params).fetchall()
-        albums = []
-        for r in rows:
-            emb = r["embedding"]
-            albums.append({
-                "id": r["id"], "kind": r["kind"], "thread_id": r["thread_id"],
-                "ref_id": r["ref_id"], "text": r["text"],
-                "vector": emb, "dim": r["embedding_dim"],
-            })
+            if "fact" in kinds:
+                sql = """SELECT id AS ref_id, thread_id, content AS text, embedding, embedding_dim
+                         FROM memory_facts WHERE embedding IS NOT NULL"""
+                params: list = []
+                if thread_id:
+                    sql += " AND thread_id = ?"
+                    params.append(thread_id)
+                sql += " ORDER BY id DESC LIMIT ?"
+                params.append(limit)
+                for r in conn.execute(sql, params).fetchall():
+                    albums.append({
+                        "id": r["ref_id"], "kind": "fact", "thread_id": r["thread_id"],
+                        "ref_id": r["ref_id"], "text": r["text"],
+                        "vector": r["embedding"], "dim": r["embedding_dim"],
+                    })
+            if "task" in kinds:
+                try:
+                    sql = """SELECT id AS ref_id, thread_id, goal AS text, embedding, embedding_dim
+                             FROM dag_plans WHERE embedding IS NOT NULL"""
+                    params = []
+                    if thread_id:
+                        sql += " AND thread_id = ?"
+                        params.append(thread_id)
+                    sql += " ORDER BY id DESC LIMIT ?"
+                    params.append(limit)
+                    for r in conn.execute(sql, params).fetchall():
+                        albums.append({
+                            "id": r["ref_id"], "kind": "task", "thread_id": r["thread_id"],
+                            "ref_id": r["ref_id"], "text": r["text"],
+                            "vector": r["embedding"], "dim": r["embedding_dim"],
+                        })
+                except Exception:
+                    pass
         return albums
 
     # ----- 分层注入 prompt 的聚合方法 -----

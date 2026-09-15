@@ -4,6 +4,7 @@ import uuid
 import sys
 import os
 import time
+import traceback
 from app.server import start_debug_server, add_log_entry, set_graph, load_model_config
 from app.server.console_log import install_console_logger
 
@@ -45,14 +46,27 @@ def main():
     debug_thread = start_debug_server(host="0.0.0.0", port=8081)
     add_log_entry("info", "Agent 启动")
 
-    graph = build_graph()
-    # 沿用上次的 thread_id；传 --new 则开新会话
-    config = {"configurable": {"thread_id": get_or_create_thread_id()}}
-    # 把 graph 实例注入到 debug_server，使前端 /api/chat 能直接对话
-    set_graph(graph, config)
-    print(f"[thread_id] {config['configurable']['thread_id']}")
-    if "--new" in sys.argv:
-        print("[new session] 已开启新会话，旧 thread 仍保留在 SQLite 中（可手工查看）")
+    try:
+        graph = build_graph()
+        # 沿用上次的 thread_id；传 --new 则开新会话
+        config = {"configurable": {"thread_id": get_or_create_thread_id()}}
+        # 把 graph 实例注入到 debug_server，使前端 /api/chat 能直接对话
+        set_graph(graph, config)
+        print(f"[thread_id] {config['configurable']['thread_id']}")
+        if "--new" in sys.argv:
+            print("[new session] 已开启新会话，旧 thread 仍保留在 SQLite 中（可手工查看）")
+    except Exception as e:
+        # 启动阶段失败（如 LLM 构建/模型配置错误）：不静默崩溃，
+        # 落库日志 + 终端打印完整 traceback，便于定位后退出。
+        msg = f"Agent 启动失败: {e}"
+        print("[startup error]", msg)
+        print(traceback.format_exc())
+        try:
+            add_log_entry("error", msg)
+            add_log_entry("error", traceback.format_exc())
+        except Exception:
+            pass
+        return
 
     # 控制台日志：把节点/LLM/工具/规划/任务等事件以彩色一行实时打印（取代旧的终端对话循环）。
     installed = install_console_logger()

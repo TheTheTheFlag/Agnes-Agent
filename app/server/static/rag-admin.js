@@ -560,6 +560,18 @@ async function ragConfig(content, tid, body) {
       <div class="rg-cfg-card">
         <div class="rg-cfg-hd">分块参数</div>
         <div class="rg-cfg-row">
+          <label>分块策略</label>
+          <select class="d-input" id="rgCst">
+            ${[
+              ["R", "R 递归字符分块（推荐）"],
+              ["F", "F 固定 Token 窗口"],
+              ["V", "V 语义向量分块（需 langchain-experimental）"],
+              ["P", "P 段落语义分块（需文档结构）"],
+              ["C", "C 自定义（递归 + 定位前缀）"],
+            ].map(([v, l]) => `<option value="${v}" ${(c.chunking_strategy ?? "R") === v ? "selected" : ""}>${l}</option>`).join("")}
+          </select>
+        </div>
+        <div class="rg-cfg-row">
           <label>分块大小（tokens）</label>
           <input class="d-input" id="rgCcs" type="number" min="100" max="2000" value="${c.chunk_token_size ?? 600}">
         </div>
@@ -594,7 +606,7 @@ async function ragConfig(content, tid, body) {
     try {
       const r2 = await apiPost("/api/kb/config", { thread_id: tid, config: {
         top_k: num("#rgCtk"), threshold: num("#rgCth"), rerank: $("#rgCrr", body).checked,
-        hybrid: $("#rgChy", body).checked, chunk_token_size: num("#rgCcs"),
+        hybrid: $("#rgChy", body).checked, chunking_strategy: $("#rgCst", body).value, chunk_token_size: num("#rgCcs"),
         chunk_overlap_token_size: num("#rgCco"), entity_extract_max_entities: num("#rgCem"),
         max_entity_tokens: num("#rgCet"), max_relation_tokens: num("#rgCrt"),
       }});

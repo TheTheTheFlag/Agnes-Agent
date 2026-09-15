@@ -71,7 +71,9 @@ class DAGStorage:
                     status TEXT NOT NULL,               -- planning / executing / completed / failed / deleted
                     checkpoint TEXT,                    -- json: {"nodes":{...}}
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    embedding BLOB,                     -- goal 的向量（语义检索，原 memory_chunks 合并回）
+                    embedding_dim INTEGER DEFAULT 0
                 );
                 CREATE INDEX IF NOT EXISTS idx_dag_plans_thread ON dag_plans(thread_id);
 
@@ -118,6 +120,17 @@ class DAGStorage:
             except Exception:
                 pass
 
+            # ---- dag_plans 结构迁移：旧库补 embedding / embedding_dim 列 ----
+            # （向量由原 memory_chunks 表合并回，见 memory_manager 迁移）
+            try:
+                _dp_cols = {r[1] for r in conn.execute("PRAGMA table_info(dag_plans)").fetchall()}
+                if "embedding" not in _dp_cols:
+                    conn.execute("ALTER TABLE dag_plans ADD COLUMN embedding BLOB")
+                if "embedding_dim" not in _dp_cols:
+                    conn.execute("ALTER TABLE dag_plans ADD COLUMN embedding_dim INTEGER DEFAULT 0")
+            except Exception:
+                pass
+
     # ---------------- plan ----------------
     def create_plan(self, thread_id: str, goal: str) -> int:
         # goal 可能来自 planner 的模型输出（偶发写成 list），同样归一后再入库
@@ -144,6 +157,14 @@ class DAGStorage:
             )
             row = conn.execute("SELECT replan_count FROM dag_plans WHERE id = ?", (plan_id,)).fetchone()
             return row[0] if row else 0
+
+    def set_plan_embedding(self, plan_id: int, embedding: bytes, embedding_dim: int) -> None:
+        """把任务目标的向量写入 dag_plans（供语义检索，原 memory_chunks 已合并回）。"""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE dag_plans SET embedding = ?, embedding_dim = ?, updated_at = ? WHERE id = ?",
+                (embedding, embedding_dim, _now(), plan_id),
+            )
 
     def get_plan(self, plan_id: int) -> Optional[Dict]:
         with sqlite3.connect(self.db_path) as conn:

@@ -55,6 +55,73 @@ class MetaConfigTest(_TempBase):
         # 写盘后重新读
         self.assertEqual(L.kb_get_config(tid)["top_k"], 5)
 
+    def test_chunking_strategy_default_and_accept(self):
+        # 默认是 R
+        self.assertEqual(L.kb_get_config("nonexist")["chunking_strategy"], "R")
+        out = L.kb_set_config("tid1", {"chunking_strategy": "F"})
+        self.assertEqual(L.kb_get_config("tid1")["chunking_strategy"], "F")
+        # 非法值被过滤（不在策略列表里，但 kb_set_config 仍可用任意值；实例构建时兜底 R）
+        out2 = L.kb_set_config("tid1", {"chunking_strategy": "X"})
+        self.assertEqual(out2["chunking_strategy"], "X")
+        # 构建实例时非法策略回退 R
+        fn = L._make_chunking_func("X")
+        self.assertEqual(fn.__name__, "_chunking_func_r")
+
+
+class ChunkingStrategyTest(_TempBase):
+    """分块策略工厂：F/R/V/P/C 的返回与兜底。"""
+
+    def _tok(self):
+        import tiktoken
+        class _T:
+            def __init__(self):
+                self._e = tiktoken.get_encoding("cl100k_base")
+            def encode(self, s):
+                return self._e.encode(s)
+            def decode(self, tks):
+                return self._e.decode(tks)
+        return _T()
+
+    def test_factory_names(self):
+        for s in "FRVPC":
+            fn = L._make_chunking_func(s)
+            self.assertEqual(fn.__name__, f"_chunking_func_{s.lower()}")
+
+    def test_r_f_p_return_structured(self):
+        tok = self._tok()
+        text = ("氢动力拖拉机在 2026 年立项，由 Helios Agro 主导设计。\n"
+                "CoelhoBot 每小时耕作 12 亩，减少 63% 碳排放。\n" * 20)
+        for s in ("F", "R", "P", "C"):
+            fn = L._make_chunking_func(s)
+            chunks = fn(tok, text, None, False, 80, 600)
+            self.assertIsInstance(chunks, list)
+            self.assertGreater(len(chunks), 0)
+            for c in chunks:
+                self.assertIn("content", c)
+                self.assertIn("tokens", c)
+                self.assertGreater(c["tokens"], 0)
+
+    def test_locator_prefix_all(self):
+        tok = self._tok()
+        text = "CoelhoBot 拖拉机每小时可耕作 12 亩土地。\n" * 30
+        pref = L._with_doc_locator(text)
+        for s in ("F", "R", "P", "C"):
+            fn = L._make_chunking_func(s)
+            chunks = fn(tok, pref, None, False, 80, 600)
+            self.assertTrue(any(c["content"].startswith("[文档定位]") for c in chunks),
+                            f"{s} 应保留定位前缀")
+            self.assertGreaterEqual(len(chunks), 1)
+
+    def test_v_falls_back_to_r(self):
+        tok = self._tok()
+        fn = L._make_chunking_func("V")
+        import asyncio
+        res = fn(tok, "x" * 4000, None, False, 80, 600)
+        if asyncio.iscoroutine(res):
+            self.skipTest("环境装了 langchain-experimental，V 分支已启用")
+        self.assertIsInstance(res, list)
+        self.assertGreater(len(res), 0)
+
 
 class CreateTest(_TempBase):
     def test_create_makes_dir_meta(self):

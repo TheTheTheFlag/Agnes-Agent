@@ -1,15 +1,18 @@
 """app.memory.memory_engine — 长期记忆引擎（记忆固化 / 冲突检测 / 语义检索 / 遗忘衰减）。
 
-对标 Mem0 / Zep 的四个能力，全部落地到 memory_facts + memory_chunks 两张表：
+对标 Mem0 / Zep 的四个能力，落地到 memory_facts + dag_plans 两张权威表
+（memory_chunks 冗余索引表已合并回权威表删除，向量直接存 memory_facts.embedding /
+dag_plans.embedding）：
 
   1. 记忆固化（consolidation）：对话结束后，后台异步把值得长期记住的用户事实/偏好
      提取成"成熟记忆"写入 memory_facts，高 importance 的自动注入 system prompt。
   2. 冲突检测与更新：抽取时把新记忆与既有记忆一起交给 LLM，产出 create/update/delete。
-  3. 统一语义检索 + 重排：对话、任务、事实统一向量化（复用 SiliconFlow embedding），
+  3. 统一语义检索 + 重排：事实、任务统一向量化（复用 SiliconFlow embedding），
      查询时余弦召回 top-N，再走 rerank 精排（复用 SiliconFlow rerank）；embedding/rerank
      不可用时自动降级为 SQL LIKE。
-  4. 遗忘与衰减：importance 随时间指数衰减，跌破阈值的记忆被主动遗忘；近期被反复
-     访问的记忆升温不衰减。由 server 启动的 daemon 线程周期驱动。
+  4. 遗忘与衰减：importance 随时间指数衰减，跌破阈值的记忆被主动遗忘（向量同表，
+     删除即失效，不再残留"幽灵记忆"）；近期被反复访问的记忆升温不衰减。
+     由 server 启动的 daemon 线程周期驱动。
 
 所有环节失败静默降级，不阻塞对话主流程。
 """
@@ -107,9 +110,10 @@ def _embed_bytes_vec(embedding: bytes, dim: int) -> Optional[np.ndarray]:
 
 def index_texts(kind: str, thread_id: str, texts: List[str],
                 ref_id: int = None) -> int:
-    """把文本向量化并写入 memory_chunks（kind=conversation/task/fact）。返回写入条数。
+    """把文本向量化并写入权威表（kind=fact → memory_facts.embedding；kind=task → dag_plans.embedding）。
 
-    已有完全相同文本的块跳过（按 thread + text 去重）。
+    不再向 memory_chunks 复制索引块：向量直接存在事实/计划行里，删除/衰减同表生效。
+    返回写入条数。已有完全相同文本的块跳过（按 thread + text 去重）。
     """
     from app.memory import MemoryManager
     from app.config import DB_PATH
@@ -121,17 +125,34 @@ def index_texts(kind: str, thread_id: str, texts: List[str],
     if vecs is None:
         return 0
     written = 0
-    for t, vec in zip(texts, vecs):
-        if not vec:
-            continue
-        dup = mm.get_embedding_chunks(kinds=(kind,), thread_id=thread_id, limit=100000)
-        if any(c["text"] == t for c in dup):
-            continue
-        blob = np.asarray(vec, dtype=np.float32).tobytes()
-        cid = mm.add_memory_chunk(kind, thread_id, t, ref_id=ref_id)
-        mm.update_chunk_embedding(cid, blob, len(vec))
-        written += 1
-    return written
+    if kind == "fact":
+        for t, vec in zip(texts, vecs):
+            if not vec:
+                continue
+            # 事实主键即该行 id（ref_id 未传时按内容回查，容错）
+            fid = ref_id
+            if not fid:
+                row = mm.get_memory_facts(limit=100000)
+                hit = [f["id"] for f in row if f["content"] == t]
+                fid = hit[0] if hit else None
+            if not fid:
+                continue
+            blob = np.asarray(vec, dtype=np.float32).tobytes()
+            mm.set_fact_embedding(fid, blob, len(vec))
+            written += 1
+        return written
+    if kind == "task":
+        from app.planning.dag_storage import DAGStorage
+        dag = DAGStorage(DB_PATH)
+        for t, vec in zip(texts, vecs):
+            if not vec or not ref_id:
+                continue
+            blob = np.asarray(vec, dtype=np.float32).tobytes()
+            dag.set_plan_embedding(int(ref_id), blob, len(vec))
+            written += 1
+        return written
+    logger.warning(f"index_texts 收到未知 kind={kind}，已忽略（conversation 已移交 L6 图谱）")
+    return 0
 
 
 def search_semantic(query: str, limit: int = 5, thread_id: str = None,
