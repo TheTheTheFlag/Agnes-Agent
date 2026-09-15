@@ -1,8 +1,8 @@
 """app.service — 服务模式入口（HTTP 常驻服务 + 代码热重载）。
 
-与 console 模式（python -m app.main）的区别：
+与 app.main（python -m app.main）同为纯后台服务：
   - 没有终端交互循环，Agent 完全通过 HTTP 驱动（调试面板 /api/chat、/api/scheduler 等）；
-  - 端口固定，被占用直接报错（不再自动顺延）；
+  - 端口固定，被占用直接报错（app.main 会自动顺延）；
   - 修改 app/ 下的 .py 文件后自动重建 graph 并重启（热重载），无需手动重启进程。
 
 用法：
@@ -79,6 +79,9 @@ def inject_graph() -> dict:
 
 @asynccontextmanager
 async def lifespan(_app):
+    # 控制台日志：节点/LLM/工具/规划/任务等事件以彩色一行实时打印
+    from app.server.console_log import install_console_logger
+    install_console_logger()
     config = inject_graph()
     tid = config["configurable"]["thread_id"]
     add_log_entry("info", f"Service 启动 (thread_id={tid}, hot_reload={_HOT_RELOAD})")

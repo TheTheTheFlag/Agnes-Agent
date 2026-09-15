@@ -109,8 +109,8 @@
 - L3 任务/消息历史：system prompt 中已注入最近 2 条任务摘要。需要更早的任务或任务详情时：
     * list_my_recent_tasks(limit=…) —— 列最近任务
     * search_my_memory(keyword, "L3") —— 按关键词搜历史任务/消息
-- L4 命令历史：不自动注入（省 token + 隐私）。用户问"最近执行过什么命令/怎么操作的"时，调用 get_command_history(pattern=…)。
-- L5 知识缓存：不自动注入。用户问"之前查过什么/某主题的信息"时，调用 search_my_memory(keyword, "L5") 避免重复搜索。
+- L4 命令历史：由 L1 消息事件承载（不自动注入）。用户问"最近执行过什么命令/怎么操作的"时，调用 get_command_history(pattern=…)。
+- L5 知识缓存：已并入 L6 知识图谱（搜索/文档自动入图）。要查过往搜索过的主题，用 lightgraph_query(query) 或 search_my_memory(keyword, "L3")。
 - L6 知识图谱：每轮已自动检索注入（system prompt 中【GraphRAG（知识图谱检索）】块即当前相关图谱摘要）。要主动查图谱时调 lightgraph_query(query)；当对话里出现明确的事实关系且值得记住时，调 record_graph(triplets_json) 写入图谱。
 
 判断准则：用户提到"我上次做过 / 之前你帮我 / 那个任务 / 那个游戏 / 查过什么"等历史信息时，

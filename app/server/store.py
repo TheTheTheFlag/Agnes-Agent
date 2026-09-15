@@ -58,7 +58,7 @@ _init_persist()
 def delete_thread_records(thread_id: str) -> dict:
     """删除某 thread 的所有数据（memory.db + checkpoints.db）。
     供 /delete 命令与批量删除接口（POST /api/threads/delete）共用。"""
-    counts = {"messages": 0, "summaries": 0, "commands": 0, "cache": 0, "checkpoints": 0}
+    counts = {"messages": 0, "summaries": 0, "commands": 0, "checkpoints": 0}
 
     # memory.db
     db = _sqlite.connect(DB_PATH)
@@ -67,8 +67,6 @@ def delete_thread_records(thread_id: str) -> dict:
         counts["messages"] += cur.rowcount
         cur = db.execute("DELETE FROM history_summaries WHERE thread_id = ?", (thread_id,))
         counts["summaries"] += cur.rowcount
-        cur = db.execute("DELETE FROM command_history WHERE thread_id = ?", (thread_id,))
-        counts["commands"] += cur.rowcount
         db.commit()
     finally:
         db.close()

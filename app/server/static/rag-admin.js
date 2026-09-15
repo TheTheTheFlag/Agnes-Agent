@@ -309,7 +309,7 @@ async function ragDocs(content, tid, body) {
         <input type="file" id="rgFile1" style="display:none" accept=".txt,.md,.json,.csv,.html,.pdf,.docx,.pptx,.xlsx,.xls,.epub,.ipynb">
         <input type="file" id="rgFileN" style="display:none" multiple accept=".txt,.md,.json,.csv,.html,.pdf,.docx,.pptx,.xlsx,.xls,.epub,.ipynb">
       </div>
-      <textarea class="d-input" id="rgFeedText" rows="2" placeholder="或直接粘贴文本喂入（自动分块 + 抽取实体关系建图）…"></textarea>
+      <textarea class="d-input" id="rgFeedText" rows="6" placeholder="或直接粘贴文本喂入（自动分块 + 抽取实体关系建图）…"></textarea>
       <div class="rg-toolbar"><button class="d-btn primary" id="rgFeed">＋ 喂入文本</button>
         <div class="d-empty" id="rgBusy" style="display:none">⏳ 正在解析/嵌入/建图（可能 10-60 秒）…</div></div>
       ${docs.length ? `
@@ -536,22 +536,58 @@ async function ragChunks(content, tid, body) {
 async function ragConfig(content, tid, body) {
   const r = await apiGet(`/api/kb/config?thread_id=${encodeURIComponent(tid)}`);
   const c = r.config || {};
-  body.innerHTML = drawerSection("检索参数配置", `
-    <form id="rgConfigForm" style="display:flex;flex-direction:column;gap:10px;max-width:420px">
-      <div class="d-row"><label>Top-K 召回</label><input class="d-input" id="rgCtk" type="number" min="1" max="50" value="${c.top_k ?? 12}"></div>
-      <div class="d-row"><label>相似度阈值</label><input class="d-input" id="rgCth" type="number" step="0.05" min="0" max="1" value="${c.threshold ?? 0.2}"></div>
-      <div class="d-row"><label>向量重排</label><label class="rg-switch"><input type="checkbox" id="rgCrr" ${c.rerank === false ? "" : "checked"}><i></i>Rerank 模型二次排序</label></div>
-      <div class="d-row"><label>混合检索</label><label class="rg-switch"><input type="checkbox" id="rgChy" ${c.hybrid ? "checked" : ""}><i></i>关键词+向量混合（默认检索模式）</label></div>
-      <div class="d-row"><label>分块大小</label><input class="d-input" id="rgCcs" type="number" min="100" max="2000" value="${c.chunk_token_size ?? 600}"></div>
-      <div class="d-row"><label>分块重叠</label><input class="d-input" id="rgCco" type="number" min="0" max="400" value="${c.chunk_overlap_token_size ?? 80}"></div>
-      <div class="d-row"><label>最大实体数</label><input class="d-input" id="rgCem" type="number" min="1" max="100" value="${c.entity_extract_max_entities ?? 30}"></div>
-      <div class="d-row"><label>实体 Token</label><input class="d-input" id="rgCet" type="number" min="200" value="${c.max_entity_tokens ?? 3000}"></div>
-      <div class="d-row"><label>关系 Token</label><input class="d-input" id="rgCrt" type="number" min="200" value="${c.max_relation_tokens ?? 5000}"></div>
-      <div class="d-row" style="gap:8px">
-        <button class="d-btn" type="submit">保存</button>
-        <span class="d-empty">保存后重新构建实例生效；Top-K/阈值/模式亦为「检索调试」面板默认值。</span>
+  body.innerHTML = `
+    <form id="rgConfigForm" style="display:flex;flex-direction:column;gap:16px;max-width:560px">
+      <div class="rg-cfg-card">
+        <div class="rg-cfg-hd">检索参数</div>
+        <div class="rg-cfg-row">
+          <label>Top-K 召回数</label>
+          <input class="d-input" id="rgCtk" type="number" min="1" max="50" value="${c.top_k ?? 12}">
+        </div>
+        <div class="rg-cfg-row">
+          <label>相似度阈值</label>
+          <input class="d-input" id="rgCth" type="number" step="0.05" min="0" max="1" value="${c.threshold ?? 0.2}">
+        </div>
+        <div class="rg-cfg-row">
+          <label>向量重排</label>
+          <label class="rg-switch"><input type="checkbox" id="rgCrr" ${c.rerank === false ? "" : "checked"}><i></i>Rerank 模型二次排序</label>
+        </div>
+        <div class="rg-cfg-row">
+          <label>混合检索</label>
+          <label class="rg-switch"><input type="checkbox" id="rgChy" ${c.hybrid ? "checked" : ""}><i></i>关键词 + 向量混合（默认检索模式）</label>
+        </div>
       </div>
-    </form>`);
+      <div class="rg-cfg-card">
+        <div class="rg-cfg-hd">分块参数</div>
+        <div class="rg-cfg-row">
+          <label>分块大小（tokens）</label>
+          <input class="d-input" id="rgCcs" type="number" min="100" max="2000" value="${c.chunk_token_size ?? 600}">
+        </div>
+        <div class="rg-cfg-row">
+          <label>分块重叠</label>
+          <input class="d-input" id="rgCco" type="number" min="0" max="400" value="${c.chunk_overlap_token_size ?? 80}">
+        </div>
+      </div>
+      <div class="rg-cfg-card">
+        <div class="rg-cfg-hd">实体抽取</div>
+        <div class="rg-cfg-row">
+          <label>最大实体数</label>
+          <input class="d-input" id="rgCem" type="number" min="1" max="100" value="${c.entity_extract_max_entities ?? 30}">
+        </div>
+        <div class="rg-cfg-row">
+          <label>实体 Token 上限</label>
+          <input class="d-input" id="rgCet" type="number" min="200" value="${c.max_entity_tokens ?? 3000}">
+        </div>
+        <div class="rg-cfg-row">
+          <label>关系 Token 上限</label>
+          <input class="d-input" id="rgCrt" type="number" min="200" value="${c.max_relation_tokens ?? 5000}">
+        </div>
+      </div>
+      <div class="d-row" style="gap:8px">
+        <button class="d-btn primary" type="submit">保存配置</button>
+        <span class="d-empty">保存后重新构建实例生效；Top-K / 阈值 / 模式亦为检索调试面板默认值。</span>
+      </div>
+    </form>`;
   $("#rgConfigForm", body).addEventListener("submit", async (e) => {
     e.preventDefault();
     const num = (id) => Number($(id, body).value || 0);
@@ -563,7 +599,7 @@ async function ragConfig(content, tid, body) {
         max_entity_tokens: num("#rgCet"), max_relation_tokens: num("#rgCrt"),
       }});
       if (!r2.config) throw new Error("保存失败");
-      toast("配置已保存（应用于本次会话的检索与调试面板）", "success");
+      toast("配置已保存", "success");
     } catch (err) { toast("保存失败: " + err.message, "error"); }
   });
 }
@@ -572,87 +608,67 @@ async function ragConfig(content, tid, body) {
 
 async function ragTest(content, tid, body) {
   const cfg = (await apiGet(`/api/kb/config?thread_id=${encodeURIComponent(tid)}`)).config || {};
-  body.innerHTML = drawerSection("检索调试面板", `
-    <div class="d-empty" style="padding-bottom:6px">临时参数仅本次生效，不改全局配置。支持「仅检索」与「完整问答」两条链路。</div>
-    <textarea class="d-input" id="rgTq" rows="2" placeholder="输入要测试的查询问题…"></textarea>
-    <div class="d-row" style="flex-wrap:wrap;gap:8px;margin-top:8px">
-      <label class="rg-switch"><input type="checkbox" id="rgTrr" ${cfg.rerank === false ? "" : "checked"}><i></i>重排(全局)</label>
-      <label class="rg-switch"><input type="checkbox" id="rgThy" ${cfg.hybrid ? "checked" : ""}><i></i>混合检索</label>
-      <label>Top-K <input class="d-input" id="rgTtk" type="number" min="1" max="30" value="${cfg.top_k || 8}"></label>
-      <label>阈值 <input class="d-input" id="rgTth" type="number" step="0.05" min="0" max="1" value="${cfg.threshold || 0.2}"></label>
-    </div>
-    <div class="d-row" style="gap:8px;margin-top:8px">
-      <button class="d-btn" id="rgTSearch">🔍 仅检索</button>
-      <button class="d-btn" id="rgTQA">💬 完整问答</button>
-      <span class="d-empty" id="rgTBusy" style="display:none">⏳ 执行中…</span>
-    </div>
-    <div id="rgTRes" style="margin-top:8px"></div>`);
+  body.innerHTML = `
+    <div style="max-width:560px">
+      <div class="rg-cfg-card" style="margin-bottom:12px">
+        <div class="rg-cfg-hd">向量检索</div>
+        <textarea class="d-input" id="rgTq" rows="3" placeholder="输入查询，查看向量召回的切片 / 实体 / 关系…"></textarea>
+        <div class="rg-cfg-row" style="margin-top:8px">
+          <label>Top-K</label>
+          <input class="d-input" id="rgTtk" type="number" min="1" max="30" value="${cfg.top_k || 8}" style="width:80px">
+        </div>
+        <div class="rg-cfg-row">
+          <label>阈值</label>
+          <input class="d-input" id="rgTth" type="number" step="0.05" min="0" max="1" value="${cfg.threshold || 0.2}" style="width:80px">
+        </div>
+        <div class="d-row" style="gap:8px;margin-top:10px">
+          <button class="d-btn primary" id="rgTSearch">检索</button>
+          <span class="d-empty" id="rgTBusy" style="display:none">检索中…</span>
+        </div>
+      </div>
+      <div id="rgTRes"></div>
+    </div>`;
 
   const params = () => ({
     q: $("#rgTq", body).value.trim(),
     top_k: Number($("#rgTtk", body).value || 8),
     threshold: Number($("#rgTth", body).value || 0),
-    hybrid: $("#rgThy", body).checked,
-    rerank: $("#rgTrr", body).checked,
   });
 
   const renderHits = (hits, title) => {
     if (!hits || !hits.length) return "";
-    let h = `<div class="kc-title" style="margin:8px 0 4px">${escapeHtml(title)}（${hits.length}）</div>`;
+    let h = `<div class="rg-result-group"><div class="rg-result-title">${escapeHtml(title)}<span class="rg-result-count">${hits.length}</span></div>`;
     h += hits.map((x) => `
-      <div class="kc-hit"><span class="kc-score">${Number(x.score).toFixed(3)}</span>
-        <code class="rg-code">${escapeHtml(x.id || "")}</code> ${escapeHtml(truncate(x.content, 160))}</div>`).join("");
+      <div class="rg-hit-card">
+        <div class="rg-hit-top"><span class="rg-hit-score">${Number(x.score).toFixed(3)}</span><code class="rg-code">${escapeHtml(x.id || "")}</code></div>
+        <div class="rg-hit-body">${escapeHtml(truncate(x.content, 200))}</div>
+      </div>`).join("");
+    h += `</div>`;
     return h;
   };
 
-  const busy = (on, msg) => { const b = $("#rgTBusy", body); if (b) { b.textContent = msg || "⏳ 执行中…"; b.style.display = on ? "" : "none"; } };
+  const busy = (on) => { const b = $("#rgTBusy", body); if (b) b.style.display = on ? "" : "none"; };
 
   $("#rgTSearch", body).addEventListener("click", async () => {
     const p = params();
-    if (!p.q) { toast("请先输入问题", "error"); return; }
-    busy(true, "⏳ 召回中…");
+    if (!p.q) { toast("请输入查询", "error"); return; }
+    busy(true);
     try {
       const r = await apiGet(`/api/kb/search?${new URLSearchParams({ thread_id: tid, q: p.q, top_k: p.top_k })}`);
       const vh = r.vector_hits || {};
       const out = [];
       const threshold = p.threshold;
       const filter = (arr) => (arr || []).filter((x) => !threshold || Number(x.score) >= threshold);
-      out.push(`<div class="d-row" style="gap:8px;flex-wrap:wrap">${ragCard("召回 Top-K", p.top_k)}${ragCard("阈值过滤", threshold)}</div>`);
-      out.push(renderHits(filter(vh.chunks), "向量 ~ 切片"));
-      out.push(renderHits(filter(vh.entities), "向量 ~ 实体"));
-      out.push(renderHits(filter(vh.relations), "向量 ~ 关系"));
-      if (!out.some((s) => s.includes("kc-hit"))) out.push(`<div class="d-empty">无高于阈值 ${threshold} 的命中。（若刚切换向量后端，需先对文档「重建」才能命中）</div>`);
+      const fc = filter(vh.chunks);
+      const fe = filter(vh.entities);
+      const fr = filter(vh.relations);
+      if (!fc.length && !fe.length && !fr.length) {
+        out.push(`<div class="d-empty" style="margin-top:12px">无高于阈值 ${threshold} 的命中。</div>`);
+      }
+      out.push(renderHits(fc, "切片"));
+      out.push(renderHits(fe, "实体"));
+      out.push(renderHits(fr, "关系"));
       $("#rgTRes", body).innerHTML = out.join("");
-    } catch (e) { $("#rgTRes", body).innerHTML = drawerErr(e); }
-    busy(false);
-  });
-
-  $("#rgTQA", body).addEventListener("click", async () => {
-    const p = params();
-    if (!p.q) { toast("请先输入问题", "error"); return; }
-    busy(true, "⏳ 全链路执行中（检索→排序→生成）…");
-    try {
-      const mode = p.hybrid ? "hybrid" : "local";
-      const [ans, sr] = await Promise.all([
-        apiPost("/api/kb/answer", { thread_id: tid, q: p.q, top_k: p.top_k, mode }),
-        apiGet(`/api/kb/search?${new URLSearchParams({ thread_id: tid, q: p.q, top_k: p.top_k })}`),
-      ]);
-      const vh = sr.vector_hits || {};
-      const hitsHtml = renderHits(vh.chunks, "向量 ~ 切片") + renderHits(vh.entities, "向量 ~ 实体") + renderHits(vh.relations, "向量 ~ 关系");
-      $("#rgTRes", body).innerHTML = `
-        ${drawerSection("执行参数", `<div class="d-empty" style="margin:0">模式=${escapeHtml(mode)} · Top-K=${p.top_k} · 阈值=${p.threshold} · 重排=${p.rerank ? "开" : "关"} · 耗时 ${ans.elapsed_ms} ms</div>`)}
-        ${drawerSection("召回归集（近似，实际以 LightRAG 内部上下文为准）", hitsHtml || `<div class="d-empty">无命中</div>`)}
-        ${drawerSection("模型回答", `<pre class="d-pre" style="white-space:pre-wrap;max-height:320px;overflow:auto">${escapeHtml(ans.answer || "(无回答)")}</pre>
-          <div class="d-row" style="gap:8px;margin-top:8px">
-            <button class="d-btn d-btn-sm" id="rgLike">👍 有帮助</button>
-            <button class="d-btn d-btn-sm danger" id="rgDislike">👎 没帮助</button>
-          </div>`)}`;
-      const record = (verdict) => apiPost("/api/kb/feedback", {
-        thread_id: tid, query: p.q, answer: ans.answer || "", verdict,
-        top_k: p.top_k, mode, note: `rerank=${p.rerank}`,
-      }).then(() => toast("已记录反馈", "success")).catch(() => toast("反馈记录失败", "error"));
-      $("#rgLike", body).addEventListener("click", () => record("like"));
-      $("#rgDislike", body).addEventListener("click", () => record("dislike"));
     } catch (e) { $("#rgTRes", body).innerHTML = drawerErr(e); }
     busy(false);
   });

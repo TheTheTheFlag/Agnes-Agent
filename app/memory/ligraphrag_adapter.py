@@ -150,10 +150,13 @@ def _make_embedding_func() -> "EmbeddingFunc":
     """
     from lightrag.utils import EmbeddingFunc
     import numpy as np
+    import httpx as _httpx
 
     ep = _resolve_endpoint("EMBEDDING")
     from openai import OpenAI
-    client = OpenAI(base_url=ep["base_url"], api_key=ep["api_key"])
+    _no_proxy_client = _httpx.Client(trust_env=False)
+    client = OpenAI(base_url=ep["base_url"], api_key=ep["api_key"],
+                    http_client=_no_proxy_client)
 
     # 控制单次请求最多同时嵌入的文本数（bge-m3 单次最多 8192 token）
     max_batch = 16
@@ -208,6 +211,7 @@ def _make_rerank_func():
                 json=payload,
                 headers={"Authorization": f"Bearer {ep['api_key']}"},
                 timeout=30,
+                proxy=None,
             )
             resp.raise_for_status()
             results = (resp.json() or {}).get("results", [])
@@ -712,11 +716,40 @@ def kb_ingest(thread_id: str, texts: List[str]) -> dict:
     texts = [t for t in (texts or []) if isinstance(t, str) and t.strip()]
     if not texts:
         return {"ok": False, "error": "没有可喂入的文本", "doc_ids": []}
+    doc_ids = [_doc_id_for_text(t) for t in texts]
     try:
         lightrag_insert(thread_id, texts)
     except Exception as e:
         return {"ok": False, "error": f"喂入失败: {e}", "doc_ids": []}
-    return {"ok": True, "doc_ids": [_doc_id_for_text(t) for t in texts]}
+    _patch_text_doc_paths(thread_id, texts, doc_ids)
+    return {"ok": True, "doc_ids": doc_ids}
+
+
+def _patch_text_doc_paths(thread_id: str, texts: List[str], doc_ids: List[str]) -> None:
+    """文本喂入后，把 doc_status 里的 file_path 从 'unknown_source' 改为有意义的摘要。"""
+    ws = _workspace_dir(thread_id)
+    path = os.path.join(ws, "kv_store_doc_status.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return
+    changed = False
+    for text, doc_id in zip(texts, doc_ids):
+        nid = doc_id if doc_id.startswith("doc-") else "doc-" + doc_id
+        rec = data.get(nid)
+        if not isinstance(rec, dict):
+            continue
+        if str(rec.get("file_path") or "") == "unknown_source":
+            label = "文本粘贴"
+            snippet = text.strip().replace("\n", " ")[:40]
+            if snippet:
+                label += f" - {snippet}"
+            rec["file_path"] = label
+            changed = True
+    if changed:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
 
 
 def kb_delete_doc(thread_id: str, doc_id: str) -> dict:
@@ -1042,7 +1075,8 @@ def kb_import_url(thread_id: str, url: str) -> dict:
         return {"ok": False, "error": "URL 需以 http(s):// 开头"}
     try:
         resp = httpx.get(url, timeout=30, follow_redirects=True,
-                         headers={"User-Agent": "Mozilla/5.0"})
+                         headers={"User-Agent": "Mozilla/5.0"},
+                         proxy=None)
         resp.raise_for_status()
         ctype = resp.headers.get("content-type", "")
         text = resp.text

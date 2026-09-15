@@ -130,14 +130,12 @@
   <!-- ==================== 右侧调试抽屉 ==================== -->
   <div id="drawerMask" class="drawer-mask hidden"></div>
   <aside id="drawer" class="drawer hidden">
-    <div class="drawer-head">
-      <span class="drawer-title">调试面板</span>
-      <button id="btnDrawerClose" class="icon-btn" title="关闭">
-        <svg viewBox="0 0 16 16" width="15" height="15"><path d="M3 3l10 10M13 3L3 13" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
-      </button>
+    <nav id="drawerTabs" class="drawer-tabs">
+      <div class="drawer-tabs-title">设置</div>
+    </nav>
+    <div style="display:flex;flex-direction:column;flex:1;min-width:0">
+      <div id="drawerBody" class="drawer-body"></div>
     </div>
-    <nav id="drawerTabs" class="drawer-tabs"></nav>
-    <div id="drawerBody" class="drawer-body"></div>
   </aside>
 
 </div>
@@ -151,7 +149,7 @@
       <svg viewBox="0 0 32 32" width="36" height="36"><rect width="32" height="32" rx="8" fill="url(#brandGrad)"/><path d="M10 21l6-10 6 10" stroke="white" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
     </div>
     <h2 class="login-title" id="loginTitle">Agnes Agent</h2>
-    <p class="login-sub" id="loginSub">调试面板 · 登录后使用</p>
+    <p class="login-sub" id="loginSub">设置面板 · 登录后使用</p>
     <form id="loginForm" autocomplete="off">
       <input id="loginUser" type="text" placeholder="账号" autocomplete="username" spellcheck="false">
       <input id="loginPass" type="password" placeholder="密码" autocomplete="current-password">

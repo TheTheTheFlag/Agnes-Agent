@@ -8,6 +8,7 @@ import tiktoken
 import logging
 import time
 import re
+import threading
 from datetime import datetime
 from typing import List, Dict, Set, Any
 from langchain_core.messages import AIMessage, SystemMessage, HumanMessage, ToolMessage
@@ -95,12 +96,12 @@ def chatbot(state: State, config: RunnableConfig):
     if os_name == "Windows":
         os_cmds += "\n注意：Windows 控制台默认编码为 GBK，如读取中文文件出现乱码，请先执行 'chcp 65001' 切换为 UTF-8。"
 
-    # ===== 5 层记忆注入（L2 / L3）=====
-    # 每轮自动把"用户画像/偏好 + 历史摘要 + 近期任务"塞进 system prompt，
+    # ===== 分层记忆注入（L2 / L3 / 长期记忆 facts）=====
+    # 每轮自动把"用户画像/偏好 + 历史摘要 + 近期任务 + 固化事实"塞进 system prompt，
     # 模型无需主动调工具即可"自然记住"用户。
     # L2 从 memory_injection 注入（以【用户画像】/【用户偏好】形式显示在"分层记忆注入"块内），
     # 不再通过 {{profile_section}} 占位符重复注入。
-    memory_injection = mm.build_memory_injection(thread_id, layers=["history_summary", "L2", "L3"])
+    memory_injection = mm.build_memory_injection(thread_id, layers=["history_summary", "L2", "L3", "facts"])
     memory_section = ""
     if memory_injection:
         memory_section = "\n\n=== 分层记忆注入 ===\n" + "\n\n".join(memory_injection.values())
@@ -160,6 +161,7 @@ def chatbot(state: State, config: RunnableConfig):
     # 工具调用后的副作用写入
     def on_tool_after(name, params, result):
         try:
+            # L2 写入工具：画像/偏好更新
             if name == "update_user_preference":
                 data = json.loads(params.get("info_json", "{}"))
                 if isinstance(data, dict):
@@ -172,32 +174,10 @@ def chatbot(state: State, config: RunnableConfig):
                     for k, v in data.items():
                         if v is not None:
                             mm.set_profile(k, v)
-            elif name in ("system_command", "execute_command"):
-                # 写 L4 命令历史（shell 命令）
-                cmd = params.get("command", "")
-                success = not str(result).startswith("执行失败") and not str(result).startswith("工具执行错误")
-                mm.add_command_history(
-                    thread_id, cmd, success=success,
-                    stdout_preview=str(result)[:2000] if result else "",
-                )
-            elif name in ("write_file", "edit_file", "delete_file"):
-                # 文件写/改/删也记入操作历史（command 字段存操作摘要，便于审查）
-                op = {
-                    "write_file": "写入文件",
-                    "edit_file": "编辑文件",
-                    "delete_file": "删除文件",
-                }.get(name, name)
-                target = params.get("path", "")
-                success = not str(result).startswith("执行失败") and not str(result).startswith("工具执行错误")
-                mm.add_command_history(
-                    thread_id, f"{op}: {target}", success=success,
-                    stdout_preview=str(result)[:2000] if result else "",
-                )
             elif name == "tavily_search":
-                # 写 L5 语义缓存（tavily_tool 的注册名是 tavily_search）
-                query = params.get("query") or params.get("q") or json.dumps(params, ensure_ascii=False)[:200]
-                mm.cache_knowledge(source="tavily", query=query, content=str(result)[:8000])
                 # L6 被动注入：搜索结果自动进 LightRAG，触发实体/关系抽取
+                # （原 L5 语义缓存已移除，搜索知识由 LightRAG 图谱承担）
+                query = params.get("query") or params.get("q") or json.dumps(params, ensure_ascii=False)[:200]
                 try:
                     from app.memory.graph_rag_tool import _try_ingest_lightrag
                     _try_ingest_lightrag(thread_id, f"搜索：{query}\n结果：{str(result)[:2000]}")
@@ -205,16 +185,7 @@ def chatbot(state: State, config: RunnableConfig):
                     pass
         except Exception as e:
             logger.error(f"写入失败: {e}")
-        # 审计：所有工具调用都记入操作历史（便于完整审查 Agent 行为）
-        try:
-            if name not in ("update_user_preference", "update_user_info", "tavily_search"):
-                # 已在上方分支记录的命令/文件操作不再重复；其余工具（ls/read/glob/grep/memory 等）补记
-                summary = _tool_params_summary(name, params)
-                success = not str(result).startswith("执行失败") and not str(result).startswith("工具执行错误")
-                mm.add_command_history(thread_id, f"{name}: {summary}", success=success,
-                                       stdout_preview=str(result)[:500])
-        except Exception:
-            pass
+        # 审计：所有工具调用由下方 L1 事件（messages 表 kind='tool_call'）统一承载（取代原 L4 command_history 表）
         add_log_entry("info", f"工具: {name}", {"params": params, "result_preview": str(result)[:200]})
         add_event("tool_call", {"name": name, "params": params, "result": str(result)}, thread_id)
         # trace：chatbot 节点工具调用
@@ -258,13 +229,12 @@ def chatbot(state: State, config: RunnableConfig):
                         pass
                     print(f"[审批模式] {new_mode}")
                 if not allow:
-                    # 被拒的操作也记入历史，便于审查"模型想做什么但被拒绝了"
+                    # 被拒的操作改记 L1 事件（tool_call_rejected），保留"模型想做什么但被拒绝了"的审计
                     try:
                         desc = params.get('command') or params.get('path') or ''
-                        mm.add_command_history(
-                            thread_id, f"{name}: {desc}", success=False,
-                            stdout_preview="[用户拒绝]",
-                        )
+                        mm.add_event(thread_id, "tool_call_rejected",
+                                     content=f"{name}: {desc}",
+                                     meta={"name": name, "params": params, "result": "[用户拒绝]"})
                     except Exception:
                         pass
                 return allow, None
@@ -365,6 +335,17 @@ def chatbot(state: State, config: RunnableConfig):
 
     mm.add_message(thread_id, "assistant", content)
     sync_state_to_db(state, mm)
+
+    # 长期记忆固化（后台）：索引本轮对话 + LLM 抽取事实/偏好 + 冲突检测 + 写入 memory_facts。
+    # 对标 Mem0 的"对话后固定知识"——daemon 线程执行，失败静默，不阻塞主流程。
+    try:
+        if _skip_reply is not True and user_content:
+            from app.memory import memory_engine
+            threading.Thread(target=memory_engine.consolidate,
+                             args=(thread_id, user_content, content, llm, True),
+                             name="memory-consolidate", daemon=True).start()
+    except Exception:
+        pass
 
     print(f"✅ [Chatbot] 回答长度: {len(content)}")
     add_log_entry("success", f"回答完成: {len(content)} 字符")

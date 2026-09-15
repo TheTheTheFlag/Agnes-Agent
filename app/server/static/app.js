@@ -1,7 +1,7 @@
 /* ============================================================
    Agnes Agent — 对话面板前端逻辑
    全部能力：流式对话 / 工具卡片 / 审批 / 会话管理 / 模型管理 /
-   调试抽屉（State·提示词·日志·事件·追踪·记忆·MemoryDB·工具·
+   调试抽屉（State·提示词·日志·事件·追踪·记忆·工具·
    定时任务·模型·交付物·Git）
    ============================================================ */
 "use strict";
@@ -153,7 +153,7 @@ function showLogin(initialized) {
   $("#loginTitle").textContent = setup ? "首次使用" : "Agnes Agent";
   $("#loginSub").textContent = setup
     ? "设置面板账号密码（保存在 data/auth.json，PBKDF2 哈希）"
-    : "调试面板 · 登录后使用";
+    : "设置面板 · 登录后使用";
   $("#loginPass2").classList.toggle("hidden", !setup);
   $("#loginUser").placeholder = setup ? "设置账号" : "账号";
   $("#loginPass").placeholder = setup ? `设置密码（至少 6 位）` : "密码";
@@ -2081,23 +2081,6 @@ function toggleTraceCard(head) {
   if (tg) tg.textContent = visible ? "▸" : "▾";
 }
 
-/* ---- 5 层记忆 ---- */
-async function renderMemoryTab(el) {
-  el.innerHTML = `<div class="d-empty">加载中…</div>`;
-  try {
-    const tid = State.threadId || "default";
-    const data = await apiGet(`/api/memory?thread_id=${encodeURIComponent(tid)}`);
-    const block = (title, obj) => drawerSection(title, `<pre class="d-pre">${escapeHtml(JSON.stringify(obj, null, 2))}</pre>`);
-    el.innerHTML =
-      block("L2 · 用户画像 (profile)", data.L2_profile || {}) +
-      block("L2 · 用户偏好 (preferences)", data.L2_preferences || {}) +
-      block("L3 · 最近任务 (recent_tasks)", data.L3_recent_tasks || []) +
-      block("L4 · 命令历史 (command_history)", data.L4_command_history || []) +
-      block("L5 · 知识缓存 (knowledge_cache)", data.L5_knowledge_cache || []) +
-      block("Prompt 注入预览", data.prompt_injection_preview || "");
-  } catch (e) { el.innerHTML = drawerErr(e); }
-}
-
 /* ---- Memory DB ---- */
 let mdbState = { table: "messages", rows: [], columns: [] };
 
@@ -2136,9 +2119,9 @@ async function renderMemoryDBTab(el) {
     const where = whereInp.value.trim();
     loadMdbQuery(el, table, where);
   };
-  // 凡带 thread_id 列的表（messages / history_summaries / dag_plans / command_history）
+  // 凡带 thread_id 列的表（messages / history_summaries / dag_plans）
   // 默认按当前会话预填过滤，省去每次手输；user_profile / user_preferences / dag_nodes /
-  // dag_edges / semantic_cache 无 thread_id 列，预填反而会让查询报错，故仍展示全量。
+  // dag_edges 无 thread_id 列，预填反而会让查询报错，故仍展示全量。
   const mdbTableMeta = new Map(tables.map((t) => [t.name, t]));
   const applyDefaultWhere = () => {
     const cols = (mdbTableMeta.get(tableSel.value) || {}).columns || [];
@@ -2576,7 +2559,8 @@ async function renderGraphTab(el) {
       <button class="d-btn" id="graphRefresh">刷新</button>
     </div>
     <div class="d-empty" id="graphHint" style="margin-top:8px">加载中…</div>
-    <div id="graphCanvas" style="height:520px;border:1px solid var(--border,#333);border-radius:8px;background:#fff;margin-top:8px"></div>`;
+    <div id="graphCanvas" style="flex:1;border:1px solid var(--border,#333);border-radius:8px;background:#fff;margin-top:8px;min-height:300px"></div>`;
+  el.style.cssText = "display:flex;flex-direction:column;height:100%";
 
   const render = async (force) => {
     if (force) _graphRefreshKey++;
@@ -2642,7 +2626,6 @@ const DRAWER_LOADERS = {
   display: renderDisplayTab,
   prompt: renderPromptTab,
   trace: renderTraceTab,
-  memory: renderMemoryTab,
   memorydb: renderMemoryDBTab,
   graph: renderGraphTab,
   rag: renderRagTab,
@@ -2660,8 +2643,7 @@ const DRAWER_TABS = [
   // 追踪 tab 已隐藏：renderTraceTab 与 DRAWER_LOADERS.trace 保留，
   // 需要时把下面这行取消注释即可恢复（也可用 activateTab("trace") 临时打开）。
   // { id: "trace", label: "追踪", icon: "🧭" },
-  { id: "memory", label: "记忆", icon: "🧠" },
-  { id: "memorydb", label: "Memory DB", icon: "🗄️" },
+  { id: "memorydb", label: "记忆", icon: "🗄️" },
   { id: "graph", label: "图谱", icon: "🕸" },
   { id: "rag", label: "RAG 管理", icon: "🗂️" },
   { id: "tools", label: "工具", icon: "🔧" },
@@ -2672,11 +2654,19 @@ const DRAWER_TABS = [
 ];
 
 function initDrawer() {
-  drawerTabsEl.innerHTML = DRAWER_TABS.map((t) =>
-    `<button class="drawer-tab" data-id="${t.id}">${t.icon} ${t.label}</button>`).join("");
+  drawerTabsEl.innerHTML = `
+    <div class="drawer-tabs-header">
+      <button class="drawer-tab drawer-close-tab" id="btnDrawerClose" title="关闭设置"><span class="drawer-tab-icon">✕</span></button>
+      <div class="drawer-tabs-title">设置</div>
+    </div>` +
+    DRAWER_TABS.map((t) =>
+      `<button class="drawer-tab" data-id="${t.id}"><span class="drawer-tab-icon">${t.icon}</span><span class="drawer-tab-label">${t.label}</span></button>`).join("") + `
+    <div style="flex:1"></div>`;
   $$(".drawer-tab", drawerTabsEl).forEach((btn) => {
+    if (btn.id === "btnDrawerClose") return;
     btn.addEventListener("click", () => activateTab(btn.dataset.id));
   });
+  $("#btnDrawerClose", drawerTabsEl).addEventListener("click", closeDrawer);
 }
 
 /* ==================== SSE 实时事件 ==================== */
@@ -2760,7 +2750,6 @@ function bindEvents() {
   if (window.visualViewport) window.visualViewport.addEventListener("resize", syncViewportHeight);
   $("#threadSearch").addEventListener("input", () => loadThreads());
   $("#btnDrawer").addEventListener("click", openDrawer);
-  $("#btnDrawerClose").addEventListener("click", closeDrawer);
   $("#drawerMask").addEventListener("click", closeDrawer);
   // 交付物入口（主页设置按钮左边）：打开抽屉并激活交付物页
   $("#btnDeliverables").addEventListener("click", () => {

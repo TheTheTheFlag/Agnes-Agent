@@ -28,8 +28,6 @@ from langgraph.types import interrupt
 
 from app.config import DB_PATH
 from app.graph.state import State
-from app.graph.utils import _tool_params_summary
-from app.memory import MemoryManager
 from app.planning import dag_core as core
 from app.planning.dag_storage import DAGStorage
 from app.planning.react_loop import ReActLoop
@@ -228,13 +226,9 @@ def _run_node(thread_id: str, task_plan_id: int, node: Dict, goal: str,
         return True, ""
 
     def _on_tool_after(name, params, result):
-        try:
-            mm.add_command_history(thread_id, f"{name}: {_tool_params_summary(name, params)}", success=True,
-                                   stdout_preview=str(result)[:500])
-        except Exception:
-            pass
         if name in ("write_file", "edit_file") and str(params.get("path", "") or ""):
             _written.append(str(params["path"]).replace("\\", "/"))
+        # L1 事件统一承载工具审计（原 L4 command_history 已移除）
         add_event("tool_call", {"name": name, "params": params, "node": node_id, "result": str(result)}, thread_id)
         on_event(None, None)  # no-op keep signature
 
@@ -332,12 +326,19 @@ def create_executor(llm_builder, tools_list):
         from app.trace import record_node_start, record_node_end
         record_node_start(thread_id, "executor")
         dag = DAGStorage(DB_PATH)
-        mm = MemoryManager(db_path=DB_PATH, thread_id=thread_id)
 
         plan = dag.get_plan_by_thread(thread_id)
         if not plan:
             record_node_end(thread_id, "executor", "无进行中计划")
             return {"thread_id": thread_id}
+
+        # 任务目标入长期记忆语义索引（供跨层语义检索；幂等去重）
+        try:
+            from app.memory import memory_engine
+            if plan.get("goal"):
+                memory_engine.index_texts("task", thread_id, [str(plan["goal"])], ref_id=plan["id"])
+        except Exception:
+            pass
 
         # 局部重规划：存在 failed 节点 → 摘出受影响子图重规划（④）
         replan_requested = False

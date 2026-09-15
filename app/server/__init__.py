@@ -369,6 +369,15 @@ _sched_thread = threading.Thread(target=_scheduler_loop, daemon=True)
 _sched_thread.start()
 
 
+# ==================== 长期记忆 daemon（遗忘/衰减调度） ====================
+# memory_engine 的 decay 线程：importance 随时间衰减、主动遗忘低价值记忆。
+try:
+    from app.memory import memory_engine as _memory_engine
+    _memory_engine.bootstrap()
+except Exception:
+    pass
+
+
 # ==================== Memory DB 浏览器（前端 UI） ====================
 
 # 白名单：只允许这些表通过 API 访问。绝不让前端传任意表名/任意 SQL。
@@ -411,18 +420,19 @@ _MEMORY_TABLES = {
         "pk": "id",
         "columns": ["id", "plan_id", "from_id", "to_id", "soft"],
     },
-    # L4 命令历史
-    "command_history": {
-        "label": "L4 · 命令历史",
+    # 长期记忆（记忆固化 / 语义检索）
+    "memory_facts": {
+        "label": "长期记忆 · 固化事实/偏好",
         "pk": "id",
-        "columns": ["id", "thread_id", "command", "exit_code", "stdout_preview", "stderr_preview", "duration_ms", "success", "created_at"],
+        "columns": ["id", "content", "category", "importance", "source", "thread_id", "access_count", "last_accessed_at", "created_at", "updated_at"],
     },
-    # L5 知识缓存
-    "semantic_cache": {
-        "label": "L5 · 知识缓存",
+    "memory_chunks": {
+        "label": "长期记忆 · 语义索引块",
         "pk": "id",
-        "columns": ["id", "source", "query", "content", "hit_count", "last_accessed_at", "created_at", "expires_at"],
+        "columns": ["id", "kind", "thread_id", "ref_id", "text", "embedding_dim", "created_at"],
     },
+    # 工具调用审计改由 L1 messages 事件承载（kind='tool_call'），
+    # 原 L4 command_history / L5 semantic_cache 表与白名单已移除。
 }
 
 # MemoryDB 浏览器里要隐藏的表（仍在 DB 中存在、仍可被其他模块使用，

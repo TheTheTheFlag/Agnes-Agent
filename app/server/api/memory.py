@@ -90,16 +90,16 @@ async def get_messages(thread_id: str = Query("default"), limit: int = Query(200
 
 @router.get("/api/memory")
 async def get_memory_api(thread_id: str = Query("default")):
-    """5 层记忆快照。"""
+    """记忆快照。"""
     from app.memory import MemoryManager
     mm = MemoryManager(db_path=DB_PATH, thread_id=thread_id)
     return {
         "L2_profile": mm.get_profile(),
         "L2_preferences": mm.get_preferences(),
         "L3_recent_tasks": mm.get_recent_tasks(limit=10),
-        "L4_command_history": mm.get_command_history(thread_id=thread_id, limit=20),
-        "L5_knowledge_cache": mm.search_knowledge("", limit=20),
-        "prompt_injection_preview": mm.build_memory_injection(thread_id, layers=["history_summary", "L2"]),
+        "L1_tool_calls": mm.get_tool_call_history(thread_id=thread_id, limit=20),
+        "memory_facts": mm.get_memory_facts(limit=30),
+        "prompt_injection_preview": mm.build_memory_injection(thread_id, layers=["history_summary", "L2", "L3", "facts"]),
     }
 
 

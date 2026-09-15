@@ -67,34 +67,34 @@ class MemoryManager:
                 CREATE INDEX IF NOT EXISTS idx_messages_thread_id ON messages(thread_id);
                 CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
 
-                -- ====== L4 程序化记忆：系统命令历史 ======
-                CREATE TABLE IF NOT EXISTS command_history (
+                -- ====== 长期记忆：固化的事实/偏好（成熟记忆） ======
+                CREATE TABLE IF NOT EXISTS memory_facts (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    thread_id TEXT NOT NULL,
-                    command TEXT NOT NULL,
-                    exit_code INTEGER,
-                    stdout_preview TEXT,
-                    stderr_preview TEXT,
-                    duration_ms INTEGER,
-                    success INTEGER NOT NULL,
+                    content TEXT NOT NULL UNIQUE,
+                    category TEXT DEFAULT 'fact',   -- fact | preference | identity | relation | project
+                    importance REAL DEFAULT 5.0,    -- 1.0 ~ 10.0
+                    source TEXT DEFAULT 'extraction', -- extraction | explicit
+                    thread_id TEXT DEFAULT '',
+                    access_count INTEGER DEFAULT 0,
+                    last_accessed_at TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_memory_facts_importance ON memory_facts(importance);
+
+                -- ====== 语义检索索引：对话块/任务目标/事实的向量副本 ======
+                CREATE TABLE IF NOT EXISTS memory_chunks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    kind TEXT NOT NULL,             -- conversation | task | fact
+                    thread_id TEXT DEFAULT '',
+                    ref_id INTEGER,
+                    text TEXT NOT NULL,
+                    embedding BLOB,                 -- np.float32 bytes（embedding_dim * 4）
+                    embedding_dim INTEGER DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
-                CREATE INDEX IF NOT EXISTS idx_command_history_thread ON command_history(thread_id);
-                CREATE INDEX IF NOT EXISTS idx_command_history_created ON command_history(created_at);
-
-                -- ====== L5 语义记忆：外部知识缓存（tavily / 文档读取） ======
-                CREATE TABLE IF NOT EXISTS semantic_cache (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    source TEXT NOT NULL,           -- 'tavily' | 'file_read' | 'doc' | ...
-                    query TEXT NOT NULL,            -- 检索关键词
-                    content TEXT NOT NULL,          -- 缓存的结果（截断到 N 字符）
-                    hit_count INTEGER DEFAULT 0,
-                    last_accessed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    expires_at TIMESTAMP NULL       -- 过期时间
-                );
-                CREATE INDEX IF NOT EXISTS idx_semantic_cache_query ON semantic_cache(query);
-                CREATE INDEX IF NOT EXISTS idx_semantic_cache_expires ON semantic_cache(expires_at);
+                CREATE INDEX IF NOT EXISTS idx_memory_chunks_kind ON memory_chunks(kind);
+                CREATE INDEX IF NOT EXISTS idx_memory_chunks_thread ON memory_chunks(thread_id);
             """)
 
             # ---- messages 表结构迁移：旧库补 kind/meta 列（事件气泡持久化用）----
@@ -547,115 +547,65 @@ class MemoryManager:
             "preferences": self.get_preferences(),
             "recent_summary": self.get_recent_summary(self.thread_id),
         }    # ============================================================
-    # 分层记忆 API（L1-L5）
-    # 业界共识（参考 MemGPT / LangMem / Letta）的 5 层：
-    #   L0 Working   → LangGraph state（messages 列表本身）
-    #   L1 Thread    → messages 表（对话消息历史，通过 messages 字段直接访问）
-    #   L2 Profile   → user_profile + user_preferences（已有）
-    #   L3 Episodic  → dag_plans（新规划器）+ messages（任务目标+消息）
-    #   L4 Procedural→ command_history（新增）
-    #   L5 Semantic  → semantic_cache（新增）
-    # 附：history_summaries 表是历史对话的压缩摘要（不归入标准 5 层），用于 history_summary 注入中
+    # 分层记忆 API
+    #   L1 Thread    → messages 表（对话消息；role='event'/kind='tool_call' 承载工具调用审计）
+    #   L2 Profile   → user_profile + user_preferences
+    #   L3 Episodic  → dag_plans（规划器）+ messages（任务目标+消息）
+    #   L6 Graph     → LightRAG 知识图谱（取代原 L4 命令历史 / L5 语义缓存，见 docs/l6-graphrag.md）
+    # 附：history_summaries 表是历史对话的压缩摘要（不归入标准层），用于 history_summary 注入中
     # ============================================================
 
-    # ----- L4 命令历史 -----
-    def add_command_history(self, thread_id: str, command: str, success: bool,
-                            exit_code: int = None, stdout_preview: str = None,
-                            stderr_preview: str = None, duration_ms: int = None):
-        """记录一次系统命令执行；on_tool_after 钩子调用。"""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                """INSERT INTO command_history
-                   (thread_id, command, exit_code, stdout_preview, stderr_preview, duration_ms, success)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (thread_id, command, exit_code,
-                 (stdout_preview or "")[:2000],
-                 (stderr_preview or "")[:2000],
-                 duration_ms, 1 if success else 0)
-            )
+    # ----- L1 工具调用历史（原 L4 命令历史已并入 messages 的 tool_call 事件） -----
+    def get_tool_call_history(self, thread_id: str = None, limit: int = 20,
+                              pattern: str = None) -> List[Dict]:
+        """读取最近 N 条工具调用记录（来自 messages 表 role='event'/kind='tool_call'）。
 
-    def get_command_history(self, thread_id: str = None, limit: int = 20,
-                            pattern: str = None) -> List[Dict]:
-        """读取最近 N 条命令。thread_id=None 时跨 thread 查（按所有用户）。"""
+        thread_id=None 时跨 thread 查。pattern 匹配工具名/参数摘要或结果预览。
+        """
+
+        def _brief(params) -> str:
+            try:
+                s = json.dumps(params, ensure_ascii=False, default=str)
+            except Exception:
+                s = str(params)
+            return s[:200]
+
         with sqlite3.connect(self.db_path) as conn:
             if thread_id:
-                sql = """SELECT command, exit_code, success, duration_ms, created_at
-                         FROM command_history WHERE thread_id = ?
-                         ORDER BY created_at DESC LIMIT ?"""
-                params = (thread_id, limit)
+                cur = conn.execute(
+                    """SELECT meta, timestamp FROM messages
+                       WHERE thread_id = ? AND role = 'event' AND kind = 'tool_call'
+                       ORDER BY id DESC LIMIT ?""",
+                    (thread_id, limit)
+                )
+                rows = [(meta, ts) for (meta, ts) in cur.fetchall()]
             else:
-                sql = """SELECT command, exit_code, success, duration_ms, created_at, thread_id
-                         FROM command_history ORDER BY created_at DESC LIMIT ?"""
-                params = (limit,)
-            if pattern:
-                sql = sql.replace("WHERE thread_id = ?",
-                                  "WHERE thread_id = ? AND command LIKE ?")
-                sql = sql.replace("ORDER BY created_at DESC LIMIT ?",
-                                  "AND command LIKE ? ORDER BY created_at DESC LIMIT ?")
-                if thread_id:
-                    params = (thread_id, f"%{pattern}%", limit)
-                else:
-                    params = (f"%{pattern}%", limit)
-            cur = conn.execute(sql, params)
-            cols = [d[0] for d in cur.description]
-            return [dict(zip(cols, row)) for row in cur.fetchall()]
-
-    # ----- L5 语义缓存 -----
-    def get_cached_knowledge(self, query: str, ttl_seconds: int = 86400) -> Optional[Dict]:
-        """按 query 查找未过期的缓存命中。命中时增加 hit_count 并刷新 last_accessed_at。"""
-        with sqlite3.connect(self.db_path) as conn:
-            cur = conn.execute(
-                """SELECT id, source, content, hit_count FROM semantic_cache
-                   WHERE query = ? AND (expires_at IS NULL OR expires_at > ?)
-                   ORDER BY last_accessed_at DESC LIMIT 1""",
-                (query, datetime.now())
-            )
-            row = cur.fetchone()
-            if not row:
-                return None
-            conn.execute(
-                """UPDATE semantic_cache SET hit_count = hit_count + 1,
-                                            last_accessed_at = ? WHERE id = ?""",
-                (datetime.now(), row[0])
-            )
-            return {"source": row[1], "content": row[2], "hit_count": row[3] + 1}
-
-    def cache_knowledge(self, source: str, query: str, content: str,
-                        ttl_seconds: int = 86400, max_len: int = 8000):
-        """写入语义缓存。相同 query 会覆盖。截断到 max_len 字符避免撑爆。"""
-        with sqlite3.connect(self.db_path) as conn:
-            expires = None
-            if ttl_seconds:
-                from datetime import timedelta
-                expires = datetime.now() + timedelta(seconds=ttl_seconds)
-            conn.execute(
-                """INSERT OR REPLACE INTO semantic_cache
-                   (source, query, content, expires_at)
-                   VALUES (?, ?, ?, ?)""",
-                (source, query, (content or "")[:max_len], expires)
-            )
-
-    def search_knowledge(self, keyword: str, limit: int = 5) -> List[Dict]:
-        """在 L5 缓存中按关键词模糊搜索（用于 read 工具）。"""
-        with sqlite3.connect(self.db_path) as conn:
-            cur = conn.execute(
-                """SELECT source, query, content, hit_count, last_accessed_at
-                   FROM semantic_cache
-                   WHERE (query LIKE ? OR content LIKE ?) AND (expires_at IS NULL OR expires_at > ?)
-                   ORDER BY hit_count DESC, last_accessed_at DESC LIMIT ?""",
-                (f"%{keyword}%", f"%{keyword}%", datetime.now(), limit)
-            )
-            cols = [d[0] for d in cur.description]
-            return [dict(zip(cols, row)) for row in cur.fetchall()]
-
-    def cleanup_expired_cache(self) -> int:
-        """清理过期缓存；返回删除行数。"""
-        with sqlite3.connect(self.db_path) as conn:
-            cur = conn.execute(
-                "DELETE FROM semantic_cache WHERE expires_at IS NOT NULL AND expires_at <= ?",
-                (datetime.now(),)
-            )
-            return cur.rowcount
+                cur = conn.execute(
+                    """SELECT thread_id, meta, timestamp FROM messages
+                       WHERE role = 'event' AND kind = 'tool_call'
+                       ORDER BY id DESC LIMIT ?""",
+                    (limit,)
+                )
+                rows = [(meta, ts, tid) for (tid, meta, ts) in cur.fetchall()]
+        out = []
+        for row in rows:
+            ts = row[1]
+            tid = row[2] if len(row) > 2 else None
+            try:
+                meta = json.loads(row[0] or "{}")
+            except Exception:
+                meta = {}
+            name = str(meta.get("name") or "?")
+            params = meta.get("params") or {}
+            result = str(meta.get("result") or "")[:500]
+            text = f"{name}: {_brief(params)}" if params else name
+            if pattern and pattern not in text and pattern not in result:
+                continue
+            item = {"command": text, "stdout_preview": result, "created_at": ts}
+            if tid:
+                item["thread_id"] = tid
+            out.append(item)
+        return out
 
     # ----- L3 任务记忆读取（聚合） -----
     def get_recent_tasks(self, limit: int = 5, status_filter: str = None,
@@ -705,6 +655,142 @@ class MemoryManager:
             results.extend([{"kind": "msg", "id": r[1], "text": (r[2] or "")[:300], "at": r[3]} for r in cur.fetchall()])
             return results[:limit]
 
+    # ==================== 长期记忆（memory_facts / memory_chunks） ====================
+    def add_memory_fact(self, content: str, category: str = "fact", importance: float = 5.0,
+                        source: str = "extraction", thread_id: str = "") -> tuple:
+        """写入/更新一条长期记忆（按 content 唯一）。返回 (id, action)，action ∈ insert|update。"""
+        now = datetime.now()
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT id FROM memory_facts WHERE content = ?", (content,)
+            ).fetchone()
+            if row:
+                conn.execute(
+                    """UPDATE memory_facts SET category=?, importance=?, source=?, thread_id=?, updated_at=?
+                       WHERE id=?""",
+                    (category, importance, source, thread_id or "", now, row[0])
+                )
+                return row[0], "update"
+            cur = conn.execute(
+                """INSERT INTO memory_facts (content, category, importance, source, thread_id, created_at, updated_at)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (content, category, importance, source, thread_id or "", now, now)
+            )
+            return cur.lastrowid, "insert"
+
+    def delete_memory_fact(self, fact_id: int = None, content: str = None) -> int:
+        """删除一条长期记忆（按 id 或 content）。返回删除行数。"""
+        with sqlite3.connect(self.db_path) as conn:
+            if fact_id:
+                cur = conn.execute("DELETE FROM memory_facts WHERE id = ?", (fact_id,))
+            elif content:
+                cur = conn.execute("DELETE FROM memory_facts WHERE content = ?", (content,))
+            else:
+                return 0
+            return cur.rowcount
+
+    def get_memory_facts(self, limit: int = 50, min_importance: float = 0.0) -> List[Dict]:
+        """读取长期记忆；顺带惰性衰减 importance（见 decay_memory_facts 说明）。"""
+        with sqlite3.connect(self.db_path) as conn:
+            rows = conn.execute(
+                """SELECT id, content, category, importance, source, thread_id, access_count,
+                          last_accessed_at, created_at, updated_at
+                   FROM memory_facts ORDER BY importance DESC LIMIT ?""",
+                (limit,)
+            ).fetchall()
+        cols = ["id", "content", "category", "importance", "source", "thread_id", "access_count",
+                "last_accessed_at", "created_at", "updated_at"]
+        return [dict(zip(cols, r)) for r in rows]
+
+    def decay_memory_facts(self, min_importance: float = 2.0, rate: float = 0.995) -> dict:
+        """主动遗忘：importance 随时间衰减（每过 1 天乘 rate），并补记访问升温。
+
+        - 访问过的记忆（access_count>0 且最近 3 天内有访问）不衰减；
+        - importance 跌破 min_importance 的记忆被删除（主动遗忘）。
+        返回 {"decayed": n, "deleted": n}。由 memory_engine 定期调度调用。
+        """
+        from datetime import timedelta
+        now = datetime.now()
+        decayed = deleted = 0
+        with sqlite3.connect(self.db_path) as conn:
+            rows = conn.execute("SELECT id, importance, access_count, last_accessed_at, updated_at FROM memory_facts").fetchall()
+            cutoff_access = (now - timedelta(days=3)).isoformat()
+            for (fid, importance, access_count, last_accessed, updated_at) in rows:
+                recent_access = bool(last_accessed) and str(last_accessed) >= cutoff_access
+                if recent_access:
+                    # 被持续访问的记忆升温（越用越重要），不衰减
+                    conn.execute(
+                        "UPDATE memory_facts SET importance = ?, updated_at = ? WHERE id = ?",
+                        (min(10.0, importance + 0.2), now, fid)
+                    )
+                    continue
+                days = 0.0
+                if updated_at:
+                    try:
+                        days = (now - datetime.fromisoformat(str(updated_at))).days
+                    except Exception:
+                        days = 0.0
+                if days <= 0:
+                    continue
+                new_imp = importance * (rate ** days)
+                if new_imp < min_importance:
+                    conn.execute("DELETE FROM memory_facts WHERE id = ?", (fid,))
+                    deleted += 1
+                else:
+                    conn.execute(
+                        "UPDATE memory_facts SET importance = ?, updated_at = ? WHERE id = ?",
+                        (round(new_imp, 2), now, fid)
+                    )
+                    decayed += 1
+            conn.commit()
+        return {"decayed": decayed, "deleted": deleted}
+
+    def add_memory_chunk(self, kind: str, thread_id: str, text: str,
+                         ref_id: int = None, embedding: bytes = None,
+                         embedding_dim: int = 0) -> int:
+        """插入一条语义检索块（对话/任务/事实）。embedding 可后补（先插文本再回填向量）。"""
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.execute(
+                """INSERT INTO memory_chunks (kind, thread_id, ref_id, text, embedding, embedding_dim)
+                   VALUES (?,?,?,?,?,?)""",
+                (kind, thread_id or "", ref_id, text, embedding, embedding_dim)
+            )
+            return cur.lastrowid
+
+    def update_chunk_embedding(self, chunk_id: int, embedding: bytes, embedding_dim: int) -> None:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE memory_chunks SET embedding = ?, embedding_dim = ? WHERE id = ?",
+                (embedding, embedding_dim, chunk_id)
+            )
+
+    def get_embedding_chunks(self, kinds: tuple = None, thread_id: str = None,
+                             limit: int = 2000) -> List[Dict]:
+        """读取带向量的检索块（embedding IS NOT NULL）。kinds 过滤如 ('conversation','task')。"""
+        sql = "SELECT id, kind, thread_id, ref_id, text, embedding, embedding_dim FROM memory_chunks WHERE embedding IS NOT NULL"
+        params: list = []
+        if kinds:
+            placeholders = ",".join("?" for _ in kinds)
+            sql += f" AND kind IN ({placeholders})"
+            params.extend(kinds)
+        if thread_id:
+            sql += " AND thread_id = ?"
+            params.append(thread_id)
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(sql, params).fetchall()
+        albums = []
+        for r in rows:
+            emb = r["embedding"]
+            albums.append({
+                "id": r["id"], "kind": r["kind"], "thread_id": r["thread_id"],
+                "ref_id": r["ref_id"], "text": r["text"],
+                "vector": emb, "dim": r["embedding_dim"],
+            })
+        return albums
+
     # ----- 分层注入 prompt 的聚合方法 -----
     def build_memory_injection(self, thread_id: str, layers: List[str] = None) -> Dict[str, str]:
         """为 chatbot 准备分层的"记忆注入"片段。
@@ -714,12 +800,12 @@ class MemoryManager:
         - L2：用户画像 / 偏好 —— **唯一注入来源**（以【用户画像】/【用户偏好】形式），
           由 chatbot 拼进"=== 分层记忆注入 ==="块。模板中不再有 {{profile_section}} 占位符。
         - L3：近期任务极简摘要（新规划器 dag_plans）。
-        L4（命令历史）/ L5（知识缓存）不常驻，完全靠工具查询
-        （get_command_history / search_my_memory）。
+        - facts：长期记忆（memory_facts，固化的事实/偏好），高 importance（≥6）的注入，
+          让跨会话的"用户事实/偏好"常驻 prompt。
         返回 dict：key 是层名，value 是要追加到 system prompt 的 markdown 段落。
         """
         if layers is None:
-            layers = ["history_summary", "L2", "L3"]
+            layers = ["history_summary", "L2", "L3", "facts"]
         out = {}
 
         if "history_summary" in layers:
@@ -755,5 +841,21 @@ class MemoryManager:
                     goal = str(t.get("goal") or "")[:40]
                     lines.append(f"- {when}: {goal} [id={t['id']}]")
                 out["L3"] = "\n".join(lines)
+
+        if "facts" in layers:
+            # 长期记忆注入：高重要性（≥6）的固化事实/偏好，跨会话常驻。
+            try:
+                facts = [f for f in self.get_memory_facts(limit=40)
+                         if (f.get("importance") or 0) >= 6.0]
+                facts.sort(key=lambda x: x.get("last_accessed_at") or "", reverse=True)
+            except Exception:
+                facts = []
+            if facts:
+                lines = ["【长期记忆（固化的事实/偏好）】"]
+                for f in facts:
+                    cat = {"fact": "事实", "preference": "偏好", "identity": "身份",
+                           "relation": "关系", "project": "项目"}.get(f.get("category"), "记忆")
+                    lines.append(f"- [{cat}] {f['content']}")
+                out["facts"] = "\n".join(lines)
 
         return out

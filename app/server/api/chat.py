@@ -497,7 +497,7 @@ async def command_endpoint(payload: dict):
         # 用 .get() 汇总，避免 store 侧增删计数键时这里再抛 KeyError
         # （历史上曾因 store 去掉 'tasks' 键而让本接口 500）
         detail = " ".join(f"{k}={deleted.get(k, 0)}"
-                          for k in ("messages", "summaries", "commands", "cache", "checkpoints"))
+                          for k in ("messages", "summaries", "commands", "checkpoints"))
         return {"result": f"已删除会话 {arg}（{detail}）", "deleted": deleted}
     return {"error": f"未知命令: /{name}，输入 /help 查看列表"}
 

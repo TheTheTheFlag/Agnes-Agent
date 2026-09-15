@@ -28,17 +28,13 @@
 
 ```text
 LLM 类型: <class 'app.llm.llm_factory.RotatingKeyChatOpenAI'> | provider=openai_compatible model=agnes-2.5-flash
-🔍 控制面板: http://localhost:8000
-🤖 Agent 已启动，输入 'quit' 或 'exit' 退出。
-
-你 > 我最近的任务有哪些？
-[Chatbot] 自决模式（无 L1/L2/L3 硬切）
-[ReAct] 第 1/15 轮
-✅ [Chatbot] 回答长度: 210
+🔍 控制面板: http://localhost:8081
+[10:17:03] OK    控制台日志已启动（后台服务模式，对话请到调试面板）
+[10:17:03] ▶ 节点开始 chatbot
 🤖 你最近的完成任务有：1. 开发网页版贪吃蛇游戏 ……（Web 面板同步展示工具卡片与状态行）
 ```
 
-Web 面板（http://localhost:8000）：
+Web 面板（默认 http://localhost:8081，被占自动顺延）：
 
 - 左侧**历史会话**列表显示每条会话的最后一条用户消息，支持**批量删除**
 - 发送框上方**状态行**实时显示正在执行的工具（`list_my_recent_tasks({...})`）
@@ -62,7 +58,7 @@ Web 面板（http://localhost:8000）：
 - ✅ **模型自决路由**：无硬编码意图分类，LLM 自行决定"直接回答 / 调工具 / 进入多步规划"
 - ✅ **DAG 模式多步规划**：planner 把目标拆成 `nodes + edges`，executor 按拓扑层并行执行；支持软依赖、失败隔离、局部重规划（上限 3 次）与验收契约硬校验 —— 详见 [DAG 模式设计理念](#-dag-模式plan-and-execute设计理念)
 - ✅ **自定义 ReAct 循环**：亲手实现思考—行动—观察闭环（`ReActLoop`），支持工具安全拦截、人工审批、连续拒绝熔断、迭代上限防死循环
-- ✅ **6 层记忆系统**：L1 对话消息 / L2 用户画像 / L3 任务历史（dag_plans） / L4 命令历史 / L5 语义缓存（tavily 搜索结果，详见 [docs/l5-semantic-cache.md](docs/l5-semantic-cache.md)） / L6 知识图谱 GraphRAG（实体关系图谱 + 混合检索，详见 [docs/l6-graphrag.md](docs/l6-graphrag.md)）
+- ✅ **分层记忆系统**：L1 对话消息（含工具调用事件） / L2 用户画像 / L3 任务历史（dag_plans） / L6 知识图谱 GraphRAG（实体关系图谱 + 混合检索，详见 [docs/l6-graphrag.md](docs/l6-graphrag.md)；原 L4 命令历史与 L5 语义缓存已并入 L1 事件与 L6 图谱）
 - ✅ **多 Key 自动轮换**：api_key 逗号分隔，限流/超时/鉴权自动换 key + 指数退避重试
 - ✅ **沉浸式 Web 面板**：流式对话、工具状态行、审批卡片、State/日志/记忆/定时任务调试抽屉、模型一键切换
 - ✅ **标准 cron 定时任务**：`*/5 * * * *` 常规 cron 语法驱动 Agent 周期性执行任务
@@ -97,35 +93,50 @@ pip install -r <(uv export --format requirements)   # 或按 pyproject.toml 安�
 python -m app.main
 ```
 
-预期输出：
+启动预期输出（片段）：
 
 ```text
 LLM 类型: <class 'app.llm.llm_factory.RotatingKeyChatOpenAI'> | provider=openai_compatible model=agnes-2.5-flash
-🔍 控制面板: http://localhost:8000
-🤖 Agent 已启动，输入 'quit' 或 'exit' 退出。
+🔍 控制面板: http://localhost:8081
+[10:17:03] OK    控制台日志已启动（后台服务模式，对话请到调试面板）
 ```
+
+> `python -m app.main` 现在是纯后台服务模式（无终端对话循环），与 `python -m app.service` 基本等价，但端口被占时会自动顺延到 8082+。遗留参数 `--new` 可开启新会话。
 
 打开 http://localhost:8000 即可使用。**首次打开调试面板时会引导你设置账号密码**——凭据以 PBKDF2-SHA256（12 万轮 + 随机 salt）存入 `data/auth.json`（已 `.gitignore`，不含明文密码）；想重置就删掉该文件再刷新页面。若设置了 `.env` 的 `AGENT_USERNAME` / `AGENT_PASSWORD`（两个都填才生效），则优先使用它，适合无人值守部署。首次使用先到右上角 **设置 → 模型** 页接入你的模型（填 Base URL + API Key，可自动拉取模型列表）。
 
 > `.env` 只放非模型密钥（如 `TAVILY_API_KEY`）；模型凭据统一在 `data/.model_config` 由设置页管理。
 
-### 服务模式（HTTP 常驻 + 代码热重载）
+### 服务模式（HTTP 常驻 + 后台服务）
 
-不想要终端交互循环、希望 Agent 作为常驻服务跑、改代码自动重启时，用服务模式：
+Agent 以常驻服务方式运行，**没有终端对话循环**——对话、审批、定时任务全部走 Web 调试面板：
 
 ```bash
-python -m app.service                       # 默认 0.0.0.0:8081，开启热重载
+python -m app.main                          # 后台服务（调试面板默认 8081，被占自动顺延）
+python -m app.service                       # 同服务模式，默认 0.0.0.0:8081，开启热重载
 python -m app.service --port 9000           # 改端口
 python -m app.service --no-reload           # 关闭热重载
 python -m app.service --new                 # 开新会话（新的 thread_id）
 ```
 
-与 console 模式的区别：
+预期输出（片段）：
+
+```text
+🔍 控制面板: http://localhost:8081
+[thread_id] a1b2c3d4-...
+[10:17:03] OK    控制台日志已启动（后台服务模式，对话请到调试面板）
+[10:17:03] ▶ 节点开始 chatbot
+[10:17:03] LLM    planning  1.2s
+[10:17:03] TOOL   [chatbot] tavily_search {'query': '...'}
+[10:17:03] EXEC   node_1 → success
+[10:17:03] OK    任务交付汇总完成 · 2 个产物
+```
 
 - **纯 HTTP 驱动**：没有终端输入循环，对话/审批/定时任务全部走 Web 面板（`/api/chat`、`/api/scheduler` 等）；
-- **端口固定**：被占用直接报错，不再自动顺延；
+- **控制台日志**：节点/模型调用/工具/规划/任务等事件以彩色一行实时打印，方便在终端观察 Agent 工作过程；
+- **端口固定**：`app.service` 被占用直接报错，不再自动顺延（`app.main` 仍自动顺延）；
 - **热重载**：修改 `app/` 目录下的 `.py` 文件，或改 `data/.model_config`（模型配置）后自动重建 graph 并重启，无需手动重启进程（等价命令 `uvicorn app.service:app --reload --reload-dirs app data --reload-includes .model_config`）。只监控 `app/` 与 `.model_config`，`data/*.db`、`traces/` 等运行期写入不会误触发重启；
-- 服务与 console 模式共用 `.thread_id` 文件与 SQLite 存储，会话、记忆天然连续。
+- 服务模式与 `app.main` 共用 `.thread_id` 文件与 SQLite 存储，会话、记忆天然连续。
 
 ### 技能系统（Skills）
 
@@ -180,7 +191,7 @@ flowchart TB
 | `planning/dag_executor.py` | 按拓扑层并行执行 DAG | 线程池 + 信号量并行同层节点；单节点复用 `ReActLoop`；`complete_node`/`fail_node` 终止工具 + 验收契约硬校验 |
 | `planning/dag_storage.py` | DAG 持久化层（SQLite） | 三表 `dag_plans`/`dag_nodes`/`dag_edges` + 轻量 checkpoint；启动时回收 running 悬空节点；文本字段入库前统一归一 |
 | `planning/dag_summarizer.py` | 任务交付汇总 | 汇总各节点结果与**真实落盘**的产物；存在 failed 节点时不调 LLM，直接结构化说明，避免"把失败讲成成功" |
-| `memory/memory_manager.py` | 5 层记忆 | L2 自动注入 / L5 语义缓存（tavily 搜索结果） / history_summary 压缩历史 |
+| `memory/memory_manager.py` | 分层记忆 | L2 自动注入 / L1 消息+工具调用事件 / L3 任务历史 / history_summary 压缩历史 |
 | `memory/graph_rag_tool.py` | L6 图谱工具 + 被动注入 | `record_graph` / `lightgraph_query` 工具 + 每轮 L6 检索注入（失败静默降级） |
 | `memory/ligraphrag_adapter.py` | LightRAG 桥接层 | 专属 worker 事件循环跑 `ainsert/aquery`；Embedding(vstack) / Rerank / 主模型 LLM 三件套包装；按 thread 分桶持久化 |
 | `llm/llm_factory.py` | 多 Key 轮换 | 401/429/5xx 换 key，指数退避（2^n+jitter，上限 30s） |
@@ -328,7 +339,7 @@ LLM 最常见的失败模式是**声称完成但没落盘**（典型：回一句
 ```
 Agnes-Agent/
 ├── app/
-│   ├── main.py                    # 入口 console 模式（python -m app.main）
+│   ├── main.py                    # 入口 后台服务（调试面板自动顺延端口）
 │   ├── service.py                 # 入口 服务模式：HTTP 常驻 + 热重载（python -m app.service）
 │   ├── config.py                  # 配置中心（路径统一指向 data/）
 │   ├── graph/                     # LangGraph 工作流（节点 + 路由 + 状态）

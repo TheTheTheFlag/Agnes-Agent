@@ -47,16 +47,16 @@ OUTPUT_FORMAT = """\
 - 失败/不确定时显式说明：不要为了显得"全能"而编造工具调用或结果。
 </output_format>"""
 
-# 5 层记忆使用指南（与 prompt_template.txt 同步）
+# 分层记忆使用指南（与 prompt_template.txt 同步）
 MEMORY_GUIDE = """\
 <memory_guide>
-系统采用 5 层记忆架构。请理解每层的获取方式，并在需要时主动调用对应工具：
+系统采用分层记忆架构。请理解每层的获取方式，并在需要时主动调用对应工具：
 
 - L1 线程记忆：当前对话的上下文（已在 messages 中，无需工具）。
 - L2 用户画像/偏好：已自动注入到 system prompt（跨会话持久）。
 - L3 任务/消息历史：需要更早的任务或任务详情时，调用 list_my_recent_tasks 或 search_my_memory。
-- L4 命令历史：用户问"最近执行过什么命令"时，调用 get_command_history。
-- L5 知识缓存：用户问"之前查过什么"时，调用 search_my_memory 避免重复搜索。
+- L4 命令历史：由 L1 消息事件承载。用户问"最近执行过什么命令"时，调用 get_command_history。
+- L6 知识图谱：搜索/文档已自动入图。用户问"之前查过什么/某主题的信息"时，用 lightgraph_query 或 search_my_memory。
 
 判断准则：用户提到"我上次做过 / 之前你帮我 / 那个任务"等历史信息时，
 优先先调用记忆工具确认事实，再作答；不要凭猜测编造历史。
