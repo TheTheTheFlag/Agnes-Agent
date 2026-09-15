@@ -42,6 +42,10 @@ def lightgraph_query(query: str, top_k: int = 12) -> str:
 
     返回:
         命中的实体/关系/相关段落摘要；空结果表示图谱里没命中。
+
+    适用场景：需要"事实知识/实体关系"的问题——外部知识、项目结构、
+    谁和谁相关、跨消息/跨文档的关联、多跳推理。
+    不适用：用户偏好/身份/习惯等"人的记忆"——用 search_my_memory。
     """
     thread_id = _resolve_thread()
     if not thread_id:

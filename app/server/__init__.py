@@ -512,6 +512,12 @@ async def mdb_query(table: str, limit: int = 50, where: str = ""):
             rows = [dict(r) for r in cur.fetchall()]
         except _sqlite.OperationalError as e:
             return JSONResponse({"error": f"SQL 错误: {e}"}, status_code=400)
+    # SELECT * 可能带出 BLOB 列（如 memory_chunks.embedding 的向量字节），
+    # FastAPI 序列化 bytes 会强解码 UTF-8 崩溃——先转成可序列化标记。
+    for row in rows:
+        for k, v in row.items():
+            if isinstance(v, (bytes, bytearray)):
+                row[k] = f"<BLOB {len(v)} bytes>"
     return {"rows": rows, "total": len(rows), "table": table, "sql": sql}
 
 

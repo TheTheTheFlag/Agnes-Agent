@@ -192,8 +192,13 @@ flowchart TB
 | `planning/dag_storage.py` | DAG 持久化层（SQLite） | 三表 `dag_plans`/`dag_nodes`/`dag_edges` + 轻量 checkpoint；启动时回收 running 悬空节点；文本字段入库前统一归一 |
 | `planning/dag_summarizer.py` | 任务交付汇总 | 汇总各节点结果与**真实落盘**的产物；存在 failed 节点时不调 LLM，直接结构化说明，避免"把失败讲成成功" |
 | `memory/memory_manager.py` | 分层记忆 | L2 自动注入 / L1 消息+工具调用事件 / L3 任务历史 / history_summary 压缩历史 |
+| `memory/memory_engine.py` | 记忆固化 + 语义检索 | `consolidate`（LLM 提炼事实/偏好）+ `search_semantic`（仅 `fact`/`task`，不含对话原文） |
 | `memory/graph_rag_tool.py` | L6 图谱工具 + 被动注入 | `record_graph` / `lightgraph_query` 工具 + 每轮 L6 检索注入（失败静默降级） |
 | `memory/ligraphrag_adapter.py` | LightRAG 桥接层 | 专属 worker 事件循环跑 `ainsert/aquery`；Embedding(vstack) / Rerank / 主模型 LLM 三件套包装；按 thread 分桶持久化 |
+
+> **记忆 vs 图谱的边界**：对话原文只进 LightRAG（L6）建图，由 `lightgraph_query` 检索实体关系；
+> `search_my_memory` 只查提炼后的长期记忆（`memory_facts` 固化事实/偏好 + `dag_plans` 任务历史），
+> 两者数据源不重叠，避免"检索同一份对话原文"的双重命中。
 | `llm/llm_factory.py` | 多 Key 轮换 | 401/429/5xx 换 key，指数退避（2^n+jitter，上限 30s） |
 | `server/api/chat.py` | SSE 流式推送 | `updates` + `messages` 双通道；工具事件监听桥 |
 

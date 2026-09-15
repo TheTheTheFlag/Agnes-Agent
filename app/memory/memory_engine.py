@@ -134,22 +134,28 @@ def index_texts(kind: str, thread_id: str, texts: List[str],
     return written
 
 
-def search_semantic(query: str, limit: int = 5, thread_id: str = None) -> List[Dict]:
-    """统一语义检索：跨对话/任务/事实。降级路径为 SQL LIKE。
+def search_semantic(query: str, limit: int = 5, thread_id: str = None,
+                    kinds: Optional[Tuple] = None) -> List[Dict]:
+    """统一语义检索：人的记忆（固化事实 + 任务），不覆盖对话原文。
+
+    对话原文的实体-关系已由 L6 LightRAG（lightgraph_query）承接，
+    这里限定 kinds=("fact","task")，避免与图谱检索重复。降级路径为 SQL LIKE。
 
     返回: [{kind, text, score, source, ref_id, thread_id}]
     """
     from app.memory import MemoryManager
     from app.config import DB_PATH
     mm = MemoryManager(db_path=DB_PATH)
+    if kinds is None:
+        kinds = ("fact", "task")
 
-    chunks = mm.get_embedding_chunks(thread_id=thread_id, limit=2000)
+    chunks = mm.get_embedding_chunks(kinds=kinds, thread_id=thread_id, limit=2000)
     if not chunks:
-        return _like_fallback(query, limit, thread_id, mm)
+        return _like_fallback(query, limit, thread_id, kinds, mm)
 
     qvec = embed_texts([query])
     if qvec is None or not chunks:
-        return _like_fallback(query, limit, thread_id, mm)
+        return _like_fallback(query, limit, thread_id, kinds, mm)
 
     q = np.asarray(qvec[0], dtype=np.float32)
     rows = []
@@ -181,34 +187,32 @@ def search_semantic(query: str, limit: int = 5, thread_id: str = None) -> List[D
     return top[:limit]
 
 
-def _like_fallback(query: str, limit: int, thread_id: str, mm) -> List[Dict]:
-    """keyword fallback：语义检索不可用时的 LIKE 兜底（同 search_my_memory）。"""
+def _like_fallback(query: str, limit: int, thread_id: str,
+                   kinds: Optional[Tuple] = None, mm=None) -> List[Dict]:
+    """keyword fallback：语义检索不可用时的 LIKE 兜底（仅人的记忆：fact/task，不含对话原文）。"""
     import sqlite3
     from app.config import DB_PATH
+    if kinds is None:
+        kinds = ("fact", "task")
     out = []
     try:
         with sqlite3.connect(DB_PATH) as conn:
-            cur = conn.execute(
-                """SELECT 'conversation' AS kind, content AS text, '' AS source, thread_id
-                   FROM messages WHERE content LIKE ? ORDER BY timestamp DESC LIMIT ?""",
-                (f"%{query}%", limit)
-            )
-            out.extend({"kind": "conversation", "text": (r[1] or "")[:300], "score": 0.0,
-                        "source": "keyword", "ref_id": None, "thread_id": r[3]} for r in cur.fetchall())
-            cur = conn.execute(
-                """SELECT 'task' AS kind, goal AS text, '' AS source, thread_id
-                   FROM dag_plans WHERE goal LIKE ? ORDER BY updated_at DESC LIMIT ?""",
-                (f"%{query}%", limit)
-            )
-            out.extend({"kind": "task", "text": (r[1] or "")[:300], "score": 0.0,
-                        "source": "keyword", "ref_id": None, "thread_id": r[3]} for r in cur.fetchall())
-            cur = conn.execute(
-                """SELECT 'fact' AS kind, content AS text, '' AS source, thread_id
-                   FROM memory_facts WHERE content LIKE ? ORDER BY importance DESC LIMIT ?""",
-                (f"%{query}%", limit)
-            )
-            out.extend({"kind": "fact", "text": (r[1] or "")[:300], "score": 0.0,
-                        "source": "keyword", "ref_id": None, "thread_id": r[3]} for r in cur.fetchall())
+            if "task" in kinds:
+                cur = conn.execute(
+                    """SELECT 'task' AS kind, goal AS text, '' AS source, thread_id
+                       FROM dag_plans WHERE goal LIKE ? ORDER BY updated_at DESC LIMIT ?""",
+                    (f"%{query}%", limit)
+                )
+                out.extend({"kind": "task", "text": (r[1] or "")[:300], "score": 0.0,
+                            "source": "keyword", "ref_id": None, "thread_id": r[3]} for r in cur.fetchall())
+            if "fact" in kinds:
+                cur = conn.execute(
+                    """SELECT 'fact' AS kind, content AS text, '' AS source, thread_id
+                       FROM memory_facts WHERE content LIKE ? ORDER BY importance DESC LIMIT ?""",
+                    (f"%{query}%", limit)
+                )
+                out.extend({"kind": "fact", "text": (r[1] or "")[:300], "score": 0.0,
+                            "source": "keyword", "ref_id": None, "thread_id": r[3]} for r in cur.fetchall())
     except Exception:
         pass
     return out[:limit]
@@ -334,28 +338,16 @@ def apply_fact_ops(mm, ops: List[Dict], thread_id: str) -> Dict:
     return stat
 
 
-def _chunk_text(text: str, size: int = 180, stride: int = 90) -> List[str]:
-    """把一段对话切成可向量化的块（带重叠）。"""
-    text = (text or "").strip()
-    if not text:
-        return []
-    if len(text) <= size:
-        return [text]
-    chunks = []
-    i = 0
-    while i < len(text):
-        chunks.append(text[i:i + size])
-        i += stride
-    return chunks
-
-
 def consolidate(thread_id: str, user_text: str, assistant_text: str,
                 llm=None, extract: bool = True) -> Dict:
     """单轮记忆固化（后台线程调用，不阻塞对话）：
 
-    1. 索引对话块（user + assistant）到 memory_chunks（向量）。
-    2. LLM 抽取事实/偏好 → 冲突检测 → 更新 memory_facts。
-    3. 新事实同步建立 fact 向量块供检索。
+    只提炼"人的记忆"（LLM 抽取的事实/偏好/身份/关系/项目），
+    不再索引对话原文块——原文的实体-关系建图已由 L6 LightRAG 独占承接
+    （graph_rag_tool._feed_turn_async），避免两套检索命中同一份原文。
+
+    1. LLM 抽取事实/偏好 → 冲突检测 → 更新 memory_facts。
+    2. 新事实同步建立 fact 向量块供检索。
 
     返回 {"indexed": n, "facts": {...}}。任何失败静默降级。
     """
@@ -363,11 +355,6 @@ def consolidate(thread_id: str, user_text: str, assistant_text: str,
     from app.config import DB_PATH
     mm = MemoryManager(db_path=DB_PATH)
     n = 0
-    try:
-        texts = _chunk_text(user_text) + _chunk_text(assistant_text)
-        n += index_texts("conversation", thread_id, texts)
-    except Exception as e:
-        logger.warning(f"对话索引失败: {e}")
     stat = {"created": 0, "updated": 0, "deleted": 0, "skipped": 0}
     if extract and llm is not None:
         try:
@@ -378,7 +365,7 @@ def consolidate(thread_id: str, user_text: str, assistant_text: str,
                 # 新/更新的 fact 入检索索引
                 recent = mm.get_memory_facts(limit=10)
                 for f in recent:
-                    index_texts("fact", thread_id, [f["content"]], ref_id=f["id"])
+                    n += index_texts("fact", thread_id, [f["content"]], ref_id=f["id"])
         except Exception as e:
             logger.warning(f"记忆固化失败: {e}")
     return {"indexed": n, "facts": stat}

@@ -39,6 +39,10 @@ lightrag_insert(thread_id, text)  ──►  实体提取 + 关系抽取（LLM�
 | `lightgraph_query` 工具 | 同上 | LLM 主动在会话图谱里做混合检索 |
 | 被动注入 | `get_l6_context()` → L6 提示词块 | 每轮自动用当前 query 检索，把命中摘要拼进 system prompt |
 
+> **与长期记忆（`search_my_memory`）的边界**：对话原文**只**由 LightRAG 建图（本层独占），
+> `search_my_memory` 只查提炼后的固化记忆（`memory_facts` + `dag_plans`），不索引对话原文。
+> 两套检索数据源不重叠：图谱层管"实体-关系/外部知识"，记忆层管"用户的偏好/身份/习惯/任务"。
+
 LLM 工具描述见 `graph_rag_tool.py` 底部的 `RECORD_GRAPH_DESC` / `LIGHTGRAPH_QUERY_DESC`。
 
 ## 关键实现细节
