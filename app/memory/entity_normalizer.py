@@ -6,7 +6,8 @@ Research 等），而图谱层只对完全相同的实体名去重，导致节�
 
 本模块在喂入 GraphRAG 前对文本做确定性术语还原：
   1. 把已知变体统一成规范名（大小写/拼写变体 → 官方写法）；
-  2. 缩写与全称互相映射（LLM ↔ Large Language Model）；
+  2. 缩写与全称互相映射（LLM ↔ Large Language Model、RAG ↔
+     Retrieval-Augmented Generation）；
   3. 只合并"确定性同义"，避免误伤真·不同概念。
 
 这样 LLM 抽取时只看到规范名，从源头消除变体分裂。
@@ -20,9 +21,27 @@ from typing import Dict, Tuple
 # 顺序重要：长词/更具体变体在前，避免缩写先命中导致后续全称不再匹配。
 _TERM_ALIASES: Dict[str, Tuple[str, ...]] = {
     # AI 检索/增强范式（仅合并无歧义的大小写/拼写变体与确定同义缩写）
-    "RAG": ("Rag", "rag"),
-    "KAG": ("Kag", "kag"),
-    "OAG": ("Oag", "oag"),
+    "RAG": (
+        "Retrieval-Augmented Generation",
+        "retrieval-augmented generation",
+        "Retrieval Augmented Generation",
+        "Rag",
+        "rag",
+    ),
+    "KAG": (
+        "Knowledge-Augmented Generation",
+        "knowledge-augmented generation",
+        "Knowledge Augmented Generation",
+        "Kag",
+        "kag",
+    ),
+    "OAG": (
+        "Ontology-Augmented Generation",
+        "ontology-augmented generation",
+        "Ontology Augmented Generation",
+        "Oag",
+        "oag",
+    ),
     "GraphRAG": ("GraphRag", "Graphrag", "graphrag"),
     "LLM": ("LLMs", "Large Language Model", "large language model", "大语言模型"),
     "OpenSPG": ("OpenSpg", "openspg"),

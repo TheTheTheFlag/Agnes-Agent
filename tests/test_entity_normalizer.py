@@ -26,6 +26,31 @@ class NormalizeTermsTest(unittest.TestCase):
         self.assertEqual(normalize_terms("大语言模型 已就绪"), "LLM 已就绪")
         self.assertEqual(normalize_terms("multiple LLMs"), "multiple LLM")
 
+    def test_full_form_merged_for_rag_family(self):
+        # 全称/缩写一体折叠：LLM 抽取只看到规范名，杜绝全称 + 缩写双实体
+        self.assertEqual(
+            normalize_terms("Retrieval-Augmented Generation 检索增强生成"),
+            "RAG 检索增强生成",
+        )
+        self.assertEqual(
+            normalize_terms("KAG：Knowledge-Augmented Generation 知识增强生成"),
+            "KAG：KAG 知识增强生成",
+        )
+        self.assertEqual(
+            normalize_terms("OAG 即 Ontology-Augmented Generation"),
+            "OAG 即 OAG",
+        )
+        # 空格分隔的全称同样折叠
+        self.assertEqual(
+            normalize_terms("Retrieval Augmented Generation is RAG"),
+            "RAG is RAG",
+        )
+        # 混合出现：缩写 + 全称 → 归一为规范名
+        self.assertEqual(
+            normalize_terms("RAG：Retrieval-Augmented Generation"),
+            "RAG：RAG",
+        )
+
     def test_word_boundary_no_false_hit(self):
         # 变体只作为独立词替换：GraphRAGrag 中 GraphRAG 部分是前缀不是整词，保持不变
         self.assertEqual(normalize_terms("GraphRAGrag"), "GraphRAGrag")

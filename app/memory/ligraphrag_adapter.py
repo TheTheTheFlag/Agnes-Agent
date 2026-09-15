@@ -549,6 +549,8 @@ def merge_entity_variants(thread_id: str) -> dict:
 
     与插入前 normalize_terms 的前置还原组成"双保险"：前置让 LLM 抽取时
     尽量只看到规范名，后置把依然生成的变体节点在图上合二为一。
+    Neo4J / NetworkX 存储都通过 has_nodes_batch 探测存在性（不依赖
+    NetworkX 私有的 _graph），再交给存储无关的 amerge_entities 合并。
     返回 {规范名: [已合并的变体列表]}，无变体则为空 dict。
     """
     from app.memory.entity_normalizer import canonical_variants
@@ -560,13 +562,21 @@ def merge_entity_variants(thread_id: str) -> dict:
 
     variant_map = canonical_variants()
     merged: dict = {}
+    _ensure_initialized(thread_id)
 
     async def _do_merge() -> dict:
-        g = getattr(rag.chunk_entity_relation_graph, "_graph", None)
-        if g is None:
+        storage = getattr(rag, "chunk_entity_relation_graph", None)
+        if storage is None:
+            return {}
+        all_variants = [v for vs in variant_map.values() for v in vs]
+        if not all_variants:
+            return {}
+        try:
+            existing = await storage.has_nodes_batch(all_variants) or set()
+        except Exception:
             return {}
         for canonical, variants in variant_map.items():
-            present = [v for v in variants if v in g]
+            present = [v for v in variants if v in existing]
             if present:
                 try:
                     await rag.amerge_entities(
