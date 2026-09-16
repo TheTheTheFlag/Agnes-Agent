@@ -372,7 +372,7 @@ def chatbot(state: State, config: RunnableConfig):
     # 自动 git 版本快照：Agent 本轮改动（代码/交付物）提交入库
     try:
         from app.server.git_ops import auto_snapshot
-        _snap = auto_snapshot(f"对话：{user_content[:40]}")
+        _snap = auto_snapshot("auto snapshot")
         if _snap.get("commit"):
             add_log_entry("info", f"git 快照: {_snap['commit']}")
     except Exception:
