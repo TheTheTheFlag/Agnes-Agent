@@ -2,7 +2,7 @@
    RAG 管理台（个人助手版知识库管理）
    ----------------------------------------------------------------------------
    以「会话(thread)=知识库」为模型：lightrag_storage 下每个 thread 目录即一个知识库。
-   页面由 hash 路由驱动：#/rag-admin/dashboard | /kb | /kb/create | /kb/<tid>/<view>
+   页面由 hash 路由驱动：#/rag-admin/kb | /kb/create | /kb/<tid>/<view>
    其中 view ∈ documents | chunks | config | test。
    所有数据都走 /api/kb/*（受登录中间件保护），读写由 app.memory.ligraphrag_adapter 桥接。
    依赖 app.js 的全局工具：$ / $$ / apiGet / apiPost / escapeHtml / truncate / fmtAgo /
@@ -11,7 +11,6 @@
 
 /* ---------- 路由 ---------- */
 const RAG_ICONS = {
-  dashboard: `<svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>`,
   kb: `<svg viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>`,
   doc: `<svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>`,
   chunk: `<svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>`,
@@ -24,24 +23,18 @@ function ragParseHash() {
   if (!h.startsWith("/rag-admin/")) return null;
   const parts = h.split("/").filter(Boolean); // ["rag-admin", ...]
   parts.shift();
-  if (!parts.length || parts[0] === "dashboard") return { section: "dashboard" };
+  if (!parts.length || parts[0] === "dashboard") return { section: "kb" };
   if (parts[0] === "kb") {
     if (!parts[1]) return { section: "kb" };
     if (parts[1] === "create") return { section: "create" };
     const view = parts[2] || "documents";
     return { section: "detail", tid: parts[1], view: ["documents", "chunks", "config", "test"].includes(view) ? view : "documents" };
   }
-  return { section: "dashboard" };
+  return { section: "kb" };
 }
 
 function ragNavHighlight() {
-  const r = ragParseHash();
-  let active = "dashboard";
-  if (r) {
-    if (r.section === "kb" || r.section === "create" || r.section === "detail") active = "kb";
-    else active = "dashboard";
-  }
-  $$(".rag-nav-item").forEach((a) => a.classList.toggle("active", a.dataset.route === active));
+  $$(".rag-nav-item").forEach((a) => a.classList.toggle("active", a.dataset.route === "kb"));
 }
 
 async function renderRagRoute() {
@@ -51,10 +44,9 @@ async function renderRagRoute() {
   if (RAG.poll) { clearInterval(RAG.poll); RAG.poll = null; }
   content.innerHTML = `<div class="d-empty">加载中…</div>`;
   ragNavHighlight();
-  const r = ragParseHash() || { section: "dashboard" };
+  const r = ragParseHash() || { section: "kb" };
   try {
-    if (r.section === "dashboard") await ragDashboard(content);
-    else if (r.section === "kb") await ragKbList(content);
+    if (r.section === "kb") await ragKbList(content);
     else if (r.section === "create") await ragKbCreate(content);
     else if (r.section === "detail") await ragKbDetail(content, r);
   } catch (e) {
@@ -69,7 +61,6 @@ async function renderRagTab(el) {
     <div class="rag">
       <nav class="rag-nav">
         <div class="rag-nav-brand"><i></i> RAG</div>
-        <a class="rag-nav-item" data-route="dashboard" href="#/rag-admin/dashboard"><span class="rag-nav-ico">${RAG_ICONS.dashboard}</span>大盘首页</a>
         <a class="rag-nav-item" data-route="kb" href="#/rag-admin/kb"><span class="rag-nav-ico">${RAG_ICONS.kb}</span>知识库管理</a>
         <a class="rag-nav-new" href="#/rag-admin/kb/create">＋ 新建知识库</a>
         <div class="rag-nav-hint">每个会话（thread）自动沉淀为独立知识库，含文档、切片、实体关系与向量索引。</div>
@@ -79,7 +70,7 @@ async function renderRagTab(el) {
       </section>
     </div>`;
   if (!(location.hash || "").startsWith("#/rag-admin/")) {
-    location.hash = "#/rag-admin/dashboard";
+    location.hash = "#/rag-admin/kb";
   } else {
     renderRagRoute();
   }
@@ -89,43 +80,8 @@ window.addEventListener("hashchange", renderRagRoute);
 
 /* ---------- 通用小组件 ---------- */
 
-function ragCard(label, value, { color = "", svg = "" } = {}) {
-  return `<div class="rg-stat" ${color ? `style="--c:${color}"` : ""}>
-    <div class="rg-stat-num">${escapeHtml(String(value == null ? 0 : value))}</div>
-    <div class="rg-stat-lbl">${svg ? `<span class="rag-nav-ico">${svg}</span>` : ""}${escapeHtml(label)}</div>
-  </div>`;
-}
-
 function ragStatusChip(status) {
   return `<span class="kc-status ${escapeHtml(String(status).toLowerCase())}">${escapeHtml(status)}</span>`;
-}
-
-function ragBars(labels, values, color) {
-  const max = Math.max(1, ...(values || []).map((v) => Number(v) || 0));
-  const bars = (values || []).map((v, i) => {
-    const h = Math.max(2, Math.round((Number(v) || 0) / max * 100));
-    return `<div class="rg-bar" style="height:${h}%"><i style="--c:${color}"></i><b>${Number(v) || 0}</b><em>${escapeHtml(labels[i] || "")}</em></div>`;
-  }).join("");
-  return `<div class="rg-bars">${bars}</div>`;
-}
-
-function ragDonut(like, dislike) {
-  const total = like + dislike;
-  const pct = total ? Math.round(like / total * 100) : 0;
-  const r = 26, C = 2 * Math.PI * r;
-  const dash = total ? `${C * pct / 100} ${C}` : `0 ${C}`;
-  return `<div class="rg-donut">
-      <svg viewBox="0 0 64 64" width="72" height="72">
-        <circle cx="32" cy="32" r="${r}" fill="none" stroke="var(--bg-hover, #262932)" stroke-width="8"/>
-        <circle cx="32" cy="32" r="${r}" fill="none" stroke="var(--success, #34c77b)" stroke-width="8"
-          stroke-dasharray="${dash}" transform="rotate(-90 32 32)" stroke-linecap="round"/>
-      </svg>
-      <div class="rg-donut-txt"><b>${pct}%</b><span>好评率</span></div>
-    </div>
-    <div class="rg-legend">
-      <div><i style="background:var(--success, #34c77b)"></i>好评 ${like}</div>
-      <div><i style="background:var(--danger, #f2555a)"></i>差评 ${dislike}</div>
-    </div>`;
 }
 
 function ragModal(title, bodyHtml, { wide = false } = {}) {
@@ -141,51 +97,6 @@ function ragModal(title, bodyHtml, { wide = false } = {}) {
   wrap.querySelector(".rg-modal-x").addEventListener("click", close);
   wrap.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", close));
   return { wrap, close, bd: wrap.querySelector(".rag-modal-bd") };
-}
-
-/* ---------- 页面：大盘首页 ---------- */
-
-async function ragDashboard(content) {
-  const d = await apiGet("/api/kb/dashboard");
-  const todayQa = ((d.trend_qa || []).length ? d.trend_qa[d.trend_qa.length - 1] : 0);
-  const lastIdx = Math.max(...Object.keys(d.status_counts || {}).map(Number).filter((k) => !isNaN(k)).concat([-1]));
-  const failed = d.status_counts && (d.status_counts.failed || 0);
-  const totalDocs = Object.values(d.status_counts || {}).reduce((a, b) => a + b, 0) || 1;
-  const successRate = Math.round((totalDocs - (failed || 0)) / totalDocs * 100);
-content.innerHTML = `
-    ${drawerSection("统计总览", `
-      <div class="rg-stats">
-        ${ragCard("知识库", d.kb_count, { color: "var(--accent, #7c5cff)", svg: RAG_ICONS.kb })}
-        ${ragCard("文档", d.doc_total, { color: "var(--accent-2, #5a9cff)", svg: RAG_ICONS.doc })}
-        ${ragCard("切片", d.chunk_total, { color: "#34c77b", svg: RAG_ICONS.chunk })}
-        ${ragCard("今日问答", todayQa, { color: "#f5a524", svg: RAG_ICONS.test })}
-        ${ragCard("实体", d.entity_total, { color: "#a78bfa", svg: RAG_ICONS.kb })}
-        ${ragCard("关系", d.relation_total, { color: "#60a5fa", svg: RAG_ICONS.kb })}
-      </div>
-      <div class="d-row" style="gap:8px;flex-wrap:wrap">
-        <span class="kc-badge">向量: ${escapeHtml(d.vector_backend)}</span>
-        <span class="kc-badge">图谱: ${escapeHtml(d.graph_backend)}</span>
-        <span class="kc-badge">解析成功率: ${successRate}%</span>
-      </div>`)}
-    <div class="d-row" style="gap:8px;flex-wrap:wrap">
-      ${drawerSection("近 7 日问答调用", ragBars(d.trend_days, d.trend_qa, "#58a6ff"))}
-      ${drawerSection("近 7 日新增文档", ragBars(d.trend_days, d.trend_docs, "#d29922"))}
-    </div>
-    <div class="d-row" style="gap:8px;flex-wrap:wrap">
-      ${drawerSection("问答反馈占比", `<div class="rg-donut-wrap">${ragDonut((d.feedback || {}).like || 0, (d.feedback || {}).dislike || 0)}</div>`)}
-      ${drawerSection("文档解析状态", `
-        <div class="rg-legend">
-          ${(Object.entries(d.status_counts || {}).length ? Object.entries(d.status_counts).map(([k, v]) =>
-            `<div><i style="background:${k === "failed" ? "#e5534b" : k === "processed" ? "#3fb950" : "#d29922"}"></i>${escapeHtml(k)} ${v}</div>`).join("")
-            : `<div class="d-empty">暂无文档</div>`)}
-        </div>`)}
-    </div>
-    ${drawerSection("快捷入口", `
-      <div class="d-row" style="gap:8px;flex-wrap:wrap">
-        <button class="d-btn" onclick="location.hash='#/rag-admin/kb/create'">＋ 新建知识库</button>
-        <button class="d-btn" onclick="location.hash='#/rag-admin/kb'">📚 进入知识库列表</button>
-        <button class="d-btn" onclick="location.hash='#/rag-admin/kb'">🔍 检索调试</button>
-      </div>`)}`;
 }
 
 /* ---------- 页面：知识库列表 ---------- */
