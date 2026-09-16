@@ -1911,7 +1911,18 @@ input, textarea { font-family: inherit; }
 .evtb-tool .msg-label { color: var(--accent); }
 .evtb-node .msg-label { color: var(--text-soft); }
 .evtb-thought .msg-label { color: var(--text-soft); }
+.evtb-retrieval .msg-label { color: #26a69a; }
 .evtb-text { font-size: 13px; }
+.retr-item { margin: 4px 0; font-size: 12px; line-height: 1.5; }
+.retr-tag { color: var(--accent-2); font-weight: 600; margin-right: 6px; }
+.retr-file { color: var(--text-soft); margin-left: 6px; font-size: 11px; }
+.retr-content {
+  color: var(--text); padding: 4px 0 4px 12px; margin-top: 2px;
+  border-left: 2px solid rgba(38, 166, 154, .35); font-size: 12px;
+}
+.retr-desc { color: var(--text-soft); font-size: 12px; }
+.retr-empty { color: var(--text-soft); font-size: 12px; padding: 4px 0; }
+.retr-note { margin-top: 6px; color: var(--text-soft); font-size: 11px; }
 .evt-collapse {
   margin: 6px 0; border: 1px solid var(--border-soft); border-radius: 8px;
   background: var(--bg-elev); overflow: hidden;

@@ -59,6 +59,8 @@ async def chat_endpoint(payload: dict):
       - "node"        节点名（chatbot/planner/executor/...）
       - "token"       LLM 单个 token（text 字段）
       - "tool"        工具调用开始/结束
+      - "llm_call"    模型调用完整输入/输出
+      - "retrieval"   L6 知识检索结果（命中实体/关系/知识片段）
       - "done"        流程结束
       - "error"       出错
     """
@@ -215,6 +217,13 @@ async def chat_endpoint(payload: dict):
                             _persist_event("llm_call",
                                            content=str(d.get("node") or "llm"),
                                            meta=d)
+                        elif etype == "retrieval" and entry.get("thread_id") == thread_id:
+                            # L6 知识检索（向量+图谱混合召回）结果 → 前端"知识检索"气泡
+                            r = entry.get("data") or {}
+                            sync_q.put({"step": "retrieval", "data": r})
+                            _persist_event("retrieval",
+                                           content=str(r.get("query") or "知识检索")[:200],
+                                           meta=r)
 
                 try:
                     for mode, payload in _srv_cfg._GRAPH.stream(

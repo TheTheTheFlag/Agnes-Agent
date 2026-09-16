@@ -176,5 +176,22 @@ def record_tool(thread_id: str, node: str, name: str, params: Dict[str, Any],
     })
 
 
+def record_retrieval(thread_id: str, data: Dict[str, Any]) -> None:
+    """记录一次 L6 知识检索（向量 + 图谱混合召回），并实时广播给前端。
+
+    data 建议字段：query / namespace / mode / top_k / duration_ms / hits /
+    keywords / processing / entities / relations / chunks / refs。
+    thread_id 为空时不记录（与 add 对齐）。
+    """
+    if not thread_id:
+        return
+    add(thread_id, "retrieval", data)
+    try:
+        from app.server.store import add_event
+        add_event("retrieval", data, thread_id)
+    except Exception:
+        pass
+
+
 def record_error(thread_id: str, node: str, error: Any) -> None:
     add(thread_id, "error", {"node": node, "message": truncate_text(str(error), 500)})

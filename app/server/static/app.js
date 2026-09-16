@@ -387,6 +387,7 @@ function kbSelectionForSend() {
 
 /* ==================== 发送框状态条（轮数 / 上下文占用 / 附件上下文） ==================== */
 const CONTEXT_WINDOW_HINTS = [
+  { re: /agnes|gemini-2\.5|2\.5-flash/i, n: 524288 },   // 512K 窗口模型
   { re: /deepseek|gpt-4|gpt-4o|gpt-4\.5|glm|qwen|kimi|minimax/i, n: 131072 },
   { re: /claude/i, n: 200000 },
   { re: /gpt-3\.5|gpt-4o-mini|gpt-4-mini/i, n: 16384 },
@@ -398,7 +399,7 @@ function modelContextWindow() {
 }
 function fmtTokens(n) {
   n = Math.max(0, Math.round(n || 0));
-  if (n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, "") + "k";
+  if (n >= 1024) return (n / 1024).toFixed(1).replace(/\.0$/, "") + "k";
   return String(n);
 }
 function fmtBytes(b) {
@@ -1108,6 +1109,7 @@ const PROC_KIND_FMT = [
   ["tool", (n) => `${n} 个工具`],
   ["thought", (n) => `${n} 段思考`],
   ["llm", (n) => `${n} 次模型调用`],
+  ["retrieval", (n) => `${n} 次知识检索`],
   ["approval", (n) => `${n} 次审批`],
   ["event", (n) => `${n} 条事件`],
 ];
@@ -1230,6 +1232,54 @@ function renderLlmCall(data, ts, host) {
     wrapCollapsible("📤 模型输出（点击展开/收起）", `<pre class="evt-pre">${escapeHtml(data.output || "")}</pre>`, false), ts, host);
 }
 
+// L6 知识检索气泡：命中实体/关系/知识片段（默认收起，可展开查看检索到的知识）
+function renderRetrievalBody(data) {
+  const hits = data.hits || {};
+  const parts = [];
+  const chunks = data.chunks || [];
+  if (chunks.length) {
+    const html = chunks.map((ch, i) =>
+      `<div class="retr-item">` +
+      `<span class="retr-tag">[${i + 1}]</span>` +
+      (ch.reference_id ? `<span class="retr-tag">ref ${escapeHtml(ch.reference_id)}</span>` : "") +
+      (ch.file ? `<span class="retr-file">${escapeHtml(ch.file)}</span>` : "") +
+      `<div class="retr-content">${escapeHtml(ch.content || "")}</div></div>`).join("");
+    parts.push(wrapCollapsible(`📎 命中的知识片段（${chunks.length}）`, html, false));
+  }
+  const ents = data.entities || [];
+  if (ents.length) {
+    const html = ents.map((e) =>
+      `<div class="retr-item">· <b>${escapeHtml(e.name || "")}</b>` +
+      (e.description ? `<span class="retr-desc"> — ${escapeHtml(e.description)}</span>` : "") + `</div>`).join("");
+    parts.push(wrapCollapsible(`🧩 命中的实体（${ents.length}）`, html, false));
+  }
+  const rels = data.relations || [];
+  if (rels.length) {
+    const html = rels.map((rl) =>
+      `<div class="retr-item">· <b>${escapeHtml(rl.src || "?")}</b> —${escapeHtml(rl.description || "")}— <b>${escapeHtml(rl.tgt || "?")}</b></div>`).join("");
+    parts.push(wrapCollapsible(`🔗 命中的关系（${rels.length}）`, html, false));
+  }
+  const note = `Local/Global 合并召回：${hits.entities || 0} 实体 · ${hits.relations || 0} 关系 · ${hits.chunks || 0} 个知识片段，排序后注入 LLM 上下文`;
+  if (!parts.length) {
+    return `<div class="retr-empty">未命中：图库/向量库没有相关知识（模型将凭自身知识作答）。</div>`;
+  }
+  parts.push(`<div class="retr-note">${escapeHtml(note)}</div>`);
+  return parts.join("");
+}
+
+function renderRetrievalEvent(data, ts, host) {
+  const ns = data.namespace || "";
+  const nsLabel = ns === "__global__" ? "全局图谱" : (ns || "");
+  const mode = data.mode || "hybrid";
+  const dur = data.duration_ms != null ? ` · ${(data.duration_ms / 1000).toFixed(1)}s` : "";
+  const hits = data.hits ? `${data.hits.entities || 0} 实体 · ${data.hits.relations || 0} 关系 · ${data.hits.chunks || 0} chunks` : "未命中";
+  const kw = (data.keywords && (data.keywords.low_level || []).length) ? "关键词 " + escapeHtml((data.keywords.low_level || []).join(", "))
+    : (data.keywords && (data.keywords.high_level || []).length) ? "社区 " + escapeHtml((data.keywords.high_level || []).join(", ")) : "";
+  addEventBubble("retrieval", "🧪", `知识检索(${nsLabel} · ${mode}${dur})`,
+    `<span class="evtb-chip">${escapeHtml(hits)}</span>` + (kw ? `<span class="evtb-chip">${kw}</span>` : ""),
+    renderRetrievalBody(data), ts, host, "retrieval");
+}
+
 // 工具调用气泡：工具名 + 参数 + 结果（可展开完整）
 function renderToolEvent(evt, ts, host) {
   const name = evt.name || "tool";
@@ -1305,6 +1355,9 @@ function handleChatEvent(evt) {
   } else if (step === "llm_call") {
     // 每次 LLM 调用的完整输入/输出 → 独立"模型调用"气泡（可点击展开全部）
     renderLlmCall(evt.data || {});
+  } else if (step === "retrieval") {
+    // L6 知识检索结果 → 独立"知识检索"气泡（命中实体/关系/知识片段，可展开）
+    renderRetrievalEvent(evt.data || {});
   } else if (step === "node_thought") {
     // 节点思考（planner/executor/summarizer 的 node_thought）→ 独立气泡
     renderThoughtEvent((evt.data) || {});
@@ -1601,6 +1654,8 @@ function renderHistory(msgs) {
         renderNodeEvent({ name: meta.node || m.content || "", phase: m.kind === "node_start" ? "start" : "end" }, m.timestamp);
       } else if (m.kind === "llm_call") {
         renderLlmCall(meta, m.timestamp);
+      } else if (m.kind === "retrieval") {
+        renderRetrievalEvent(meta, m.timestamp);
       } else if (m.kind === "tool_call") {
         renderToolEvent({
           name: meta.name || m.content || "",
@@ -2741,7 +2796,7 @@ async function renderGraphTab(el) {
   }
   el.innerHTML = `
     <div class="d-row" style="justify-content:space-between;flex-wrap:wrap;gap:8px">
-      <div class="d-empty" style="margin:0">会话 <b>${escapeHtml(State.threadId)}</b> 的知识图谱</div>
+      <div class="d-empty" style="margin:0"><span id="graphTitle">会话 <b>${escapeHtml(State.threadId)}</b></span> 的知识图谱</div>
       <button class="d-btn" id="graphRefresh">刷新</button>
     </div>
     <div class="d-empty" id="graphHint" style="margin-top:8px">加载中…</div>
@@ -2757,7 +2812,7 @@ async function renderGraphTab(el) {
     const updateNodeText = (nodesRes, edgesRes) => {
       const n = (nodesRes && nodesRes.node_count) || 0;
       const e = (edgesRes && edgesRes.edge_count) || 0;
-      hint.textContent = n + e ? `图谱已构建：${n} 个实体，${e} 条关系（可拖动查看）` : "当前会话还没有图谱数据，发几条消息后自动生成。";
+      hint.textContent = n + e ? `图谱已构建：${n} 个实体，${e} 条关系（可拖动查看）` : "图谱还没有数据，发几条消息后自动生成。";
     };
     try {
       const q = new URLSearchParams({ thread_id: State.threadId });
@@ -2783,6 +2838,10 @@ async function renderGraphTab(el) {
         font: { size: 12 },
       }));
       updateNodeText(nodesRes, edgesRes);
+      const gLabel = (nodesRes && nodesRes.namespace_label) ||
+        (edgesRes && edgesRes.namespace_label) || "全局图谱";
+      const gTitle = $("#graphTitle", el);
+      if (gTitle) gTitle.textContent = gLabel;
       const data = { nodes: new vis.DataSet(nodes), edges: new vis.DataSet(edges) };
       const options = {
         autoResize: true,

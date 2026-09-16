@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import threading
+import time
 from typing import Any, List, Optional
 
 import httpx
@@ -685,17 +686,112 @@ def merge_entity_variants(thread_id: str, ns: Optional[str] = None) -> dict:
         return merged
 
 
+def _summarize_retrieval(raw: Any, query: str, ns: str, mode: str, top_k: int,
+                         duration_ms: float) -> dict:
+    """把 LightRAG aquery_llm 的 raw_data 压成前端可展示的检索摘要。
+
+    失败/无 raw 时返回空命中摘要（前端据此显示"未命中"），不影响主链路。
+    """
+    data = (raw or {}).get("data") or {}
+    meta = (raw or {}).get("metadata") or {}
+    pi = meta.get("processing_info") or {}
+    chunks = data.get("chunks") or []
+    entities = data.get("entities") or []
+    relations = data.get("relationships") or []
+    refs = data.get("references") or []
+
+    def _el(e):
+        if not isinstance(e, dict):
+            return {"name": str(e)[:80], "description": ""}
+        name = e.get("entity_name") or e.get("name") or ""
+        return {"name": str(name)[:80], "description": str(e.get("description") or "")[:160]}
+
+    def _rl(r):
+        if not isinstance(r, dict):
+            return {"src": "", "tgt": "", "description": str(r)[:200]}
+        return {
+            "src": str(r.get("src_id") or "")[:60],
+            "tgt": str(r.get("tgt_id") or "")[:60],
+            "description": str(r.get("description") or "")[:180],
+        }
+
+    def _ch(c):
+        if not isinstance(c, dict):
+            return {"content": str(c)[:600], "file": "", "reference_id": ""}
+        return {
+            "content": str(c.get("content") or "")[:600],
+            "file": str(c.get("file_path") or c.get("source") or "")[:120],
+            "reference_id": str(c.get("reference_id") or "")[:24],
+        }
+
+    return {
+        "query": str(query or "")[:300],
+        "namespace": str(ns or _GLOBAL_GRAPH_NS),
+        "mode": mode or "hybrid",
+        "top_k": int(top_k or 6),
+        "duration_ms": round(duration_ms, 1),
+        "hits": {
+            "entities": len(entities),
+            "relations": len(relations),
+            "chunks": len(chunks),
+        },
+        "processing": {k: v for k, v in (pi or {}).items() if isinstance(v, (int, float, str))},
+        "keywords": {
+            "high_level": [str(k) for k in (meta.get("keywords") or {}).get("high_level") or []],
+            "low_level": [str(k) for k in (meta.get("keywords") or {}).get("low_level") or []],
+        },
+        "refs": [
+            {
+                "id": str(r.get("reference_id") or r.get("ref_id") or "")[:24],
+                "file": str(r.get("file_path") or "")[:120],
+            }
+            for r in (refs[:12] if isinstance(refs, list) else [])
+            if isinstance(r, dict)
+        ],
+        "entities": [_el(e) for e in (entities[:10] if isinstance(entities, list) else [])],
+        "relations": [_rl(r) for r in (relations[:10] if isinstance(relations, list) else [])],
+        "chunks": [_ch(c) for c in (chunks[:8] if isinstance(chunks, list) else [])],
+    }
+
+
 def lightrag_query(thread_id: str, query: str, top_k: int = 12, mode: str = "hybrid",
                    ns: Optional[str] = None) -> Any:
-    """同步桥：在 worker loop 上执行 aquery，返回查询文本（str）。
+    """同步桥：在 worker loop 上执行查询，返回查询文本（str）。
 
     ns 缺省解析会话命名空间（default: __global__）；显式传 ns 查该知识库。
+    用 aquery_llm（而非 aquery）拿到 raw_data，把命中实体/关系/知识片段
+    汇总后经 record_retrieval 广播给前端（"知识检索"过程气泡），
+    返回文本与原来一致，不影响任何调用方。
     """
     _ensure_initialized(thread_id, ns=ns)
     rag = get_lightrag(thread_id, ns=ns)
     from lightrag import QueryParam
-    resp = _run_on_worker(rag.aquery(query, param=QueryParam(mode=mode, top_k=top_k)), timeout=300)
-    return str(resp)
+    param = QueryParam(mode=mode, top_k=top_k)
+    resolved_ns = ns or _graph_ns(thread_id)
+    raw = None
+    content = ""
+    t0 = time.monotonic()
+    try:
+        if hasattr(rag, "aquery_llm"):
+            try:
+                raw = _run_on_worker(rag.aquery_llm(query, param, None), timeout=300)
+                _llm = (raw or {}).get("llm_response") or {}
+                content = _llm.get("content") or ""
+            except Exception:
+                raw = None  # 失败回退旧 aquery 路径，不抛（保持原有容错）
+        if not content:
+            resp = _run_on_worker(rag.aquery(query, param), timeout=300)
+            content = str(resp)
+    finally:
+        try:
+            dur = (time.monotonic() - t0) * 1000
+            if thread_id and content:
+                from app.trace import record_retrieval
+                record_retrieval(thread_id, _summarize_retrieval(
+                    raw, query, resolved_ns, mode, top_k, dur))
+        except Exception:
+            pass
+    return content
 
 
 def graph_snapshot(thread_id: str, ns: Optional[str] = None) -> dict:
