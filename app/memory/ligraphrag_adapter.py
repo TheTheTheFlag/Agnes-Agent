@@ -16,7 +16,9 @@ LightRAG（hku-webdatalab/lightRAG）是最新的 GraphRAG 实现（v1.x），�
 """
 from __future__ import annotations
 import asyncio
+import csv
 import hashlib
+import io
 import json
 import logging
 import os
@@ -355,8 +357,91 @@ _CHUNK_STRATEGY_LABELS = {
     "R": "递归字符分块（推荐，段落/句读边界）",
     "V": "语义向量分块（需 langchain-experimental，缺依赖时回退 R）",
     "P": "段落语义分块（需结构化解析 blocks，纯文本时回退 R）",
-    "C": "自定义分块（当前实现 = 递归 + 定位前缀）",
+    "C": "QA 键值对（问答 CSV 一行一对 chunk，整对不拆分）",
 }
+
+
+def _csv_delim_guess(lines: List[str]) -> Optional[str]:
+    """粗判分隔符：取首行分列数最多的那个。"""
+    if not lines:
+        return None
+    best, bestn = None, 1
+    for d in (",", "\t", ";"):
+        n = len(lines[0].split(d))
+        if n > bestn:
+            best, bestn = d, n
+    return best if bestn >= 2 else None
+
+
+def _qa_col_index(header: List[str], keys) -> Optional[int]:
+    """从列头找匹配列；单字母 q/a 需精确匹配，长关键词做子串匹配。"""
+    for i, h in enumerate(header):
+        for k in keys:
+            if k in ("q", "a"):
+                if h == k:
+                    return i
+            elif k in h:
+                return i
+    return None
+
+
+def _parse_qa_pairs(text: str, tokenizer: Any) -> list:
+    """把文档全文解析成 QA 键值对分块（策略 C 用）。
+
+    支持两种形态：
+      - CSV 表格：首行列头含 question/问题/query 与 answer/答案/回复 等列（自动匹配），
+        每行一问一答成一对；不识别列头时回退"第一列=问题、第二列=答案"。
+      - Q:/A: 前缀文本：Q 行后紧跟 A 行成对；Q 后无前缀的行视作答案。
+    每一对保持完整、不做长度切分。返回 [{"content","tokens"}, ...]。
+    """
+    chunks: list = []
+    raw = (text or "").lstrip("\ufeff").strip()
+    if not raw:
+        return chunks
+    lines = raw.split("\n")
+
+    def _mk(q: str, a: str) -> None:
+        q = (q or "").replace("\r", "").strip()
+        a = (a or "").replace("\r", "").strip()
+        if not q or not a:
+            return
+        content = f"Q: {q}\nA: {a}"
+        chunks.append({"content": content, "tokens": len(tokenizer.encode(content))})
+
+    delim = _csv_delim_guess(lines)
+    if delim and len(lines) >= 2:
+        table = [row for row in csv.reader(io.StringIO(raw), delimiter=delim)]
+        if table and len(table[0]) >= 2 and any(len(r) >= 2 for r in table[1:4]):
+            hdr = [str(c).strip().lower().lstrip("\ufeff") for c in table[0]]
+            qi = _qa_col_index(hdr, ("question", "问题", "query", "题目", "q"))
+            ai = _qa_col_index(hdr, ("answer", "答案", "回复", "回答", "response", "reply", "a"))
+            if qi is None:
+                qi = 0
+            if ai is None:
+                ai = qi + 1 if qi + 1 < len(hdr) else 0
+            if ai == qi:
+                ai = qi + 1
+            for row in table[1:]:
+                if len(row) > max(qi, ai):
+                    _mk(row[qi], row[ai])
+            return chunks
+
+    # Q:/A: 前缀模式
+    q = ""
+    for ln in lines:
+        s = (ln or "").strip()
+        if not s:
+            continue
+        low = s.lower()
+        if low.startswith("q:"):
+            q = s[2:].strip()
+        elif low.startswith("a:") and q:
+            _mk(q, s[2:])
+            q = ""
+        elif q:
+            _mk(q, s)
+            q = ""
+    return chunks
 
 
 def _make_chunking_func(strategy: str):
@@ -434,7 +519,19 @@ def _make_chunking_func(strategy: str):
             )
             return _apply_locator(chunks, locator, tokenizer)
 
-        # R / C：递归字符分块 + 定位前缀
+        if eff_strat == "C":
+            # QA 键值对分块：每问一答成一个 chunk，整对不拆分；
+            # 解析不出 QA 对时回退递归分块（老 C 行为 = R）。
+            chunks = _parse_qa_pairs(body, tokenizer)
+            if not chunks:
+                chunks = chunking_by_recursive_character(
+                    tokenizer, body,
+                    chunk_token_size=size, chunk_overlap_token_size=overlap,
+                    separators=list(_CJK_R_SEPARATORS),
+                )
+            return _apply_locator(chunks, locator, tokenizer)
+
+        # R：递归字符分块 + 定位前缀
         chunks = chunking_by_recursive_character(
             tokenizer, body,
             chunk_token_size=size, chunk_overlap_token_size=overlap,
@@ -1168,12 +1265,15 @@ def _with_doc_locator(text: str) -> str:
     return f"{_DOC_LOCATOR_PREFIX} {summary}\n{text}"
 
 
-def kb_ingest(thread_id: str, texts: List[str]) -> dict:
+def kb_ingest(thread_id: str, texts: List[str], strategy: str = "") -> dict:
     """向某知识库喂入文本（同步，含建图）；返回生成的 doc_id 列表。
 
     每条文本自动加上 '[文档定位] <摘要>' 元数据头：_chunking_func 会把该行
     前置到每个 chunk，让孤立片段向量化时仍保留全文主题上下文。
     真实创建的知识库按 kb_id 独立喂入；其他 id 全局模式下喂入 __global__。
+
+    strategy：本次喂入临时采用的分块策略（F/R/V/P/C，空串=跟随知识库配置）。
+    临时切换：上传时指定 C 会把整份 CSV 按"一问一答"切成键值对 chunk。
     """
     texts = [t for t in (texts or []) if isinstance(t, str) and t.strip()]
     if not texts:
@@ -1182,8 +1282,20 @@ def kb_ingest(thread_id: str, texts: List[str]) -> dict:
     prefixed = [_with_doc_locator(t) for t in texts]
     doc_ids = [_doc_id_for_text(t) for t in prefixed]
     ns = _kb_resolve_ns(thread_id)
+    strat = (strategy or "").strip().upper()
     try:
-        lightrag_insert(thread_id, prefixed, ns=ns)
+        if strat in _CHUNK_STRATEGIES:
+            # 临时按本次上传的分块策略跑（ainsert 无 process_options 时走 legacy
+            # chunking_func 路径，patch 实例的 chunking_func 即可按策略分块）
+            rag = get_lightrag(thread_id, ns=ns)
+            old = getattr(rag, "chunking_func", None)
+            try:
+                rag.chunking_func = _make_chunking_func(strat)
+                lightrag_insert(thread_id, prefixed, ns=ns)
+            finally:
+                rag.chunking_func = old
+        else:
+            lightrag_insert(thread_id, prefixed, ns=ns)
     except Exception as e:
         return {"ok": False, "error": f"喂入失败: {e}", "doc_ids": []}
     # label 用原始文本摘要（不带定位头），doc_ids 用加头后的

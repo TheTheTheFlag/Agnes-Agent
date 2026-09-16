@@ -216,6 +216,14 @@ async function ragDocs(content, tid, body) {
         <button class="d-btn" id="rgUpFile">📄 上传文件</button>
         <button class="d-btn" id="rgUpBatch">📚 批量上传</button>
         <button class="d-btn" id="rgUpUrl">🔗 导入 URL</button>
+        <select class="d-input" id="rgStrat" style="width:auto;flex:none" title="本次上传/喂入采用的分块策略">
+          <option value="">分块策略：跟随配置</option>
+          <option value="R">R 递归字符</option>
+          <option value="C">C QA 键值对（问答 CSV 每问一答一个 chunk）</option>
+          <option value="F">F 固定 Token</option>
+          <option value="P">P 段落语义</option>
+          <option value="V">V 语义向量</option>
+        </select>
         <button class="d-btn danger" id="rgRetryFail" ${docs.some((d) => d.status.toLowerCase() === "failed") ? "" : "disabled"}>⟳ 重试失败</button>
         <input type="file" id="rgFile1" style="display:none" accept=".txt,.md,.json,.csv,.html,.pdf,.docx,.pptx,.xlsx,.xls,.epub,.ipynb">
         <input type="file" id="rgFileN" style="display:none" multiple accept=".txt,.md,.json,.csv,.html,.pdf,.docx,.pptx,.xlsx,.xls,.epub,.ipynb">
@@ -276,11 +284,12 @@ async function ragDocs(content, tid, body) {
     }));
 
     // 喂入文本
+    const strat = () => { const s = $("#rgStrat", body); return s ? s.value : ""; };
     $("#rgFeed", body).addEventListener("click", async () => {
       const txt = $("#rgFeedText", body).value.trim();
       if (!txt) { toast("请先输入内容", "error"); return; }
       toggleBusy(true);
-      try { const r2 = await apiPost("/api/kb/ingest", { thread_id: tid, texts: [txt] }); if (!r2.ok) throw new Error(r2.error); toast("已喂入", "success"); $("#rgFeedText", body).value = ""; }
+      try { const r2 = await apiPost("/api/kb/ingest", { thread_id: tid, texts: [txt], chunking_strategy: strat() }); if (!r2.ok) throw new Error(r2.error); toast("已喂入", "success"); $("#rgFeedText", body).value = ""; }
       catch (e) { toast("喂入失败: " + e.message, "error"); }
       toggleBusy(false); await render();
     });
@@ -293,7 +302,7 @@ async function ragDocs(content, tid, body) {
       if (up.status === 401) return onUnauthorized();
       const ud = await up.json().catch(() => ({}));
       if (!up.ok) throw new Error(ud.error || "上传失败");
-      return apiPost("/api/kb/ingest_file", { thread_id: tid, path: ud.path });
+      return apiPost("/api/kb/ingest_file", { thread_id: tid, path: ud.path, chunking_strategy: strat() });
     };
     $("#rgUpFile", body).addEventListener("click", () => $("#rgFile1", body).click());
     $("#rgUpBatch", body).addEventListener("click", () => $("#rgFileN", body).click());
@@ -478,7 +487,7 @@ async function ragConfig(content, tid, body) {
               ["F", "F 固定 Token 窗口"],
               ["V", "V 语义向量分块（需 langchain-experimental）"],
               ["P", "P 段落语义分块（需文档结构）"],
-              ["C", "C 自定义（递归 + 定位前缀）"],
+              ["C", "C QA 键值对（question,answer 两列 CSV：每问一答一个 chunk，整对不拆分）"],
             ].map(([v, l]) => `<option value="${v}" ${(c.chunking_strategy ?? "R") === v ? "selected" : ""}>${l}</option>`).join("")}
           </select>
         </div>

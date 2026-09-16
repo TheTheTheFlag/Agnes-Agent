@@ -19,6 +19,7 @@ router = APIRouter(prefix="/api/kb", tags=["kb"])
 class IngestReq(BaseModel):
     thread_id: str
     texts: list[str] = []
+    chunking_strategy: str = ""  # F/R/V/P/C；空串=跟随知识库配置
 
 
 class DeleteReq(BaseModel):
@@ -34,6 +35,7 @@ class ReprocessReq(BaseModel):
 class IngestFileReq(BaseModel):
     thread_id: str
     path: str  # uploads/ 下的相对路径
+    chunking_strategy: str = ""  # F/R/V/P/C；空串=跟随知识库配置
 
 
 @router.get("/threads")
@@ -75,7 +77,7 @@ async def search(thread_id: str = Query(...), q: str = Query(""), top_k: int = Q
 
 @router.post("/ingest")
 async def ingest(req: IngestReq) -> dict:
-    return L.kb_ingest(req.thread_id, req.texts)
+    return L.kb_ingest(req.thread_id, req.texts, strategy=req.chunking_strategy)
 
 
 @router.post("/delete")
@@ -113,7 +115,7 @@ async def ingest_file(req: IngestFileReq) -> dict:
         raise HTTPException(status_code=500, detail=f"解析文件失败: {e}")
     if not content.strip():
         raise HTTPException(status_code=400, detail="文件内容为空（扫描件或无文本层的文件暂无法处理）")
-    return L.kb_ingest(req.thread_id, [content])
+    return L.kb_ingest(req.thread_id, [content], strategy=req.chunking_strategy)
 
 
 _SAFE_TEXT_EXTS = {".txt", ".md", ".json", ".csv", ".html", ".htm"}
