@@ -30,6 +30,7 @@ const State = {
   todosExpanded: false,       // 待办面板是否展开
   todoPanelDismissed: false,  // 用户是否手动关闭了面板
   pendingAttachments: [],     // 待发送附件 [{path, name, isImg}]：上传/粘贴后先进附件条，点发送才发出
+  selectedKbs: null,          // 本轮勾选参与检索的知识库 id 列表（含 __global__）；null=默认只查 __global__
 };
 
 /* ==================== 工具函数 ==================== */
@@ -288,6 +289,98 @@ function renderAttachBar() {
     State.pendingAttachments.splice(+b.dataset.i, 1);
     renderAttachBar();
   }));
+}
+
+/* ==================== 知识库选择器（消息框多选） ==================== */
+/* 勾选的知识库参与 L6 检索；__global__ 全局对话图谱默认勾选，选择随 /api/chat 的
+   selected_kbs 透传，供 chatbot 节点的 L6 注入与 lightgraph_query 工具使用。 */
+let _kbCache = null;   // [{thread_id, name, kind, description}]，列表接口结果缓存
+
+async function loadKbOptions(force) {
+  if (_kbCache && !force) return _kbCache;
+  try {
+    const r = await apiGet("/api/kb/list");
+    const kbs = (r && r.knowledge_bases) || [];
+    _kbCache = kbs.map((k) => ({
+      thread_id: k.thread_id,
+      name: k.name || k.thread_id || "",
+      kind: k.kind || (k.thread_id === "__global__" ? "global" : "kb"),
+      description: k.description || "",
+    }));
+    // 保证 __global__ 一定出现在列表（即便服务端目录尚未生成）
+    if (!_kbCache.some((k) => k.thread_id === "__global__")) {
+      _kbCache = [{ thread_id: "__global__", name: "全局图谱", kind: "global", description: "跨会话共享的对话知识" }].concat(_kbCache || []);
+    }
+  } catch (e) {
+    _kbCache = [{ thread_id: "__global__", name: "全局图谱", kind: "global", description: "跨会话共享的对话知识" }];
+  }
+  return _kbCache;
+}
+
+function kbCheckedSet() {
+  // 默认 __global__ 勾选；用户从未改过 selectedKbs 时也保持 __global__
+  const sel = State.selectedKbs;
+  return new Set(sel && sel.length ? sel : ["__global__"]);
+}
+
+function renderKbMenu() {
+  const menu = $("#kbMenu");
+  if (!menu) return;
+  const kbs = _kbCache || [];
+  const checked = kbCheckedSet();
+  const hasSel = (State.selectedKbs && State.selectedKbs.length) || new Set(checked).has("__global__");
+  const anyKb = kbs.some((k) => k.thread_id !== "__global__");
+  const rows = kbs.map((k) => `
+    <label class="kb-item ${k.kind}" title="${escapeHtml(k.description || "")}">
+      <input type="checkbox" data-id="${escapeHtml(k.thread_id)}" ${checked.has(k.thread_id) ? "checked" : ""}>
+      <span class="kb-name">${escapeHtml(k.name || k.thread_id)}</span>
+      <span class="kb-kind">${k.kind === "global" ? "全局图谱" : "知识库"}</span>
+    </label>`).join("");
+  menu.innerHTML = `
+    <div class="kb-menu-title">检索知识库（可多选）</div>
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:0 6px 4px">
+      <button id="kbSelAll" class="d-btn" style="padding:2px 8px;font-size:11px">全选</button>
+      <button id="kbSelGlobal" class="d-btn" style="padding:2px 8px;font-size:11px">仅全局</button>
+    </div>
+    ${rows || `<div class="kb-empty">暂无知识库，仅检索全局对话图谱。</div>`}
+    <div class="kb-menu-title" style="border-top:1px solid var(--border-soft);margin-top:4px;padding-top:6px">已选：${checked.size} 个</div>`;
+  $$("input[type=checkbox]", menu).forEach((cb) => cb.addEventListener("change", () => {
+    const sel = Array.from($$("input[type=checkbox]", menu))
+      .filter((x) => x.checked).map((x) => x.dataset.id);
+    State.selectedKbs = sel;
+    renderKbMenu();
+  }));
+  const allBtn = $("#kbSelAll", menu);
+  if (allBtn) allBtn.addEventListener("click", (e) => { e.stopPropagation(); State.selectedKbs = kbs.map((k) => k.thread_id); renderKbMenu(); });
+  const gBtn = $("#kbSelGlobal", menu);
+  if (gBtn) gBtn.addEventListener("click", (e) => { e.stopPropagation(); State.selectedKbs = ["__global__"]; renderKbMenu(); });
+}
+
+async function toggleKbMenu() {
+  const menu = $("#kbMenu");
+  if (!menu) return;
+  const opening = menu.classList.contains("hidden");
+  if (opening) {
+    menu.classList.remove("hidden");
+    await loadKbOptions(false);
+    renderKbMenu();
+    $("#btnKbSel").classList.add("active");
+  } else {
+    hideKbMenu();
+  }
+}
+
+function hideKbMenu() {
+  const menu = $("#kbMenu");
+  if (menu) menu.classList.add("hidden");
+  const btn = $("#btnKbSel");
+  if (btn) btn.classList.remove("active");
+}
+
+function kbSelectionForSend() {
+  const sel = State.selectedKbs;
+  if (!sel || !sel.length) return ["__global__"];
+  return Array.from(new Set(sel));
 }
 
 /* 图片链接预处理：把消息里的裸图片 URL / 本地技能产物路径转成 markdown 图片语法，
@@ -1296,7 +1389,7 @@ async function sendMessage(text, opts) {
 
   const body = isResume
     ? { resume: true, allow: !!opts.allow, mode: opts.mode || "per_ask", thread_id: State.threadId }
-    : { message: text, thread_id: State.threadId };
+    : { message: text, thread_id: State.threadId, selected_kbs: kbSelectionForSend() };
 
   try {
     const resp = await fetch("/api/chat", {
@@ -2721,6 +2814,10 @@ function bindEvents() {
   $("#btnNewChat").addEventListener("click", newThread);
   $("#btnSend").addEventListener("click", sendFromComposer);
   $("#btnAttach").addEventListener("click", () => $("#fileInput").click());
+  $("#btnKbSel").addEventListener("click", (e) => { e.stopPropagation(); toggleKbMenu(); });
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest("#kbMenu") && !e.target.closest("#btnKbSel")) hideKbMenu();
+  });
   $("#fileInput").addEventListener("change", (e) => {
     const files = Array.from(e.target.files || []);
     e.target.value = "";            // 允许重复选择同一文件

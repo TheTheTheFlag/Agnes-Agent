@@ -58,8 +58,11 @@ def chatbot(state: State, config: RunnableConfig):
     state["thread_id"] = thread_id
     # L6 GraphRAG 工具定位当前会话（record_graph / lightgraph_query 依赖）
     try:
-        from app.memory.ligraphrag_adapter import set_current_context
+        from app.memory.ligraphrag_adapter import set_current_context, set_current_kbs
         set_current_context(thread_id)
+        # 本轮勾选参与检索的知识库（/api/chat 的 selected_kbs 透传进 config）
+        _kbs = (config.get("configurable") or {}).get("selected_kbs") or []
+        set_current_kbs([str(k) for k in _kbs] if _kbs else None)
     except Exception:
         pass
     # trace：chatbot 节点进入
@@ -107,9 +110,12 @@ def chatbot(state: State, config: RunnableConfig):
         memory_section = "\n\n=== 分层记忆注入 ===\n" + "\n\n".join(memory_injection.values())
 
     # L6 GraphRAG 知识注入：每轮构造 prompt 时查一次 LightRAG，把命中实体/关系摘要拼入 system prompt。
+    # 检索范围 = 全局对话图谱 + 本轮勾选的知识库（config.selected_kbs → set_current_kbs）。
     try:
         from app.memory.graph_rag_tool import get_l6_context
-        l6_ctx = get_l6_context(thread_id, user_content, limit_chars=1200)
+        _kbs = (config.get("configurable") or {}).get("selected_kbs") or []
+        l6_ctx = get_l6_context(thread_id, user_content, limit_chars=1200,
+                                kb_ids=[str(k) for k in _kbs] if _kbs else None)
         if l6_ctx:
             memory_section += "\n\n" + l6_ctx
     except Exception:

@@ -63,7 +63,7 @@ Web 面板（默认 http://localhost:8081，被占自动顺延）：
 - ✅ **分层记忆系统**：L1 对话消息（含工具调用事件） / L2 用户画像 / L3 任务历史（dag_plans） / L6 知识图谱 GraphRAG（实体关系图谱 + 混合检索，详见 [docs/l6-graphrag.md](docs/l6-graphrag.md)；原 L4 命令历史与 L5 语义缓存已并入 L1 事件与 L6 图谱）
 - ✅ **实体归一化双保险**：入库前 `normalize_terms` 术语还原 + 入库后 `merge_entities` 图谱合并，抑制 LightRAG 大小写/拼写变体导致的实体节点膨胀（`RAG/Rag`、`GraphRAG/GraphRag` 等只留一个规范节点）
 - ✅ **多 Key 自动轮换**：api_key 逗号分隔，限流/超时/鉴权自动换 key + 指数退避重试
-- ✅ **知识库（KB）管理**：多线程独立图谱、文档/分块/检索/问答反馈管理，每库可覆盖分块策略与抽取指引
+- ✅ **知识库（KB）管理**：文档/分块/检索/问答反馈管理，每库可覆盖分块策略与抽取指引；对话图谱默认**全局共享一张图**（所有会话读写同一命名空间 `__global__`，跨会话可共享每轮对话知识）；用户经 `kb_create` 显式创建的知识库是**独立命名空间**（`lightrag_storage/<kb_id>/` 自含目录/图谱/向量索引），消息框可**多选勾选**参与本轮 L6 检索（默认只查 `__global__`）；`GRAPH_NAMESPACE=per_thread` 可退回按线程隔离
 - ✅ **技能系统（Skills）**：SKILL.md 即技能，命中本地装、不够用 SkillHub 在线搜装
 - ✅ **沉浸式 Web 面板**：流式对话、工具状态行、审批卡片、State/日志/记忆/定时任务调试抽屉、模型一键切换
 - ✅ **标准 cron 定时任务**：`*/5 * * * *` 常规 cron 语法驱动 Agent 周期性执行任务
@@ -245,8 +245,8 @@ _feed_turn_async(thread_id, user, assistant)   // 每轮对话全量喂养（dae
 
 - **为什么双保险**：LightRAG 按 chunk 独立抽取，每个 chunk 的 LLM 都看不到其他 chunk 命名 → `RAG`/`Rag`/`GraphRAG/GraphRag` 会各自成节点。前置术语还原从源头压掉变体，后置图谱合并把依然生成的变体节点在图上合并。
 - **读取侧**：`lightgraph_query`（混合检索，向量 + 图谱双路召回）/ `get_l6_context`（每轮被动注入）/ `/api/graph/nodes|edges`（全网快照，前端渲染实体关系视图）。
-- **KB 管理**：`kb_ingest`（文档/文本/URL 导入）、`kb_reprocess`（重建）、`kb_edit_chunk`（改分块）、`kb_feedback`（问答反馈）。每库独立 `kb_meta.json`，可覆盖分块策略 / top_k / 抽取指引。
-- **存储**：`lightrag_storage/<thread_id>/`（JsonKV + NetworkX GraphML + NanoVectorDB/faiss 向量索引），每个 thread 独立，重启不丢。
+- **KB 管理**：`kb_ingest`（文档/文本/URL 导入）、`kb_reprocess`（重建）、`kb_edit_chunk`（改分块）、`kb_feedback`（问答反馈）。图谱默认全局唯一，`kb_meta.json` 落在全局命名空间下，可覆盖分块策略 / top_k / 抽取指引。
+- **存储**：`lightrag_storage/<ns>/`（JsonKV + NetworkX GraphML + NanoVectorDB/faiss 向量索引），`ns = _graph_ns(thread_id)` —— 默认全部收敛到全局命名空间 `__global__`（所有会话/库共享一张图，重启不丢）；`GRAPH_NAMESPACE=per_thread` 时 `ns=thread_id` 按线程独立。
 
 ---
 
@@ -303,7 +303,7 @@ _feed_turn_async(thread_id, user, assistant)   // 每轮对话全量喂养（dae
 | `memory_engine.py` | 记忆固化 + 语义检索 + 遗忘 | `consolidate`（后台线程 LLM 抽取 facts → 冲突检测 → 写库 → 建向量）；`search_semantic`（余弦 + 可选 rerank 精排，兜底 SQL LIKE，只查 fact/task）；`decay_memory_facts` + `start_decay_daemon`（遗忘衰减，越用越重要） |
 | `compaction.py` | 历史压缩 | 见[上下文层](#2️⃣-上下文层context--appgraph) |
 | `graph_rag_tool.py` | L6 图谱工具 + 注入 | `record_graph`（三元组→文本入图）/ `lightgraph_query`（混合检索）/ `_feed_turn_async`（每轮全量喂养，daemon）/ `get_l6_context`（被动注入 prompt，失败静默降级） |
-| `ligraphrag_adapter.py` | LightRAG 桥接 | **专属 worker 事件循环**跑 `ainisert/aquery`（`_run_on_worker` 跨线程桥）；Embedding(vstack) / Rerank / 主模型 LLM 三件套包装；按 thread 分桶持久化；KB 配置覆盖（分块策略/top_k/抽取指引）；`merge_entity_variants` 后置合并 |
+| `ligraphrag_adapter.py` | LightRAG 桥接 | **专属 worker 事件循环**跑 `ainisert/aquery`（`_run_on_worker` 跨线程桥）；Embedding(vstack) / Rerank / 主模型 LLM 三件套包装；图谱命名空间解析 `_graph_ns`（默认全局共享一张图，`GRAPH_NAMESPACE=per_thread` 按线程隔离）；KB 配置覆盖（分块策略/top_k/抽取指引）；`merge_entity_variants` 后置合并 |
 | `entity_normalizer.py` | 术语归一化 | 别名表 `_TERM_ALIASES`（RAG/KAG/OAG/GraphRAG/LLM/OpenSPG 的大小写、缩写、全称变体）→ **ASCII 词边界正则**（lookahead/lookbehind 而非 `\b`，因为 `\b` 对 CJK 无效，会漏掉"了解GraphRag"这类中英混排前缀）→ `normalize_terms` 词级还原 |
 
 ### 6️⃣ 技能层（Skills）· `app/skills/`
@@ -524,7 +524,7 @@ Agnes-Agent/
 │       ├── auth.py                # PBKDF2 认证
 │       └── static/                # 前端（index.html + app.js + style.css）
 ├── data/                          # 运行时数据（memory.db / checkpoints.db / app_logs.db / traces/ / auth.json）
-├── lightrag_storage/              # L6 知识图谱持久化（每会话一个子目录：KV + 图谱 + 向量索引）
+├── lightrag_storage/              # L6 知识图谱持久化（默认全局共享一张图：__global__ 子目录含 KV + 图谱 + 向量索引；GRAPH_NAMESPACE=per_thread 时每会话一个子目录）
 ├── neo4j/                         # 本地 Neo4j 5.26 图数据库（GRAPH_STORAGE=neo4j 时使用；gitignored）
 ├── .runtime/                      # 本地 JDK21（Neo4j 运行时依赖；gitignored）
 ├── deliverables/                  # Agent 生成的交付物

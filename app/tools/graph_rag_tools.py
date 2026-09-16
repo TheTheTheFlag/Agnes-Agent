@@ -50,8 +50,10 @@ def lightgraph_query(query: str, top_k: int = 12) -> str:
     thread_id = _resolve_thread()
     if not thread_id:
         return "[GraphRAG] 未定位到当前会话，请先开始一段对话再查询图谱。"
+    from app.memory.ligraphrag_adapter import get_current_kbs
     from app.memory.graph_rag_tool import lightgraph_query as _query
-    return _query(thread_id, query, top_k=top_k)
+    kb_ids = get_current_kbs() or None
+    return _query(thread_id, query, top_k=top_k, kb_ids=kb_ids)
 
 
 @tool

@@ -110,6 +110,10 @@
       <div id="cmdMenu" class="cmd-menu hidden"></div>
       <div id="attachBar" class="attach-bar hidden"></div>
       <div class="composer-box">
+        <button id="btnKbSel" class="btn-attach" title="选择参与检索的知识库（多选，默认全局图谱）">
+          <svg viewBox="0 0 16 16" width="16" height="16"><path d="M8 1.5 14.5 4.5 8 7.5 1.5 4.5 8 1.5Zm-6.5 4 6.5 3 6.5-3M1.5 9.5 8 12.5l6.5-3" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <div id="kbMenu" class="kb-menu hidden"></div>
         <button id="btnAttach" class="btn-attach" title="上传图片/文件（Agent 可识别图片）">
           <svg viewBox="0 0 16 16" width="16" height="16"><path d="M9.5 4.5v5a2 2 0 0 1-4 0v-6a1 1 0 0 1 2 0v5.5a.5.5 0 0 0 1 0v-5.5a1 1 0 1 1 2 0v6a2.5 2.5 0 0 1-5 0v-6" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round"/></svg>
         </button>
@@ -123,7 +127,17 @@
           <svg viewBox="0 0 16 16" width="15" height="15"><path d="M2.5 8l11-5.5-3 5.5 3 5.5z" fill="currentColor"/></svg>
         </button>
       </div>
-      <div class="composer-hint" id="composerHint">Enter 发送 · Shift+Enter 换行 · <code>/</code> 斜杠命令</div>
+      <div class="composer-status">
+        <span class="composer-hint" id="composerHint">Enter 发送 · Shift+Enter 换行 · <code>/</code> 斜杠命令</span>
+        <span class="composer-stats">
+          <span class="cs-item" id="csTurns" title="当前会话轮数">0 轮</span>
+          <span class="cs-item cs-ctx" id="csCtx" title="上下文窗口占用（估算）">
+            <span class="cs-bar"><span class="cs-fill" id="csCtxFill" style="width:0%"></span></span>
+            <span id="csCtxPct">0%</span>
+          </span>
+          <span class="cs-item" id="csAttach" hidden></span>
+        </span>
+      </div>
     </footer>
   </main>
 

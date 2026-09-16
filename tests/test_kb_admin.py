@@ -51,7 +51,9 @@ class MetaConfigTest(_TempBase):
         self.assertEqual(out["top_k"], 5)
         self.assertFalse(out["rerank"])
         self.assertNotIn("bogus", out)
-        ci.assert_called_once_with(tid)
+        ci.assert_called_once()
+        self.assertEqual(ci.call_args[0][0], tid)
+        self.assertTrue(ci.call_args[1].get("ns"))  # 携带命名空间，全局模式落 __global__
         # 写盘后重新读
         self.assertEqual(L.kb_get_config(tid)["top_k"], 5)
 
@@ -124,6 +126,14 @@ class ChunkingStrategyTest(_TempBase):
 
 
 class CreateTest(_TempBase):
+    """多库创建行为基于 per-thread 隔离模式（全局共享模式下无多库概念）。"""
+
+    def setUp(self):
+        super().setUp()
+        self._ns = mock.patch.dict(os.environ, {"GRAPH_NAMESPACE": "per_thread"})
+        self._ns.start()
+        self.addCleanup(self._ns.stop)
+
     def test_create_makes_dir_meta(self):
         r = L.kb_create(name="我的知识库", description="备忘")
         self.assertTrue(r["ok"])
@@ -142,6 +152,14 @@ class CreateTest(_TempBase):
 
 
 class DashboardTest(_TempBase):
+    """大盘跨库聚合基于 per-thread 隔离模式。"""
+
+    def setUp(self):
+        super().setUp()
+        self._ns = mock.patch.dict(os.environ, {"GRAPH_NAMESPACE": "per_thread"})
+        self._ns.start()
+        self.addCleanup(self._ns.stop)
+
     def test_dashboard_aggregates(self):
         t1, t2 = "k1", "k2"
         self._ws(t1); self._ws(t2)
@@ -316,6 +334,70 @@ class KBAdminAPITest(unittest.TestCase):
             resp = asyncio.run(import_url(ImportURLReq(thread_id="k1", url="https://x.y")))
         self.assertTrue(resp["ok"])
         i.assert_called_once_with("k1", "https://x.y")
+
+
+class GlobalGraphModeTest(_TempBase):
+    """全局共享图谱模式：对话图谱收敛到 __global__，用户知识库独立命名空间。"""
+
+    def test_graph_ns_normalizes_to_global_by_default(self):
+        self.assertEqual(L._graph_ns("sess-a"), "__global__")
+        self.assertEqual(L._graph_ns("sess-b"), "__global__")
+        self.assertEqual(L._graph_ns("lib-xyz"), "__global__")
+
+    def test_per_thread_mode_keeps_isolation(self):
+        with mock.patch.dict(os.environ, {"GRAPH_NAMESPACE": "per_thread"}):
+            self.assertEqual(L._graph_ns("sess-a"), "sess-a")
+            self.assertEqual(L._graph_ns("sess-b"), "sess-b")
+
+    def test_workspace_dir_shared_in_global_mode(self):
+        self.assertEqual(L._workspace_dir("sess-a"), L._workspace_dir("sess-b"))
+        self.assertTrue(L._workspace_dir("sess-a").endswith(os.path.join("__global__", "__global__")))
+
+    def test_kb_create_independent_namespaces(self):
+        # 全局模式下新建知识库 = 独立 kb_id（不同于 __global__），两个库互不相通
+        r1 = L.kb_create(name="库A", description="AAA")
+        r2 = L.kb_create(name="库B")
+        self.assertNotEqual(r1["thread_id"], "__global__")
+        self.assertNotEqual(r1["thread_id"], r2["thread_id"])
+        # 每个库有自己独立的 workspace 目录与 kb_meta.json
+        ws1 = L._workspace_dir(r1["thread_id"], ns=L._kb_ns(r1["thread_id"]))
+        self.assertTrue(ws1.endswith(os.path.join(r1["thread_id"], r1["thread_id"])))
+        self.assertTrue(os.path.isfile(os.path.join(self._root, r1["thread_id"], "kb_meta.json")))
+        # kb_threads 总是包含 __global__，外加两个显式库
+        ids = [t["id"] for t in L.kb_threads()]
+        self.assertIn("__global__", ids)
+        self.assertIn(r1["thread_id"], ids)
+        self.assertIn(r2["thread_id"], ids)
+
+    def test_kb_meta_isolated_between_kbs(self):
+        r1 = L.kb_create(name="库A", description="AAA")
+        r2 = L.kb_create(name="库B")
+        self.assertEqual(L.kb_meta(r1["thread_id"])["name"], "库A")
+        self.assertEqual(L.kb_meta(r2["thread_id"])["name"], "库B")
+
+    def test_kb_meta_falls_back_to_global_for_uncreated_tid(self):
+        # 未被"新建知识库"占用的 id（如普通会话）在全局模式下落到 __global__ 元信息
+        L.kb_save_meta("__global__", {"name": "全局图谱", "description": "d", "config": L._KB_DEFAULT_CONFIG, "created_at": ""})
+        meta = L.kb_meta("任意会话id")
+        self.assertEqual(meta["name"], "全局图谱")
+        self.assertEqual(L._kb_resolve_ns("任意会话id"), "__global__")
+
+    def test_kb_resolve_ns_global_vs_created_kb(self):
+        r = L.kb_create(name="库A")
+        self.assertEqual(L._kb_resolve_ns(r["thread_id"]), r["thread_id"])   # 真实库 → 自带命名空间
+        self.assertEqual(L._kb_resolve_ns("__global__"), "__global__")
+        with mock.patch.dict(os.environ, {"GRAPH_NAMESPACE": "per_thread"}):
+            self.assertEqual(L._kb_resolve_ns("tid-x"), "tid-x")            # per-thread 模式 → 原样
+
+    def test_kb_create_refuses_global_override(self):
+        # 显式传 __global__ 不抢占对话图谱，而是回退到新的独立库 id
+        r = L.kb_create(thread_id="__global__", name="别抢")
+        self.assertNotEqual(r["thread_id"], "__global__")
+
+    def test_kb_delete_global_forbidden(self):
+        res = L.kb_delete_thread("__global__")
+        self.assertFalse(res.get("ok"))
+        self.assertIn("不允许删除", res.get("error", ""))
 
 
 if __name__ == "__main__":

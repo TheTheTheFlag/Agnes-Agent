@@ -266,10 +266,68 @@ def _run_on_worker(coro: Any, timeout: float = 300.0) -> Any:
 _lock = threading.Lock()
 _instances: dict = {}
 
+# 图谱命名空间：
+#   - 会话对话图谱默认全局共享一张图：所有会话 thread_id 归一化到 ``__global__``，
+#     每轮对话自动喂进同一张图，跨会话可共享知识。
+#   - 用户通过 kb_create 显式创建的知识库是独立命名空间（每库独立图谱/存储/
+#     Neo4j workspace，kb_id 本身即命名空间），仅在勾选后参与检索。
+# 可用环境变量 GRAPH_NAMESPACE=per_thread 退回"每会话独立图"的旧隔离行为
+# （仅作用于会话对话图谱；显式创建的知识库始终自带独立命名空间）。
+_GLOBAL_GRAPH_NS = "__global__"
+
+
+def _graph_ns(thread_id: str) -> str:
+    """把会话 thread_id 解析为实际图谱命名空间。
+
+    - GRAPH_NAMESPACE=global（默认）：会话对话图谱收敛到全局命名空间
+      ``__global__``（跨会话共享）。
+    - GRAPH_NAMESPACE=per_thread：返回原值，按会话隔离（旧行为）。
+    注意：该层只作用于"会话对话图谱"。用户显式创建的知识库（kb_create）
+    走 _kb_ns 直接用 kb_id 作为命名空间，不受这里归一化。
+    """
+    _load_dotenv()
+    mode = (os.getenv("GRAPH_NAMESPACE", "global") or "global").strip().lower()
+    if mode in ("per_thread", "per-thread", "session", "thread", "isolated"):
+        return thread_id
+    return _GLOBAL_GRAPH_NS
+
+
+def _kb_ns(kb_id: str) -> str:
+    """知识库命名空间 = 原始 kb_id（不参与对话线程的全局归一化）。
+
+    用户通过 kb_create 创建的知识库是独立图谱：kb_meta/文档/图谱/Neo4j
+    workspace 都以 kb_id 为维度隔离，勾选该库才参与检索。
+    """
+    return str(kb_id).strip() or _GLOBAL_GRAPH_NS
+
+
+def _kb_resolve_ns(thread_id: str) -> str:
+    """解析某 kb 操作实际生效的命名空间。
+
+    规则：若该 id 是已创建的真实知识库（lightrag_storage/<id>/kb_meta.json），
+    用 kb_id 本身（独立命名空间）；否则退回 _graph_ns 的会话归一化
+    （全局模式下未建库的任意 id → __global__）。per-thread 模式下即 thread_id。
+    """
+    tid = _kb_ns(thread_id)
+    if _graph_mode_global():
+        if os.path.isfile(os.path.join(_storage_root(), tid, "kb_meta.json")):
+            return tid
+        return _graph_ns(thread_id)
+    return tid
+
+
+def _graph_mode_global() -> bool:
+    """当前是否为全局共享图谱模式（默认是）。"""
+    return _graph_ns("__probe__") == _GLOBAL_GRAPH_NS
+
 # 当前会话上下文：chatbot 节点每轮进入时 set，供 record_graph / lightgraph_query 工具定位当前线程。
 # 用锁保护（多线程并发会话时取"最后活跃"的会话，与 .thread_id 文件的全局语义一致）。
 _cur_thread: Optional[str] = None
 _cur_thread_lock = threading.Lock()
+# 本消息当前勾选参与检索的知识库（含 __global__），chatbot 每轮入口由 /api/chat 的
+# selected_kbs 写入，供 lightgraph_query 工具与 L6 注入读取。
+_cur_kbs: List[str] = []
+_cur_kbs_lock = threading.Lock()
 
 
 _DOC_LOCATOR_PREFIX = "[文档定位]"
@@ -399,15 +457,43 @@ def get_current_context() -> Optional[str]:
         return _cur_thread
 
 
-def build_lightrag_instance(thread_id: str) -> Any:
-    """为某会话创建 LightRAG 实例（首次创建后缓存，后续复用）。"""
+def set_current_kbs(kb_ids: Optional[List[str]]) -> None:
+    """记录本轮勾选参与检索的知识库列表（含 __global__，去重启保序）。
+
+    由 chatbot 节点入口从 /api/chat 的 selected_kbs 写入，供 L6 注入与
+    lightgraph_query 工具读取。值为 None 时清空（沿用默认只查全局图）。
+    """
+    global _cur_kbs
+    with _cur_kbs_lock:
+        _cur_kbs = []
+        for k in (kb_ids or []):
+            s = str(k or "").strip()
+            if s and s not in _cur_kbs:
+                _cur_kbs.append(s)
+
+
+def get_current_kbs() -> List[str]:
+    """当前勾选参与检索的知识库列表；未设置时退化为只查全局图谱。"""
+    with _cur_kbs_lock:
+        return list(_cur_kbs)
+
+
+def build_lightrag_instance(thread_id: str, ns: Optional[str] = None) -> Any:
+    """为某会话/知识库创建 LightRAG 实例（首次创建后缓存，后续复用）。
+
+    - ns 缺省：按 _graph_ns 归一化会话命名空间（默认全局共享 __global__，
+      GRAPH_NAMESPACE=per_thread 时按会话隔离）。
+    - ns 显式传入：直接用该命名空间建独立实例（用户创建的知识库用 kb_id）。
+    缓存键 / work_dir / Neo4j workspace 均以实际命名空间为准。
+    """
+    ns = (ns or "").strip() or _graph_ns(thread_id)
     with _lock:
-        if thread_id in _instances:
-            return _instances[thread_id]
+        if ns in _instances:
+            return _instances[ns]
         import lightrag as _lh
         llm = _make_llm_func()
         emb_fn = _make_embedding_func()
-        work_dir = os.path.join(os.path.dirname(os.path.dirname(str(DB_PATH))), "lightrag_storage", thread_id)
+        work_dir = os.path.join(os.path.dirname(os.path.dirname(str(DB_PATH))), "lightrag_storage", ns)
         os.makedirs(work_dir, exist_ok=True)
 
         # LLM 走主对话网关（base_url/api_key 注入环境变量供 LightRAG 内部使用）
@@ -424,9 +510,9 @@ def build_lightrag_instance(thread_id: str) -> Any:
         rerank = _make_rerank_func()
         kwargs = {
             "working_dir": work_dir,
-            # workspace 用于 Neo4j 节点 label 等隔离维度；显式传 thread_id，
+            # workspace 用于 Neo4j 节点 label 等隔离维度；显式传命名空间，
             # 避免所有会话共用默认 "base" label 导致图互相污染
-            "workspace": thread_id,
+            "workspace": ns,
             "llm_model_func": llm,
             "llm_model_kwargs": {
                 "base_url": os.getenv("OPENAI_BASE_URL", ""),
@@ -451,8 +537,8 @@ def build_lightrag_instance(thread_id: str) -> Any:
         }
         if rerank is not None:
             kwargs["rerank_model_func"] = rerank
-        # 每知识库检索配置覆盖（kb_meta.json 里的 config 段；新建库/默认库读默认值）
-        _kb_cfg = (kb_meta(thread_id).get("config") or {})
+        # 每知识库检索配置覆盖（kb_meta.json 里的 config 段；没有则用默认）
+        _kb_cfg = (kb_meta(ns).get("config") or {})
         # 分块策略：按知识库配置重建 chunking_func（默认 R）
         _strat = str(_kb_cfg.get("chunking_strategy") or _CHUNK_STRATEGY_DEFAULT).upper()
         kwargs["chunking_func"] = _make_chunking_func(_strat)
@@ -495,18 +581,22 @@ def build_lightrag_instance(thread_id: str) -> Any:
             else:
                 logging.getLogger(__name__).warning("VECTOR_STORAGE=faiss 但未安装 faiss-cpu，回退 NanoVectorDB")
         inst = _lh.LightRAG(**kwargs)
-        _instances[thread_id] = inst
+        _instances[ns] = inst
         return inst
 
 
-def get_lightrag(thread_id: str) -> Any:
-    """拿到某个会话的 LightRAG 实例（单例）。"""
-    return build_lightrag_instance(thread_id)
+def get_lightrag(thread_id: str, ns: Optional[str] = None) -> Any:
+    """拿到某会话的 LightRAG 实例（单例）。
+
+    ns 缺省时按 _graph_ns 归一化（会话对话图谱默认到 __global__）；
+    ns 显式传入时按该知识库命名空间取独立实例。
+    """
+    return build_lightrag_instance(thread_id, ns=ns)
 
 
-def _ensure_initialized(thread_id: str) -> None:
-    """确保某会话的 storages 已在 worker loop 上初始化过。"""
-    rag = get_lightrag(thread_id)
+def _ensure_initialized(thread_id: str, ns: Optional[str] = None) -> None:
+    """确保某会话/知识库的 storages 已在 worker loop 上初始化过。"""
+    rag = get_lightrag(thread_id, ns=ns)
     try:
         from lightrag import LightRAG
         status = getattr(rag, "_storages_status", None)
@@ -521,7 +611,7 @@ def _ensure_initialized(thread_id: str) -> None:
         pass
 
 
-def lightrag_insert(thread_id: str, texts: List[str]) -> Any:
+def lightrag_insert(thread_id: str, texts: List[str], ns: Optional[str] = None) -> Any:
     """同步桥：在 worker loop 上执行 ainsert。
 
     入库前先对文本做术语还原（normalize_terms）：把同一概念的常见变体
@@ -529,22 +619,23 @@ def lightrag_insert(thread_id: str, texts: List[str]) -> Any:
     冗余实体节点（见 app.memory.entity_normalizer）。
     入库后再执行一次图谱级变体合并（merge_entity_variants），把依然漏网
     的大小写变体节点（如 GraphRAG / GraphRag）并在图上合二为一。
+    ns 缺省解析会话命名空间（default: __global__）；显式传 ns 写入该知识库。
     """
-    _ensure_initialized(thread_id)
-    rag = get_lightrag(thread_id)
+    _ensure_initialized(thread_id, ns=ns)
+    rag = get_lightrag(thread_id, ns=ns)
     from app.memory.entity_normalizer import normalize_terms
     texts = [normalize_terms(t or "") for t in texts if t]
     if not texts:
         return None
     result = _run_on_worker(rag.ainsert(texts), timeout=600)
     try:
-        merge_entity_variants(thread_id)
+        merge_entity_variants(thread_id, ns=ns)
     except Exception:
         pass  # 合并是优化项，失败不阻塞主链路
     return result
 
 
-def merge_entity_variants(thread_id: str) -> dict:
+def merge_entity_variants(thread_id: str, ns: Optional[str] = None) -> dict:
     """把图上现存的大小写/拼写变体实体并入规范名节点（图谱级后置合并）。
 
     与插入前 normalize_terms 的前置还原组成"双保险"：前置让 LLM 抽取时
@@ -556,13 +647,13 @@ def merge_entity_variants(thread_id: str) -> dict:
     from app.memory.entity_normalizer import canonical_variants
 
     try:
-        rag = get_lightrag(thread_id)
+        rag = get_lightrag(thread_id, ns=ns)
     except Exception:
         return {}
 
     variant_map = canonical_variants()
     merged: dict = {}
-    _ensure_initialized(thread_id)
+    _ensure_initialized(thread_id, ns=ns)
 
     async def _do_merge() -> dict:
         storage = getattr(rag, "chunk_entity_relation_graph", None)
@@ -594,24 +685,28 @@ def merge_entity_variants(thread_id: str) -> dict:
         return merged
 
 
-def lightrag_query(thread_id: str, query: str, top_k: int = 12, mode: str = "hybrid") -> Any:
-    """同步桥：在 worker loop 上执行 aquery，返回查询文本（str）。"""
-    _ensure_initialized(thread_id)
-    rag = get_lightrag(thread_id)
+def lightrag_query(thread_id: str, query: str, top_k: int = 12, mode: str = "hybrid",
+                   ns: Optional[str] = None) -> Any:
+    """同步桥：在 worker loop 上执行 aquery，返回查询文本（str）。
+
+    ns 缺省解析会话命名空间（default: __global__）；显式传 ns 查该知识库。
+    """
+    _ensure_initialized(thread_id, ns=ns)
+    rag = get_lightrag(thread_id, ns=ns)
     from lightrag import QueryParam
     resp = _run_on_worker(rag.aquery(query, param=QueryParam(mode=mode, top_k=top_k)), timeout=300)
     return str(resp)
 
 
-def graph_snapshot(thread_id: str) -> dict:
-    """导出某会话当前知识图谱的节点/边列表（只在 worker loop 上读，线程安全）。
+def graph_snapshot(thread_id: str, ns: Optional[str] = None) -> dict:
+    """导出某会话/知识库当前知识图谱的节点/边列表（只在 worker loop 上读，线程安全）。
 
     返回 {nodes: [{id, name, kind, attrs}], edges: [{id, from_id, to_id, label, attrs}]}，
     供 /api/graph/nodes、/api/graph/edges 使用。NetworkX 存储读内网 Graph 对象；
     Neo4J 存储读 Cypher 快照。
     """
     def _read() -> dict:
-        rag = get_lightrag(thread_id)
+        rag = get_lightrag(thread_id, ns=ns)
         storage = getattr(rag, "chunk_entity_relation_graph", None)
         g = getattr(storage, "_graph", None) if storage is not None else None
         nodes, edges = [], []
@@ -635,7 +730,7 @@ def graph_snapshot(thread_id: str) -> dict:
         return {"nodes": nodes[:500], "edges": edges[:1000]}
 
     async def _ensure_then_read() -> dict:
-        rag = get_lightrag(thread_id)
+        rag = get_lightrag(thread_id, ns=ns)
         try:
             await rag.initialize_storages()
         except Exception:
@@ -689,10 +784,10 @@ async def _neo4j_snapshot(storage: Any) -> dict:
     return {"nodes": node_list[:500], "edges": edge_list[:1000]}
 
 
-def clear_instance(thread_id: str) -> None:
-    """清理某会话的实例。"""
+def clear_instance(thread_id: str, ns: Optional[str] = None) -> None:
+    """清理某会话/知识库的实例。"""
     with _lock:
-        _instances.pop(thread_id, None)
+        _instances.pop((ns or "").strip() or _graph_ns(thread_id), None)
 
 
 def reset_all() -> None:
@@ -709,32 +804,98 @@ def _storage_root() -> str:
     return os.path.join(root, "lightrag_storage")
 
 
-def _workspace_dir(thread_id: str) -> str:
-    """某会话的 workspace 数据目录（hku 版把数据落在 working_dir/workspace/ 下）。"""
-    return os.path.join(_storage_root(), thread_id, thread_id)
+def _workspace_dir(thread_id: str, ns: Optional[str] = None) -> str:
+    """某会话/知识库的 workspace 数据目录（hku 版把数据落在 working_dir/workspace/ 下）。
+
+    会话对话图谱默认解析到全局命名空间 ``__global__``（ns 缺省）；用户创建的知识库
+    传 ns=kb_id，把 kv 存储（doc/chunk/entity 等）落在各自库目录下。
+    """
+    ns = (ns or "").strip() or _graph_ns(thread_id)
+    return os.path.join(_storage_root(), ns, ns)
 
 
 def kb_threads() -> list:
-    """列出所有已有会话（按目录修改时间倒序）。"""
+    """列出所有可参与检索的知识库。
+
+    全局共享模式（默认）：
+      1) ``__global__`` 全局对话图谱（跨会话共享，每轮对话自动喂养；消息框默认勾选）
+      2) 用户通过 kb_create 显式创建的知识库（每库独立命名空间，目录带 kb_meta.json）
+    per-thread 模式：按旧行为列出 lightrag_storage 下全部目录（每个会话即独立知识库）。
+    按目录修改时间倒序。
+    """
     root = _storage_root()
-    out = []
+
+    def _glob_entry():
+        d = os.path.join(root, _GLOBAL_GRAPH_NS)
+        try:
+            mtime = os.path.getmtime(d) if os.path.isdir(d) else 0.0
+        except Exception:
+            mtime = 0.0
+        meta = _read_json_if_exists(os.path.join(d, "kb_meta.json"))
+        return {
+            "id": _GLOBAL_GRAPH_NS,
+            "label": (meta.get("name") or "全局图谱"),
+            "dir": d,
+            "mtime": _iso_dt(mtime),
+            "kind": "global",
+        }
+
+    if not _graph_mode_global():
+        out = []
+        if os.path.isdir(root):
+            try:
+                entries = sorted(
+                    [(n, os.path.getmtime(os.path.join(root, n)))
+                     for n in os.listdir(root)
+                     if os.path.isdir(os.path.join(root, n)) and not n.startswith(".")],
+                    key=lambda kv: kv[1], reverse=True,
+                )
+            except Exception:
+                entries = []
+            for n, mtime in entries:
+                meta = _read_json_if_exists(os.path.join(root, n, "kb_meta.json"))
+                out.append({
+                    "id": n,
+                    "label": (meta.get("name") or n[:13]),
+                    "dir": os.path.join(root, n),
+                    "mtime": _iso_dt(mtime),
+                    "kind": "kb",
+                })
+        return out
+
+    # KB 目录判定：lightrag_storage/<id>/ 下存在 kb_meta.json，且 id != __global__
+    kb_ids = []
     if os.path.isdir(root):
         try:
-            entries = sorted(
-                [(n, os.path.getmtime(os.path.join(root, n)))
-                 for n in os.listdir(root)
-                 if os.path.isdir(os.path.join(root, n)) and not n.startswith(".")],
-                key=lambda kv: kv[1], reverse=True,
+            kb_ids = sorted(
+                (n for n in os.listdir(root)
+                 if os.path.isdir(os.path.join(root, n))
+                 and not n.startswith(".")
+                 and n != _GLOBAL_GRAPH_NS
+                 and os.path.isfile(os.path.join(root, n, "kb_meta.json"))),
+                key=lambda n: os.path.getmtime(os.path.join(root, n)),
+                reverse=True,
             )
         except Exception:
-            entries = []
-        for n, mtime in entries:
-            out.append({
-                "id": n,
-                "label": n[:13],
-                "dir": os.path.join(root, n),
-                "mtime": _iso_dt(mtime),
-            })
+            kb_ids = []
+
+    out = []
+    g = _glob_entry()
+    if g:
+        out.append(g)
+    for n in kb_ids:
+        try:
+            mtime = os.path.getmtime(os.path.join(root, n))
+        except Exception:
+            mtime = 0.0
+        meta = _read_json_if_exists(os.path.join(root, n, "kb_meta.json"))
+        out.append({
+            "id": n,
+            "label": (meta.get("name") or n[:13]),
+            "dir": os.path.join(root, n),
+            "mtime": _iso_dt(mtime),
+            "kind": "kb",
+        })
     return out
 
 
@@ -761,20 +922,21 @@ def _doc_id_for_text(text: str) -> str:
 
 
 def kb_status(thread_id: str) -> dict:
-    """会话知识库概况：文档/分块/实体/关系/图谱/后端信息。"""
-    rag = get_lightrag(thread_id)
+    """会话/知识库概况：文档/分块/实体/关系/图谱/后端信息。"""
+    ns = _kb_resolve_ns(thread_id)
+    rag = get_lightrag(thread_id, ns=ns)
     try:
-        _ensure_initialized(thread_id)
+        _ensure_initialized(thread_id, ns=ns)
     except Exception:
         pass
-    ws = _workspace_dir(thread_id)
+    ws = _workspace_dir(thread_id, ns=ns)
     docs = _read_json_if_exists(os.path.join(ws, "kv_store_doc_status.json"))
     chunks = _read_json_if_exists(os.path.join(ws, "kv_store_text_chunks.json"))
     entities = _read_json_if_exists(os.path.join(ws, "kv_store_full_entities.json"))
     relations = _read_json_if_exists(os.path.join(ws, "kv_store_full_relations.json"))
     snap = {}
     try:
-        snap = graph_snapshot(thread_id)
+        snap = graph_snapshot(thread_id, ns=ns)
     except Exception:
         pass
     vec_cls = type(getattr(rag, "entities_vdb", None)).__name__ if getattr(rag, "entities_vdb", None) else "?"
@@ -802,10 +964,11 @@ def kb_status(thread_id: str) -> dict:
 
 
 def kb_documents(thread_id: str, page: int = 1, page_size: int = 50) -> dict:
-    """某会话的文档列表（分页，按更新时间倒序）。"""
+    """某知识库的文档列表（分页，按更新时间倒序）。"""
     page = max(1, int(page))
     page_size = min(200, max(10, int(page_size)))
-    docs_raw = _read_json_if_exists(os.path.join(_workspace_dir(thread_id), "kv_store_doc_status.json"))
+    ns = _kb_resolve_ns(thread_id)
+    docs_raw = _read_json_if_exists(os.path.join(_workspace_dir(thread_id, ns=ns), "kv_store_doc_status.json"))
     items = sorted(docs_raw.items(),
                    key=lambda kv: str((kv[1] or {}).get("updated_at", "") or ""), reverse=True)
     total = len(items)
@@ -837,7 +1000,8 @@ def kb_chunks(thread_id: str, doc_id: str = "") -> dict:
     nid = ""
     if doc_id:
         nid = doc_id if str(doc_id).startswith("doc-") else "doc-" + str(doc_id)
-    chunks = _read_json_if_exists(os.path.join(_workspace_dir(thread_id), "kv_store_text_chunks.json"))
+    ns = _kb_resolve_ns(thread_id)
+    chunks = _read_json_if_exists(os.path.join(_workspace_dir(thread_id, ns=ns), "kv_store_text_chunks.json"))
     out = []
     for key, rec in chunks.items():
         rec = rec or {}
@@ -863,9 +1027,10 @@ def kb_search(thread_id: str, query: str, top_k: int = 8) -> dict:
     query = (query or "").strip()
     if not query:
         return {"hybrid": "", "vector_hits": []}
-    rag = get_lightrag(thread_id)
+    ns = _kb_resolve_ns(thread_id)
+    rag = get_lightrag(thread_id, ns=ns)
     try:
-        _ensure_initialized(thread_id)
+        _ensure_initialized(thread_id, ns=ns)
     except Exception:
         pass
 
@@ -888,7 +1053,7 @@ def kb_search(thread_id: str, query: str, top_k: int = 8) -> dict:
 
     hybrid = ""
     try:
-        hybrid = str(lightrag_query(thread_id, query, top_k=top_k, mode="hybrid"))
+        hybrid = str(lightrag_query(thread_id, query, top_k=top_k, mode="hybrid", ns=ns))
     except Exception:
         pass
     return {
@@ -908,10 +1073,11 @@ def _with_doc_locator(text: str) -> str:
 
 
 def kb_ingest(thread_id: str, texts: List[str]) -> dict:
-    """向会话知识库喂入文本（同步，含建图）；返回生成的 doc_id 列表。
+    """向某知识库喂入文本（同步，含建图）；返回生成的 doc_id 列表。
 
     每条文本自动加上 '[文档定位] <摘要>' 元数据头：_chunking_func 会把该行
     前置到每个 chunk，让孤立片段向量化时仍保留全文主题上下文。
+    真实创建的知识库按 kb_id 独立喂入；其他 id 全局模式下喂入 __global__。
     """
     texts = [t for t in (texts or []) if isinstance(t, str) and t.strip()]
     if not texts:
@@ -919,18 +1085,19 @@ def kb_ingest(thread_id: str, texts: List[str]) -> dict:
     # doc_id 依据加入定位头后的实际 content 计算，与 LightRAG 内部一致
     prefixed = [_with_doc_locator(t) for t in texts]
     doc_ids = [_doc_id_for_text(t) for t in prefixed]
+    ns = _kb_resolve_ns(thread_id)
     try:
-        lightrag_insert(thread_id, prefixed)
+        lightrag_insert(thread_id, prefixed, ns=ns)
     except Exception as e:
         return {"ok": False, "error": f"喂入失败: {e}", "doc_ids": []}
     # label 用原始文本摘要（不带定位头），doc_ids 用加头后的
-    _patch_text_doc_paths(thread_id, texts, doc_ids)
+    _patch_text_doc_paths(thread_id, texts, doc_ids, ns=ns)
     return {"ok": True, "doc_ids": doc_ids}
 
 
-def _patch_text_doc_paths(thread_id: str, texts: List[str], doc_ids: List[str]) -> None:
+def _patch_text_doc_paths(thread_id: str, texts: List[str], doc_ids: List[str], ns: Optional[str] = None) -> None:
     """文本喂入后，把 doc_status 里的 file_path 从 'unknown_source' 改为有意义的摘要。"""
-    ws = _workspace_dir(thread_id)
+    ws = _workspace_dir(thread_id, ns=ns)
     path = os.path.join(ws, "kv_store_doc_status.json")
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -958,9 +1125,10 @@ def _patch_text_doc_paths(thread_id: str, texts: List[str], doc_ids: List[str]) 
 def kb_delete_doc(thread_id: str, doc_id: str) -> dict:
     """删除某文档及其分块/图谱/向量数据。"""
     nid = doc_id if str(doc_id).startswith("doc-") else "doc-" + str(doc_id)
-    rag = get_lightrag(thread_id)
+    ns = _kb_resolve_ns(thread_id)
+    rag = get_lightrag(thread_id, ns=ns)
     try:
-        _ensure_initialized(thread_id)
+        _ensure_initialized(thread_id, ns=ns)
     except Exception:
         pass
     try:
@@ -973,9 +1141,10 @@ def kb_delete_doc(thread_id: str, doc_id: str) -> dict:
 def kb_reprocess(thread_id: str, doc_id: str) -> dict:
     """重建某文档：先删除、再按原内容重新喂入（向量后端切换后用于重新嵌入）。"""
     nid = doc_id if str(doc_id).startswith("doc-") else "doc-" + str(doc_id)
-    rag = get_lightrag(thread_id)
+    ns = _kb_resolve_ns(thread_id)
+    rag = get_lightrag(thread_id, ns=ns)
     try:
-        _ensure_initialized(thread_id)
+        _ensure_initialized(thread_id, ns=ns)
     except Exception:
         pass
     try:
@@ -990,7 +1159,7 @@ def kb_reprocess(thread_id: str, doc_id: str) -> dict:
     except Exception:
         pass
     try:
-        lightrag_insert(thread_id, [str(content)])
+        lightrag_insert(thread_id, [str(content)], ns=ns)
         return {"ok": True, "doc_id": nid}
     except Exception as e:
         return {"ok": False, "doc_id": nid, "error": f"重建失败: {e}"}
@@ -1042,13 +1211,17 @@ _KB_DEFAULT_CONFIG = {
 }
 
 
-def _kb_meta_path(thread_id: str) -> str:
-    return os.path.join(_storage_root(), thread_id, "kb_meta.json")
+def _kb_meta_path(thread_id: str, ns: Optional[str] = None) -> str:
+    return os.path.join(_storage_root(), (ns or "").strip() or _graph_ns(thread_id), "kb_meta.json")
 
 
 def kb_meta(thread_id: str) -> dict:
-    """读某知识库元信息（kb_meta.json）；不存在则返回带默认名的占位。"""
-    p = _kb_meta_path(thread_id)
+    """读某知识库元信息（kb_meta.json）；不存在则返回带默认名的占位。
+
+    命名空间解析：真实创建的知识库用 kb_id 本身；其他 id（全局模式下）
+    落到 __global__（对话全局图谱的元信息）。
+    """
+    p = _kb_meta_path(thread_id, ns=_kb_resolve_ns(thread_id))
     try:
         with open(p, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -1060,8 +1233,9 @@ def kb_meta(thread_id: str) -> dict:
 
 
 def kb_save_meta(thread_id: str, meta: dict) -> None:
-    os.makedirs(os.path.dirname(_kb_meta_path(thread_id)), exist_ok=True)
-    with open(_kb_meta_path(thread_id), "w", encoding="utf-8") as f:
+    ns = _kb_resolve_ns(thread_id)
+    os.makedirs(os.path.dirname(_kb_meta_path(thread_id, ns=ns)), exist_ok=True)
+    with open(_kb_meta_path(thread_id, ns=ns), "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
 
 
@@ -1078,15 +1252,26 @@ def kb_set_config(thread_id: str, cfg: dict) -> dict:
     meta["config"] = {**_KB_DEFAULT_CONFIG, **(meta.get("config") or {}), **clean}
     kb_save_meta(thread_id, meta)
     # 检索配置作用于实例构建；已有实例需重建才生效
-    clear_instance(thread_id)
+    clear_instance(thread_id, ns=_kb_resolve_ns(thread_id))
     return kb_get_config(thread_id)
 
 
 def kb_create(thread_id: Optional[str] = None, name: str = "", description: str = "") -> dict:
-    """新建知识库：生成 thread_id、建目录结构、写元信息。"""
+    """新建知识库：生成独立 kb_id（命名空间）、建目录结构、写元信息。
+
+    与 __global__ 对话全局图谱完全独立：每个库有自己的 lightrag_storage/<kb_id>/
+    目录、Neo4j workspace 与检索配置。返回的 thread_id 即 kb_id，勾选该库后
+    L6 检索会在其独立图谱上执行。
+    """
     import uuid
     tid = (thread_id or "").strip() or uuid.uuid4().hex[:20]
-    ws = _workspace_dir(tid)
+    if tid == _GLOBAL_GRAPH_NS:
+        # 全局图谱由对话自动喂养，不允许被"新建知识库"抢占
+        tid = uuid.uuid4().hex[:20]
+    ns = _kb_ns(tid)
+    # 库刚创建时 _kb_resolve_ns 看不到 kb_meta.json（还没写），必须先建目录
+    # 再直接往 kb 自身命名空间落元信息，避免被归到 __global__。
+    ws = _workspace_dir(tid, ns=ns)
     os.makedirs(ws, exist_ok=True)
     meta = {
         "name": (name or "").strip() or tid[:13],
@@ -1094,7 +1279,9 @@ def kb_create(thread_id: Optional[str] = None, name: str = "", description: str 
         "config": _KB_DEFAULT_CONFIG,
         "created_at": __import__("datetime").datetime.now().isoformat(timespec="seconds"),
     }
-    kb_save_meta(tid, meta)
+    os.makedirs(os.path.dirname(_kb_meta_path(tid, ns=ns)), exist_ok=True)
+    with open(_kb_meta_path(tid, ns=ns), "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
     return {"ok": True, "thread_id": tid, "name": meta["name"], "description": meta["description"]}
 
 
@@ -1103,7 +1290,8 @@ def kb_list() -> list:
     out = []
     for t in kb_threads():
         tid = t["id"]
-        ws = _workspace_dir(tid)
+        ns = _kb_resolve_ns(tid)
+        ws = _workspace_dir(tid, ns=ns)
         docs = _read_json_if_exists(os.path.join(ws, "kv_store_doc_status.json"))
         chunks = _read_json_if_exists(os.path.join(ws, "kv_store_text_chunks.json"))
         entities = _read_json_if_exists(os.path.join(ws, "kv_store_full_entities.json"))
@@ -1124,14 +1312,20 @@ def kb_list() -> list:
             "status_counts": st_counts,
             "created_at": meta.get("created_at") or "",
             "updated_at": t.get("mtime") or "",
+            "kind": t.get("kind", ""),
         })
     return out
 
 
 def kb_delete_thread(thread_id: str) -> dict:
-    """删除整个知识库（本地目录 + 尽力删 Neo4j 该 label 节点 + 清除实例）。"""
+    """删除整个知识库（本地目录 + 尽力删 Neo4j 该 label 节点 + 清除实例）。
+
+    只删除显式 kb_id 对应的独立命名空间目录；__global__ 全局对话图谱不允许删除。
+    """
     import shutil
-    tid = str(thread_id)
+    tid = _kb_ns(str(thread_id))
+    if tid == _GLOBAL_GRAPH_NS:
+        return {"ok": False, "thread_id": tid, "error": "全局对话图谱不允许删除"}
     root_dir = os.path.join(_storage_root(), tid)
     # 尽力删 Neo4j 节点（label=thread_id，需反引号）
     try:
@@ -1143,7 +1337,7 @@ def kb_delete_thread(thread_id: str) -> dict:
             shutil.rmtree(root_dir, ignore_errors=True)
         except Exception:
             pass
-    clear_instance(tid)
+    clear_instance(tid, ns=tid)
     return {"ok": True, "thread_id": tid}
 
 
@@ -1219,7 +1413,8 @@ def _trends_7d():
 
     for t in kb_threads():
         try:
-            recs = _read_json_if_exists(os.path.join(_workspace_dir(t["id"]), "kv_store_doc_status.json"))
+            ns = _kb_resolve_ns(t["id"])
+            recs = _read_json_if_exists(os.path.join(_workspace_dir(t["id"], ns=ns), "kv_store_doc_status.json"))
         except Exception:
             continue
         for rec in recs.values():
@@ -1329,9 +1524,10 @@ def kb_import_url(thread_id: str, url: str) -> dict:
 def kb_delete_chunk(thread_id: str, chunk_key: str) -> dict:
     """删除某个切片：KV + 向量 + 所属文档的 chunks 计数。"""
     key = str(chunk_key)
-    rag = get_lightrag(thread_id)
+    ns = _kb_resolve_ns(thread_id)
+    rag = get_lightrag(thread_id, ns=ns)
     try:
-        _ensure_initialized(thread_id)
+        _ensure_initialized(thread_id, ns=ns)
     except Exception:
         pass
     doc_id = str(key).split("-chunk-")[0]
@@ -1356,9 +1552,10 @@ def kb_edit_chunk(thread_id: str, chunk_key: str, content: str, tags: str = "") 
     key = str(chunk_key)
     if not (content or "").strip():
         return {"ok": False, "chunk_key": key, "error": "内容为空"}
-    rag = get_lightrag(thread_id)
+    ns = _kb_resolve_ns(thread_id)
+    rag = get_lightrag(thread_id, ns=ns)
     try:
-        _ensure_initialized(thread_id)
+        _ensure_initialized(thread_id, ns=ns)
     except Exception:
         pass
     try:

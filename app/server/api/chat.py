@@ -81,6 +81,13 @@ async def chat_endpoint(payload: dict):
 
     thread_id = (payload or {}).get("thread_id") or (_srv_cfg._CONFIG or {}).get("configurable", {}).get("thread_id", "default")
     config = {"configurable": {"thread_id": thread_id}}
+    # 本轮勾选参与检索的知识库（消息框多选，默认含 __global__）。
+    # 空 list / 未传 → 仅全局对话图谱。
+    _kbs = (payload or {}).get("selected_kbs") or []
+    if _kbs:
+        _kb_list = [str(k) for k in _kbs if str(k or "").strip()]
+        if _kb_list:
+            config["configurable"]["selected_kbs"] = _kb_list
 
     # resume 即审批决策：把 allow/mode 回填到最近一条审批提问记录（重启后可完整回放审批卡）
     if is_resume:

@@ -94,7 +94,7 @@ class LightgraphQueryTest(unittest.TestCase):
     def test_hit_returns_content(self):
         grt.lightrag_query.return_value = "Entity: HarmonyOS 5.0 supports DeepSeek V4"
         self.assertEqual(grt.lightgraph_query("tid", "HarmonyOS"),
-                         "Entity: HarmonyOS 5.0 supports DeepSeek V4")
+                         "【全局图谱】\nEntity: HarmonyOS 5.0 supports DeepSeek V4")
 
     def test_miss_returns_empty(self):
         grt.lightrag_query.return_value = ""
@@ -103,7 +103,21 @@ class LightgraphQueryTest(unittest.TestCase):
     def test_failure_degrades_to_hint(self):
         grt.lightrag_query.side_effect = ValueError("no endpoint")
         self.assertEqual(grt.lightgraph_query("tid", "x"),
-                         "[GraphRAG 检索失败：no endpoint]")
+                         "【__global__】检索失败：no endpoint")
+
+    def test_multi_namespace_merges_results(self):
+        # 勾选知识库后，全局图谱 + 库各自查询并带前缀合并；单个失败不阻塞
+        grt.lightrag_query.side_effect = ["全局命中", "库命中", "", ValueError("boom")]
+        from app.memory import ligraphrag_adapter as LA
+        LA.set_current_kbs(["kb-1", "kb-2", "kb-3"])
+        try:
+            out = grt.lightgraph_query("tid", "q", top_k=4)
+        finally:
+            LA.set_current_kbs(None)
+        self.assertIn("【全局图谱】\n全局命中", out)
+        self.assertIn("【kb-1】\n库命中", out)
+        # kb-2 空命中跳过，kb-3 失败降级前缀标注
+        self.assertIn("【kb-3】检索失败：boom", out)
 
     def test_l6_context_formatting_truncates(self):
         grt.lightrag_query.return_value = "\n\n".join([f"内容第{i}行，实测长度不算太长" for i in range(1, 30)])
@@ -156,8 +170,22 @@ class GraphToolsTest(unittest.TestCase):
         self._resolve.return_value = "t1"
         grt.lightrag_query.return_value = "Entity: A supports B"
         out = lightgraph_query.invoke({"query": "q1", "top_k": 6})
-        self.assertEqual(out, "Entity: A supports B")
-        grt.lightrag_query.assert_called_once_with("t1", "q1", top_k=6)
+        self.assertEqual(out, "【全局图谱】\nEntity: A supports B")
+        # 勾选的当前知识库为空时退化为只查全局对话图谱
+        grt.lightrag_query.assert_called_once_with("t1", "q1", top_k=6, ns="__global__")
+
+    def test_lightgraph_query_forwards_checked_kbs(self):
+        from app.tools.graph_rag_tools import lightgraph_query
+        from app.memory import ligraphrag_adapter as LA
+        self._resolve.return_value = "t1"
+        LA.set_current_kbs(["__global__", "kb-9"])
+        try:
+            grt.lightrag_query.side_effect = ["G", "K"]
+            out = lightgraph_query.invoke({"query": "q1", "top_k": 6})
+        finally:
+            LA.set_current_kbs(None)
+        self.assertIn("【全局图谱】\nG", out)
+        self.assertIn("【kb-9】\nK", out)
 
     def test_record_graph_forwards_thread(self):
         from app.tools.graph_rag_tools import record_graph
