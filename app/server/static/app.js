@@ -265,7 +265,7 @@ async function uploadFileToBar(file) {
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
     if (State.pendingAttachments.length >= 6) throw new Error("一次最多挂 6 个附件");
-    State.pendingAttachments.push({ path: d.path, name: d.name || d.path, isImg: imgLike });
+    State.pendingAttachments.push({ path: d.path, name: d.name || d.path, isImg: imgLike, size: d.size || 0 });
     renderAttachBar();
     chatInput.focus();
   } catch (e) {
@@ -282,6 +282,7 @@ function renderAttachBar() {
     <div class="attach-item">
       ${a.isImg ? `<img src="/api/${a.path}" alt="">` : `<div class="attach-file">📄</div>`}
       <span class="attach-name" title="${escapeHtml(a.name)}">${escapeHtml(a.name)}</span>
+      <span class="attach-meta" title="估算上下文占用">≈${fmtTokens(estimateAttachmentTokens(a))} · ${fmtBytes(a.size || 0)}</span>
       <button class="attach-remove" data-i="${i}" title="移除附件">×</button>
     </div>`).join("");
   bar.classList.toggle("hidden", !atts.length);
@@ -289,6 +290,7 @@ function renderAttachBar() {
     State.pendingAttachments.splice(+b.dataset.i, 1);
     renderAttachBar();
   }));
+  refreshComposerStats(null, false);
 }
 
 /* ==================== 知识库选择器（消息框多选） ==================== */
@@ -383,6 +385,93 @@ function kbSelectionForSend() {
   return Array.from(new Set(sel));
 }
 
+/* ==================== 发送框状态条（轮数 / 上下文占用 / 附件上下文） ==================== */
+const CONTEXT_WINDOW_HINTS = [
+  { re: /deepseek|gpt-4|gpt-4o|gpt-4\.5|glm|qwen|kimi|minimax/i, n: 131072 },
+  { re: /claude/i, n: 200000 },
+  { re: /gpt-3\.5|gpt-4o-mini|gpt-4-mini/i, n: 16384 },
+];
+function modelContextWindow() {
+  const m = String((State.model && State.model.model) || "");
+  for (const h of CONTEXT_WINDOW_HINTS) if (h.re.test(m)) return h.n;
+  return 131072;  // 未知模型按 128k 估算
+}
+function fmtTokens(n) {
+  n = Math.max(0, Math.round(n || 0));
+  if (n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, "") + "k";
+  return String(n);
+}
+function fmtBytes(b) {
+  b = Math.max(0, Math.round(b || 0));
+  if (b >= 1048576) return (b / 1048576).toFixed(1) + " MB";
+  if (b >= 1024) return Math.round(b / 1024) + " KB";
+  return b + " B";
+}
+/* 附件上下文估算：图片分辨率未知，按文件大小粗估（封顶压制夸张值）；文本类按字节 */
+function estimateAttachmentTokens(a) {
+  if (!a || !a.size) return 0;
+  if (a.isImg) return Math.min(2000, Math.max(300, Math.round(a.size / 256)));
+  return Math.max(1, Math.round(a.size / 3));
+}
+function pendingAttachTokens() {
+  return (State.pendingAttachments || []).reduce((s, a) => s + estimateAttachmentTokens(a), 0);
+}
+/* 会话统计缓存：同一 thread 20s 内不重复拉 /api/messages（只重算附件），避免列表刷新频繁请求 */
+const ctxStatsCache = { tid: "", at: 0, turns: 0, used: 0 };
+async function refreshComposerStats(msgs, force) {
+  const elTurns = $("#csTurns"), elCtx = $("#csCtx"), elPct = $("#csCtxPct"),
+        elFill = $("#csCtxFill"), elAttach = $("#csAttach");
+  if (!elTurns) return;
+  if (!State.threadId || !State.threadId.length) {
+    elTurns.textContent = "0 轮";
+    if (elPct) elPct.textContent = "—";
+    if (elFill) elFill.style.width = "0%";
+    if (elCtx) { elCtx.classList.remove("hot", "danger"); elCtx.title = "上下文窗口占用"; }
+    if (elAttach) elAttach.hidden = true;
+    return;
+  }
+  const now = Date.now();
+  const cached = ctxStatsCache.tid === State.threadId && now - ctxStatsCache.at < 20000;
+  let turns = cached ? ctxStatsCache.turns : 0;
+  let used = cached ? ctxStatsCache.used : 0;
+  if (!cached || force) {
+    if (msgs && Array.isArray(msgs.messages)) {
+      const arr = msgs.messages || [];
+      used = msgs.total_tokens || arr.reduce((s, m) => s + (m.tokens || 0), 0);
+      turns = arr.filter((m) => m.role === "user" && String(m.content || "").trim()).length;
+    } else {
+      try {
+        const data = await apiGet(`/api/messages?thread_id=${encodeURIComponent(State.threadId)}&limit=500`);
+        const arr = data.messages || [];
+        used = data.total_tokens || arr.reduce((s, m) => s + (m.tokens || 0), 0);
+        turns = arr.filter((m) => m.role === "user" && String(m.content || "").trim()).length;
+      } catch (e) { /* 拉取失败保留旧值 */ }
+    }
+    ctxStatsCache.tid = State.threadId;
+    ctxStatsCache.at = now;
+    ctxStatsCache.turns = turns;
+    ctxStatsCache.used = used;
+  }
+  const attachTok = pendingAttachTokens();
+  const win = modelContextWindow();
+  const usedAll = used + attachTok;
+  const pct = win > 0 ? Math.min(999, (usedAll / win) * 100) : 0;
+  elTurns.textContent = `${turns} 轮`;
+  if (elPct) elPct.textContent = pct >= 100 ? ">99%" : (pct < 1 ? "<1%" : Math.round(pct) + "%");
+  if (elFill) elFill.style.width = Math.min(100, pct) + "%";
+  if (elCtx) {
+    elCtx.classList.toggle("hot", pct > 70);
+    elCtx.classList.toggle("danger", pct > 92);
+    elCtx.title = `上下文占用 ≈ ${fmtTokens(used)} 已用 + ${fmtTokens(attachTok)} 附件 / ${fmtTokens(win)} 窗口（${Math.round(pct)}%估算）`;
+  }
+  if (elAttach) {
+    const n = (State.pendingAttachments || []).length;
+    elAttach.hidden = !n;
+    elAttach.textContent = `📎 ${n} · ≈${fmtTokens(attachTok)}`;
+    elAttach.title = `${n} 个待发附件，估算占用上下文 ≈ ${fmtTokens(attachTok)} tokens`;
+  }
+}
+
 /* 图片链接预处理：把消息里的裸图片 URL / 本地技能产物路径转成 markdown 图片语法，
    使 marked 渲染成 <img>。本地产物走受登录保护的 /api/skill-media/ 端点。 */
 function imageizeMarkdown(text) {
@@ -440,6 +529,7 @@ function scrollToBottom() {
 
 function renderWelcome() {
   closeProcGroup();  // 欢迎页 = 新会话起点，过程聚合组一并作废
+  refreshComposerStats(null, true); // 新会话（或空会话）：刷新轮数/上下文状态条
   const inner = messagesInner();
   inner.innerHTML = `
     <div class="welcome">
@@ -1419,6 +1509,7 @@ async function sendMessage(text, opts) {
     setLiveBadge(false);
     updateComposer();
     loadThreads(); // 刷新会话列表（标题/时间）
+    refreshComposerStats(null, true); // 消息刚落库，重算轮数与上下文占用
     refreshTopbar();
   }
 }
@@ -1449,6 +1540,7 @@ async function loadHistory(tid) {
     // 第一条 user 消息做标题
     const firstUser = msgs.find((m) => m.role === "user");
     if (firstUser) updateChatTitle(firstUser.content);
+    refreshComposerStats(data, true);
     renderHistory(msgs);
   } catch (e) {
     renderWelcome();
@@ -2485,6 +2577,7 @@ async function renderModelsTab(el) {
           const r = await apiPost("/api/switch-model", { provider, model });
           State.model = { provider, model };
           refreshTopbar();
+          refreshComposerStats(null, true); // 窗口大小随模型变化，重算占用比例
           toast(`已切换到 ${model}`, "success");
           renderModelsTab(el);
         } catch (e) { toast(e.message, "error"); }
