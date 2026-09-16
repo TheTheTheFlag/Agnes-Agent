@@ -19,6 +19,7 @@ wheels/
 data/*.db
 data/*.db-shm
 data/*.db-wal
+data/*.bak
 data/.model_config
 # L6 知识图谱持久化（每会话一个子目录），不入仓
 lightrag_storage/
