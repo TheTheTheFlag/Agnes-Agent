@@ -1507,9 +1507,9 @@ def kb_retry_failed_async(thread_id: str, strategy: str = "", target: str = "bot
             content = str(rec_doc.get("content") or "")
         elif rec_doc is not None and getattr(rec_doc, "content", None):
             content = str(rec_doc.content or "")
-        if not content.strip():
+        if not (content or "").strip():
             continue
-        entries.append((content, nid, None))
+        entries.append((content or "", nid, None))
     if not entries:
         return {"ok": False, "error": "没有可重试的失败文档", "track_id": "", "splits": 0}
     track_id = _start_ingest_job(thread_id, ns, entries, strategy, target, "retry")
