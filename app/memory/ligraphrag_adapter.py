@@ -1488,9 +1488,9 @@ def kb_ingest_async(thread_id: str, texts: List[str], strategy: str = "", target
 def kb_retry_failed_async(thread_id: str, strategy: str = "", target: str = "both") -> dict:
     """把该知识库所有 failed 状态的文档按原内容重新喂入（后台串行 + 限速重试）。"""
     ns = _kb_resolve_ns(thread_id)
-    rag = get_lightrag(thread_id, ns=ns)
     ws = _workspace_dir(thread_id, ns=ns)
     data = _read_json_if_exists(os.path.join(ws, "kv_store_doc_status.json")) or {}
+    full = _read_json_if_exists(os.path.join(ws, "kv_store_full_docs.json")) or {}
     entries: List[tuple] = []
     for key, rec in sorted(
         data.items(), key=lambda kv: str((kv[1] or {}).get("updated_at") or ""), reverse=True
@@ -1498,18 +1498,13 @@ def kb_retry_failed_async(thread_id: str, strategy: str = "", target: str = "bot
         if str((rec or {}).get("status") or "").lower() != "failed":
             continue
         nid = key if key.startswith("doc-") else "doc-" + key
-        content = None
-        try:
-            rec_doc = _run_on_worker(rag.full_docs.get_by_id(nid), timeout=60)
-        except Exception:
-            rec_doc = None
-        if isinstance(rec_doc, dict):
-            content = str(rec_doc.get("content") or "")
-        elif rec_doc is not None and getattr(rec_doc, "content", None):
-            content = str(rec_doc.content or "")
-        if not (content or "").strip():
+        fd = full.get(nid)
+        if not isinstance(fd, dict):
+            fd = full.get(key)
+        content = str((fd or {}).get("content") or "")
+        if not content.strip():
             continue
-        entries.append((content or "", nid, None))
+        entries.append((content, nid, None))
     if not entries:
         return {"ok": False, "error": "没有可重试的失败文档", "track_id": "", "splits": 0}
     track_id = _start_ingest_job(thread_id, ns, entries, strategy, target, "retry")
