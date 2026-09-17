@@ -18,6 +18,7 @@
 - [业务流程（从一次对话到记忆落库）](#-业务流程从一次对话到记忆落库)
 - [模块架构（按 Agent 能力分类）](#-模块架构按-agent-能力分类)
 - [设计思路与实现过程](#-设计思路与实现过程)
+- [创作工作台（图片 / 视频生成）](#-创作工作台图片--视频生成)
 - [踩坑与解决实录](#-踩坑与解决实录)
 - [实战案例：22 万条医疗问答全量入库](#-实战案例22-万条医疗问答全量入库本地嵌入--服务器替换)
 - [项目文件结构](#-项目文件结构)
@@ -64,9 +65,10 @@ Web 面板（默认 http://localhost:8081，被占自动顺延）：
 - ✅ **分层记忆系统**：L1 对话消息（含工具调用事件） / L2 用户画像 / L3 任务历史（dag_plans） / L6 知识图谱 GraphRAG（实体关系图谱 + 混合检索，详见 [docs/l6-graphrag.md](docs/l6-graphrag.md)；原 L4 命令历史与 L5 语义缓存已并入 L1 事件与 L6 图谱）
 - ✅ **实体归一化双保险**：入库前 `normalize_terms` 术语还原 + 入库后 `merge_entities` 图谱合并，抑制 LightRAG 大小写/拼写变体导致的实体节点膨胀（`RAG/Rag`、`GraphRAG/GraphRag` 等只留一个规范节点）
 - ✅ **多 Key 自动轮换**：api_key 逗号分隔，限流/超时/鉴权自动换 key + 指数退避重试
-- ✅ **知识库（KB）管理**：文档/分块/检索/问答反馈管理，每库可覆盖分块策略与抽取指引；对话图谱默认**全局共享一张图**（所有会话读写同一命名空间 `__global__`，跨会话可共享每轮对话知识）；用户经 `kb_create` 显式创建的知识库是**独立命名空间**（`lightrag_storage/<kb_id>/` 自含目录/图谱/向量索引），消息框可**多选勾选**参与本轮 L6 检索（默认只查 `__global__`）；`GRAPH_NAMESPACE=per_thread` 可退回按线程隔离
+- ✅ **知识库（KB）管理**：文档/分块/检索/问答反馈管理，每库可覆盖分块策略与抽取指引；对话图谱默认**全局共享一张图**（所有会话读写同一命名空间 `__global__`，跨会话可共享每轮对话知识）；用户经 `kb_create` 显式创建的知识库是**独立命名空间**（`lightrag_storage/<kb_id>/` 自含目录/图谱/向量索引），消息框可**多选勾选**确定本轮 L6 检索范围——**勾了什么查什么，什么都没勾就什么都不查**（`__global__` 只是列表里的一项；默认一个都不勾，勾选结果存在浏览器 localStorage 下次自动恢复）；`GRAPH_NAMESPACE=per_thread` 可退回按线程隔离
 - ✅ **技能系统（Skills）**：SKILL.md 即技能，命中本地装、不够用 SkillHub 在线搜装
 - ✅ **沉浸式 Web 面板**：流式对话、工具状态行、审批卡片、State/日志/记忆/定时任务调试抽屉、模型一键切换
+- ✅ **创作工作台（图片 / 视频）**：侧边栏品牌名下方一键进入，与对话页同壳切换（顶部 tab 图片 / 视频）；图片生成 + Agnes Video 2.5 Flash / V2.0 的文生视频 / 图生视频 / 首尾帧 / 关键帧 / 图片参考；异步任务前端轮询、完成即**自动下载 mp4 到服务器**（ffmpeg 抽帧封面 + ffprobe 读时长），作品库可回看 / 删除 —— 详见 [创作工作台](#-创作工作台图片--视频生成)
 - ✅ **标准 cron 定时任务**：`*/5 * * * *` 常规 cron 语法驱动 Agent 周期性执行任务
 
 ---
@@ -112,6 +114,8 @@ LLM 类型: <class 'app.llm.llm_factory.RotatingKeyChatOpenAI'> | provider=opena
 打开 http://localhost:8000 即可使用。**首次打开调试面板时会引导你设置账号密码**——凭据以 PBKDF2-SHA256（12 万轮 + 随机 salt）存入 `data/auth.json`（已 `.gitignore`，不含明文密码）；想重置就删掉该文件再刷新页面。若设置了 `.env` 的 `AGENT_USERNAME` / `AGENT_PASSWORD`（两个都填才生效），则优先使用它，适合无人值守部署。首次使用先到右上角 **设置 → 模型** 页接入你的模型（填 Base URL + API Key，可自动拉取模型列表）。
 
 > `.env` 只放非模型密钥（如 `TAVILY_API_KEY`）；模型凭据统一在 `data/.model_config` 由设置页管理。
+>
+> 创作工作台另有可选环境变量 `AGNES_PUBLIC_BASE_URL`（如 `http://god.makeup:8081`）：仅当上游拒收内联 Data URI、需要公开素材地址时作为兜底基址（见[创作工作台](#-创作工作台图片--视频生成)）。
 
 ### 服务模式（HTTP 常驻 + 后台服务）
 
@@ -471,6 +475,27 @@ pending ──(强依赖父全部 success)──► ready ──► running ─�
 
 ---
 
+## 🎬 创作工作台（图片 / 视频生成）
+
+侧边栏品牌名下方的 **🎬 创作工作台** 与对话页同壳切换（顶部 tab：图片 / 视频），进入创作不会打断当前会话的上下文。
+
+### 图片
+
+- 复用 agnes 网关的多 Key 轮换（`.model_config` 中 base_url 含 `agnes-ai` 的 provider，`api_key` 逗号分隔；退化到 `skills/agnes-media/keys.json`）；
+- 产物落盘 `data/image_library/`，删除走 `POST /api/image/delete`。
+
+### 视频（Agnes Video 2.5 Flash / V2.0）
+
+- 后端 `app/server/api/video.py`，端点：`GET /api/video/status`、`POST /api/video/generate`、`GET /api/video/task/{id}`、`GET /api/video/history`、`GET /api/video/file/{id}?thumb=1`、`POST /api/video/delete`；
+- 异步任务：创建拿到 `video_id` → 前端每 3s 轮询 `task/{id}` → 上游 `completed` 后**自动下载 mp4 到 `data/video_library/`**（`ffmpeg` 抽帧封面 + `ffprobe` 读时长）；文件用 `FileResponse` 流式返回（starlette 支持 Range，可直接拖进度条）；
+- 创建按 key 轮换（429 / 5xx 换下一个 key，4xx 参数错误立即抛出），查询沿用创建时的同一个 key；
+- **参考图一律内联 Data URI**：实测 flash 的 `first_frame` / `last_frame` / `images` 与 v2.0 的 `image` / `extra_body.image` 都接受 Base64 / Data URI，**不需要公网地址**；
+- 兜底：若上游仍以「载体必须是公开 http(s) URL」拒收，则把图片复制到 `data/video_ref/` 并经公开挂载 `/pub/video-ref` 暴露，公开地址取 `AGNES_PUBLIC_BASE_URL`（优先）或本次请求的 `request.base_url`。
+
+> ⚠️ 素材体积不能过小：纯色小图（base64 仅数百字符）会被上游判为「非法载体」并返回 HTTP 400；正常照片（base64 数 KB 以上）没有这个问题。
+
+---
+
 ## 🔥 踩坑与解决实录（真实经历）
 
 1. **坑：模型工具调用增量以 dict 形态投递，`getattr` 读出来恒为空。**
@@ -505,6 +530,21 @@ pending ──(强依赖父全部 success)──► ready ──► running ─�
 
 11. **坑：纯向量库检索永远返回 `[no-context]`。**
    → LightRAG 的 `local/global/hybrid` 只走图谱（实体/关系），对 `target=vector`（无实体）的库必然空命中。解决：`_auto_query_mode` 在检测到实体向量库为空时，把 `local/global/hybrid` 自动降级为 `naive`（含 `naive` 的 `mix` 不动）；有图谱的 `__global__` 对话图谱仍走 `hybrid`。
+
+12. **坑：前端明明只勾了「医疗知识库」，检索却混进全局对话图谱的无关实体。**
+   → `graph_rag_tool._namespaces()` 原先**无条件**把会话图谱 `__global__` 放在第一位，勾选的知识库只是"追加"——所以取消勾选全局完全无效，L6 注入里会混入 `GraphRAG/RAG/Gemini` 等对话记忆实体。且旧前端 `kbCheckedSet/kbSelectionForSend` 把空列表也回退成 `["__global__"]`，导致"一个都不勾"根本做不到（旧 `kbCheckedSet` 里空 `[]` 会被判定为默认值，把全局又勾回去）。解决：**勾选即范围**——`_namespaces` 以勾选列表为唯一范围（为空则一个都不查），`__global__` 仅作别名解析为会话命名空间；前端默认一个都不勾，并用 `localStorage` 记住上次选择（`loadSelectedKbs/saveSelectedKbs`）。
+
+13. **坑：一个医疗问题仍会召回 `RAG/GraphRAG/XDR` 等完全不相关的实体。**
+   → 不是勾选的问题，是**相关性阈值**问题：LightRAG 的实体/关系/分块向量库默认 `cosine_better_than_threshold=0.2`，而 bge-m3 对**任意**中文文本的基线相似度就有 0.34+；对话图 `__global__` 又是跨领域大杂烩（agent 自述 RAG/KAG/XDR 的内容也被 `_feed_turn_async` 喂了进去），于是低相似度实体照样被召进 L6 注入与「知识检索」面板（实测：相关医学实体 0.45~0.57，无关的 XDR 0.36 / Privilege Escalation 0.34 / Gynecological 0.40）。解决：`_apply_graph_relevance_threshold` 把**实体/关系**向量库阈值单独调到 **0.5**（`GRAPH_COSINE_THRESHOLD` 可覆盖），**分块**向量库保持 0.2 以免伤害向量库召回。
+
+14. **坑：flash 参考图参数一度被误判为「只能传公开 URL」。**
+   → 早期用**纯色小图**探测（256×192，base64 仅 792 字符），`first_frame` / `images` 的 Data URI 与裸 Base64 全部 400 `载体必须是公开 http(s) URL 或合法 Base64`，于是错判为"必须公网 URL"，甚至为此写了 `/pub/video-ref` 公开挂载。换成正常尺寸照片后再测：Data URI 与裸 Base64 **全部 200**。根因是上游对**过小/可疑载体**的校验，不是格式限制。解决：参考图统一内联 Data URI，公开挂载只留作兜底。
+
+15. **坑：把参考图挂到自家公网 `http://god.makeup:8081/pub/video-ref/...`，上游永远 400 `素材 URL 无法下载或不是支持的媒体格式`。**
+   → 本机与公网 curl 该地址都是 200 `image/png`，但 Agnes 服务端抓不到（端口不可达或被拦）。结论：**别依赖自家域名给上游取图**，内联 Data URI 才稳。
+
+16. **坑：图片删除在服务器上 404（`DELETE /api/image`）。**
+   → 本地正常、服务器上被反向代理/中间件对 `DELETE` 的处理差异吞掉。解决：改为 `POST /api/image/delete`，语义不变但后端到后端一路畅通。
 
 ---
 
@@ -564,13 +604,13 @@ Agnes-Agent/
 │   ├── tools/                     # 工具层：文件/命令/记忆/搜索/图谱/技能/规划触发（集中注册）
 │   ├── skills/                    # 技能层：loader(扫描 SKILL.md) + hub(SkillHub) + 用户技能
 │   └── server/                    # 服务层：FastAPI + SSE 流式 + 调试面板前端
-│       ├── api/                   # chat(双通道流) / kb(知识库) / memory / tools / graph / system / skills / git / upload
+│       ├── api/                   # chat(双通道流) / kb(知识库) / memory / tools / graph / system / skills / git / upload / image(图片) / video(视频)
 │       ├── store.py               # 日志 / 事件流 / State 快照 / 会话删除
 │       ├── config.py              # 模型目录管理（自定义来源，无内置厂商）
 │       ├── console_log.py         # 控制台彩色日志
 │       ├── git_ops.py             # 自动 git 快照
 │       ├── auth.py                # PBKDF2 认证
-│       └── static/                # 前端（index.html + app.js + style.css）
+│       └── static/                # 前端（index.html + app.js + style.css + image-studio.js + video-studio.js）
 ├── data/                          # 运行时数据（memory.db / checkpoints.db / app_logs.db / traces/ / auth.json）
 ├── lightrag_storage/              # L6 知识图谱持久化（默认全局共享一张图：__global__ 子目录含 KV + 图谱 + 向量索引；GRAPH_NAMESPACE=per_thread 时每会话一个子目录）
 ├── neo4j/                         # 本地 Neo4j 5.26 图数据库（GRAPH_STORAGE=neo4j 时使用；gitignored）
@@ -589,7 +629,8 @@ Agnes-Agent/
 
 **Roadmap**
 
-- [ ] 接入更多工具（浏览器操作、数据库查询、图片生成）
+- [ ] 接入更多工具（浏览器操作、数据库查询）
+- [x] 图片生成 / 视频生成（创作工作台：图片 + Agnes Video 2.5 Flash / V2.0）
 - [ ] 多模态输入（图片/语音进对话）
 - [ ] 记忆检索从"numpy 余弦"升级到专用向量库（已具备 embeddings，换后端即可）
 - [ ] 流式中间态可视化（思考过程实时图谱动画）

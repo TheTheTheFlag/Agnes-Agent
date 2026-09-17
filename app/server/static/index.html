@@ -20,6 +20,10 @@
         </span>
         <span class="brand-name">Agnes Agent</span>
       </div>
+      <button id="btnStudio" class="btn-studio" title="创作工作台（图片 / 视频生成）">
+        <span class="btn-studio-ic">🎬</span>
+        <span class="btn-studio-txt"><b>创作工作台</b><small>图片 · 视频生成</small></span>
+      </button>
       <button id="btnNewChat" class="btn-new" title="新建会话 (Ctrl+N)">
         <svg viewBox="0 0 16 16" width="14" height="14"><path d="M8 2v12M2 8h12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
         <span>新建会话</span>
@@ -141,6 +145,32 @@
     </footer>
   </main>
 
+  <!-- ==================== 创作工作台（图片 / 视频） ==================== -->
+  <main id="studio" class="studio hidden">
+    <header id="studioTopbar">
+      <button id="btnStudioBack" class="icon-btn" title="返回对话">
+        <svg viewBox="0 0 16 16" width="15" height="15"><path d="M9.5 3L4.5 8l5 5" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+      <div class="studio-title">
+        <div class="studio-name">创作工作台</div>
+        <div class="studio-meta">Agnes Image · Agnes Video</div>
+      </div>
+      <div class="studio-seg" id="studioSeg">
+        <button data-tab="image" class="active">🖼 图片创作</button>
+        <button data-tab="video">🎬 视频创作</button>
+      </div>
+      <div style="flex:1"></div>
+      <button id="btnStudioSettings" class="btn-ghost" title="设置面板">
+        <svg viewBox="0 0 16 16" width="14" height="14"><rect x="2" y="2.5" width="12" height="11" rx="2" stroke="currentColor" stroke-width="1.3" fill="none"/><path d="M2 6.5h12M9.5 2.5v11" stroke="currentColor" stroke-width="1.3"/></svg>
+        <span>设置</span>
+      </button>
+    </header>
+    <div id="studioBody" class="studio-body">
+      <section id="studioImagePanel" class="studio-panel"></section>
+      <section id="studioVideoPanel" class="studio-panel hidden"></section>
+    </div>
+  </main>
+
   <!-- ==================== 右侧调试抽屉 ==================== -->
   <div id="drawerMask" class="drawer-mask hidden"></div>
   <aside id="drawer" class="drawer hidden">
@@ -178,6 +208,7 @@
 <script src="/static/vis-network.min.js"></script>
 <script src="/static/rag-admin.js"></script>
 <script src="/static/image-studio.js"></script>
+<script src="/static/video-studio.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

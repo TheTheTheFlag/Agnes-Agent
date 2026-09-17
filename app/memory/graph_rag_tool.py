@@ -5,11 +5,12 @@
      图谱随对话自动长，跨会话共享（__global__）。
   1. record_graph 工具：让 LLM 在合适时机显式"记住"几个实体关系（比如从搜索结果里抽三元组）。
      LLM 调用这个工具后，内容会被写进 LightRAG 的文本库，触发自动的实体提取 + 关系抽取。
-  2. lightgraph_query 工具：给 LLM 提供一个直接查图检索的能力——默认先查全局对话图谱，
-     若当前消息勾选了知识库，则一并检索这些独立知识库并合并结果。
+  2. lightgraph_query 工具：给 LLM 提供一个直接查图检索的能力——检索范围完全由
+     本轮勾选决定，勾选多个库则各自查询并合并结果。
   3. 被动注入：chatbot 每轮构造 system prompt 时，会用当前 query 做一次 LightRAG 查询，
      把命中实体/关系摘要拼入 "=== 分层记忆注入 ===" 块末尾（L6 层）。
-     检索范围 = 全局对话图谱 + 本轮勾选的知识库（selected_kbs）。
+     检索范围 = 本轮勾选的知识库（selected_kbs）；勾了什么查什么，什么都没勾就不检索。
+     全局对话图谱（__global__）只是列表里的一项，勾选才参与。
 
 存储：
   LightRAG 把知识持久化在 <repo_root>/lightrag_storage/<ns>/ 下（JsonKV + NetworkX + NanoVectorDB），
@@ -22,32 +23,42 @@ from typing import Any, Dict, List, Optional
 
 from app.memory.ligraphrag_adapter import (
     get_lightrag, clear_instance, lightrag_insert, lightrag_query,
-    _graph_ns, get_current_kbs,
+    _graph_ns, _GLOBAL_GRAPH_NS, get_current_kbs,
 )
 
 
 def _namespaces(thread_id: str, kb_ids: Optional[List[str]] = None) -> List[str]:
-    """本次查询实际覆盖的命名空间列表（去重启保序）。
+    """本次查询实际覆盖的命名空间列表（去重保序）。
 
-    第一条永远是会话对话图谱命名空间（默认 __global__，per_thread 模式下
-    即会话 id）；随后追加用户勾选并真实存在的知识库（kb_id）。
+    检索范围完全以勾选列表为准：**勾了什么查什么，什么都没勾就什么都不查**
+    （不再默认追加会话对话图谱）。
+      - kb_ids 显式传入：直接使用该列表；
+      - kb_ids 为 None：取当前会话勾选（get_current_kbs()）；
+      - 结果为空 → 返回空列表，调用方据此跳过全部图谱检索。
+
+    列表里的 ``__global__`` 视为"会话对话图谱"别名，解析为 _graph_ns(thread_id)
+    （全局模式下即 __global__，per_thread 模式下即会话 id）。
     """
-    ns = _graph_ns(thread_id)
-    out = [ns]
-    cur = list(kb_ids or get_current_kbs() or [])
+    cur = list(kb_ids) if kb_ids is not None else list(get_current_kbs())
+    session_ns = _graph_ns(thread_id)
+    out: List[str] = []
     for k in cur:
         s = str(k or "").strip()
-        if s and s != ns and s not in out:
+        if not s:
+            continue
+        if s == _GLOBAL_GRAPH_NS:
+            s = session_ns
+        if s not in out:
             out.append(s)
     return out
 
 
 def lightgraph_query(thread_id: str, query: str, top_k: int = 12,
                      kb_ids: Optional[List[str]] = None) -> str:
-    """对 LightRAG 发起混合检索（向量 + 图谱双路召回），覆盖全局对话图谱 + 勾选知识库。
+    """对 LightRAG 发起混合检索（向量 + 图谱双路召回），范围 = 本轮勾选的知识库。
 
     返回格式化后的上下文；每个命名空间的结果用 [库名] 前缀区分。
-    返回空字符串表示全部未命中；单个命名空间失败不阻塞其余空间。
+    未勾选任何库时返回空字符串；单个命名空间失败不阻塞其余空间。
     """
     parts = []
     for ns in _namespaces(thread_id, kb_ids):
@@ -176,7 +187,7 @@ def get_l6_context(thread_id: str, query: str, limit_chars: int = 1500,
                    kb_ids: Optional[List[str]] = None) -> str:
     """给 chatbot system prompt 的 L6 注入片段。
 
-    覆盖全局对话图谱 + 本轮勾选的知识库，每个命名空间回退到多行摘要。
+    仅覆盖本轮勾选的知识库（含勾选时才有的全局对话图谱），每个命名空间回退到多行摘要。
     返回形如：
       【GraphRAG（知识图谱检索）】
       - Entity: HarmonyOS 5.0  supports  DeepSeek V4

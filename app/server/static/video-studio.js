@@ -1,0 +1,452 @@
+/* ============================================================================
+   视频创作工作台（Agnes Video 2.5 Flash / Agnes Video V2.0）
+   ----------------------------------------------------------------------------
+   模型与模式：
+     · agnes-video-2.5-flash：文生视频 / 首尾帧 / 图片参考（720P，seconds 控时长）
+     · agnes-video-v2.0     ：文生视频 / 图生视频 / 关键帧动画（num_frames + frame_rate 控时长）
+   左侧创作台：模型 · 模式 · 参考图 · 提示词（运镜速选）· 参数（时长/画幅/分辨率/种子）
+   右侧作品库：视频网格 + 播放灯箱；生成中的任务自动轮询 /api/video/task/{id}，
+              完成后后端已自动把 mp4 落盘到服务器，卡片封面走 ffmpeg 抽帧。
+   依赖 app.js 全局工具：$ / $$ / apiGet / apiPost / escapeHtml / truncate / fmtAgo / toast。
+   依赖 image-studio.js 的上传约定：/api/upload 返回 {path}，参考图用 uploads/<name> 路径。
+   ============================================================================ */
+
+const VIDEO_STYLE_CHIPS = [
+  ["电影运镜", "，电影级运镜，平稳推进，浅景深，柔和自然光"],
+  ["慢动作", "，慢动作升格，细节清晰，高帧率质感"],
+  ["航拍", "，无人机航拍视角，缓慢环绕，宏大场景"],
+  ["人物特写", "，人物面部特写，微妙表情变化，背景虚化，柔和轮廓光"],
+  ["赛博朋克", "，赛博朋克夜景，霓虹倒映，湿润路面，冷青与品红主调"],
+  ["定格动画", "，定格动画质感，逐帧微动，手作场景"],
+  ["动漫风", "，日式动画风格，干净线条，明亮配色，流畅动作"],
+  ["自然纪录", "，自然纪录片风格，长焦压缩，唯美光线，真实生态"],
+];
+
+const VideoStudio = {
+  model: "agnes-video-2.5-flash",
+  mode: "text",
+  refs: [],            // [{path, name}]
+  busy: false,
+  status: null,
+  gallery: [],
+  pollers: {},         // id -> timer
+  el: null,
+};
+
+/* ---------- 主渲染 ---------- */
+async function renderVideoTab(el) {
+  el.innerHTML = `
+    <div class="st">
+      <div class="st-head">
+        <div class="st-head-title">🎬 视频创作工作台</div>
+        <div class="st-head-hint">Agnes Video 2.5 Flash / V2.0 · 文生视频 / 图生视频 / 首尾帧 / 关键帧动画 · 当前全部规格免费</div>
+      </div>
+      <div id="vsKeyBanner" class="st-banner hidden"></div>
+      <div class="st-cols">
+        <section class="st-left">
+          <div class="st-block">
+            <div class="st-block-hd"><span>模型</span></div>
+            <div class="d-row"><select class="d-input st-param" id="vsModel"></select>
+              <span class="st-model-note" id="vsModelNote"></span></div>
+          </div>
+
+          <div class="st-mode-seg" id="vsModeSeg"></div>
+
+          <div class="st-block" id="vsRefBlock" style="display:none">
+            <div class="st-block-hd"><span id="vsRefTitle">参考图</span><span class="st-ref-hint" id="vsRefHint"></span></div>
+            <div class="st-refs" id="vsRefs"><div class="d-empty">暂无参考图</div></div>
+            <div class="d-row" style="margin-top:8px">
+              <button class="d-btn" id="vsAddRef">＋ 添加参考图</button>
+              <span class="d-empty" style="margin:0" id="vsRefNote"></span>
+            </div>
+            <input type="file" id="vsRefFile" accept="image/*" multiple style="display:none">
+          </div>
+
+          <div class="st-block">
+            <div class="st-block-hd"><span>提示词</span><span class="st-block-tip" id="vsPromptHint"></span></div>
+            <textarea class="st-prompt" id="vsPrompt" rows="4" placeholder=""></textarea>
+            <div class="st-chips">
+              <span class="st-chip-title">运镜速选</span>
+              ${VIDEO_STYLE_CHIPS.map(([k]) => `<button class="st-chip" data-style="${k}">${k}</button>`).join("")}
+              <button class="st-chip st-chip-clear" data-style="__clear">清空</button>
+            </div>
+          </div>
+
+          <div class="st-block">
+            <div class="st-block-hd"><span>参数</span></div>
+            <div id="vsParams"></div>
+          </div>
+
+          <div class="st-actions">
+            <button class="d-btn primary st-gen" id="vsGen">🎬 生成视频</button>
+            <span class="d-empty st-busy" id="vsBusy" style="display:none"></span>
+          </div>
+        </section>
+
+        <section class="st-right">
+          <div class="st-gallery-hd">
+            <span class="st-gallery-title">🗂 视频作品库</span>
+            <span class="d-empty" style="margin:0" id="vsCountLbl"></span>
+            <div style="flex:1"></div>
+            <button class="d-btn sm" id="vsRefresh">⟳ 刷新</button>
+          </div>
+          <div id="vsGrid" class="st-grid"><div class="d-empty">加载中…</div></div>
+        </section>
+      </div>
+    </div>`;
+
+  VideoStudio.el = {
+    model: $("#vsModel", el), modelNote: $("#vsModelNote", el),
+    seg: $("#vsModeSeg", el), refBlock: $("#vsRefBlock", el), refs: $("#vsRefs", el),
+    refTitle: $("#vsRefTitle", el), refHint: $("#vsRefHint", el), refNote: $("#vsRefNote", el),
+    prompt: $("#vsPrompt", el), promptHint: $("#vsPromptHint", el),
+    params: $("#vsParams", el), gen: $("#vsGen", el), busy: $("#vsBusy", el),
+    grid: $("#vsGrid", el), countLbl: $("#vsCountLbl", el), banner: $("#vsKeyBanner", el),
+  };
+
+  try {
+    VideoStudio.status = await apiGet("/api/video/status");
+  } catch (e) { VideoStudio.status = null; }
+  if (!VideoStudio.status || !VideoStudio.status.configured) {
+    VideoStudio.el.banner.classList.remove("hidden");
+    VideoStudio.el.banner.innerHTML = `⚠️ 未检测到 agnes API Key：请在「模型」页接入 agnes 网关（base_url 为 api.agnes-ai.cn）。配置后重新进入本页即可。`;
+  }
+
+  const models = (VideoStudio.status && VideoStudio.status.models) || [];
+  if (models.length && !models.some((m) => m.id === VideoStudio.model)) {
+    VideoStudio.model = models[0].id;
+  }
+  paintVideoModels();
+  paintVideoModeSeg();
+  paintVideoParams();
+  paintVideoRefs();
+  paintVideoPrompt();
+
+  $("#vsAddRef", el).addEventListener("click", () => $("#vsRefFile", el).click());
+  $("#vsRefFile", el).addEventListener("change", (e) => { const f = e.target.files; e.target.value = ""; onVideoRefFiles(f); });
+  $$(".st-chip", el).forEach((c) => c.addEventListener("click", () => {
+    const v = VideoStudio.el.prompt.value;
+    if (c.dataset.style === "__clear") { VideoStudio.el.prompt.value = ""; }
+    else {
+      const style = VIDEO_STYLE_CHIPS.find(([k]) => k === c.dataset.style);
+      if (style) VideoStudio.el.prompt.value = (v && !/[，,]$/.test(v) ? v + "，" : v) + style[1].replace(/^，/, "");
+    }
+    VideoStudio.el.prompt.focus();
+  }));
+  VideoStudio.el.model.addEventListener("change", () => {
+    VideoStudio.model = VideoStudio.el.model.value;
+    const modes = Object.keys(modelMeta(VideoStudio.model).modes || {});
+    if (!modes.includes(VideoStudio.mode)) VideoStudio.mode = modes[0];
+    VideoStudio.refs = [];
+    paintVideoModels(); paintVideoModeSeg(); paintVideoParams(); paintVideoRefs(); paintVideoPrompt();
+  });
+  $("#vsRefresh", el).addEventListener("click", () => loadVideoGallery());
+  VideoStudio.el.gen.addEventListener("click", generateVideo);
+
+  await loadVideoGallery();
+  resumeVideoPolling();
+}
+
+/* ---------- 元数据 ---------- */
+function modelMeta(id) {
+  const models = (VideoStudio.status && VideoStudio.status.models) || [];
+  return models.find((m) => m.id === id) || models[0] || { modes: {}, label: id, note: "" };
+}
+function modeMeta() {
+  return (modelMeta(VideoStudio.model).modes || {})[VideoStudio.mode] || { needs: [] };
+}
+
+function paintVideoModels() {
+  const models = (VideoStudio.status && VideoStudio.status.models) || [];
+  VideoStudio.el.model.innerHTML = models.map((m) =>
+    `<option value="${escapeHtml(m.id)}" ${m.id === VideoStudio.model ? "selected" : ""}>${escapeHtml(m.id)}</option>`).join("");
+  VideoStudio.el.modelNote.textContent = "「" + (modelMeta(VideoStudio.model).note || "") + "」";
+}
+
+function paintVideoModeSeg() {
+  const modes = modelMeta(VideoStudio.model).modes || {};
+  VideoStudio.el.seg.innerHTML = Object.entries(modes).map(([k, m]) =>
+    `<button class="st-mode-btn ${k === VideoStudio.mode ? "active" : ""}" data-mode="${k}">
+       <b>${m.icon || ""} ${escapeHtml(m.label)}</b><small>${escapeHtml(m.desc || "")}</small></button>`).join("");
+  $$(".st-mode-btn", VideoStudio.el.seg).forEach((b) =>
+    b.addEventListener("click", () => { VideoStudio.mode = b.dataset.mode; paintVideoModeSeg(); paintVideoParams(); paintVideoRefs(); paintVideoPrompt(); }));
+}
+
+function refSpec() {
+  const needs = modeMeta().needs || [];
+  if (needs.includes("image")) return { min: 1, max: 1, title: "参考图", labels: ["参考图"], note: "图生视频需要 1 张图" };
+  if (needs.includes("images2")) return { min: 2, max: 4, title: "关键帧", labels: ["首帧", "尾帧", "帧 3", "帧 4"], note: "关键帧动画 ≥2 张（顺序即过渡顺序）" };
+  if (needs.includes("images")) return { min: 1, max: 5, title: "参考图", labels: ["图 1", "图 2", "图 3", "图 4", "图 5"], note: "图片参考 1–5 张（提示词用 <Picture N> 指代）" };
+  if (needs.includes("frames")) return { min: 1, max: 2, title: "首尾帧", labels: ["首帧", "尾帧"], note: "首帧 / 尾帧至少提供 1 个" };
+  return null;
+}
+
+function paintVideoRefs() {
+  const spec = refSpec();
+  const block = VideoStudio.el.refBlock;
+  if (!spec) { block.style.display = "none"; return; }
+  block.style.display = "";
+  VideoStudio.el.refTitle.textContent = spec.title;
+  VideoStudio.el.refHint.textContent = `${VideoStudio.refs.length}/${spec.max}`;
+  VideoStudio.el.refNote.textContent = spec.note;
+  const box = VideoStudio.el.refs;
+  if (!VideoStudio.refs.length) {
+    box.innerHTML = `<div class="d-empty">暂无参考图，点下方按钮添加</div>`;
+    return;
+  }
+  box.innerHTML = VideoStudio.refs.map((r, i) => `
+    <div class="st-ref">
+      <img src="/api/uploads/${encodeURIComponent(r.name)}" alt="">
+      <div class="st-ref-body">
+        <span class="st-ref-tag">${escapeHtml(spec.labels[i] || ("图 " + (i + 1)))}</span>
+        <div class="st-ref-ops">
+          <button class="d-btn sm" data-ref="${i}" data-act="left" ${i === 0 ? "disabled" : ""}>←</button>
+          <button class="d-btn sm" data-ref="${i}" data-act="right" ${i === VideoStudio.refs.length - 1 ? "disabled" : ""}>→</button>
+          <button class="d-btn sm danger" data-ref="${i}" data-act="del">移除</button>
+        </div>
+      </div>
+    </div>`).join("");
+  $$("button[data-act]", box).forEach((b) => b.addEventListener("click", () => {
+    const i = Number(b.dataset.ref);
+    if (b.dataset.act === "del") VideoStudio.refs.splice(i, 1);
+    else if (b.dataset.act === "left" && i > 0) [VideoStudio.refs[i - 1], VideoStudio.refs[i]] = [VideoStudio.refs[i], VideoStudio.refs[i - 1]];
+    else if (b.dataset.act === "right" && i < VideoStudio.refs.length - 1) [VideoStudio.refs[i + 1], VideoStudio.refs[i]] = [VideoStudio.refs[i], VideoStudio.refs[i + 1]];
+    paintVideoRefs();
+  }));
+}
+
+function paintVideoPrompt() {
+  const m = modeMeta();
+  VideoStudio.el.prompt.placeholder = m.ex ? ("示例：" + m.ex) : "";
+  VideoStudio.el.promptHint.textContent = m.hint || "";
+}
+
+function paintVideoParams() {
+  const meta = modelMeta(VideoStudio.model);
+  const isFlash = VideoStudio.model === "agnes-video-2.5-flash";
+  const keeps = {};
+  $$("[data-vsp]", VideoStudio.el.params).forEach((n) => { keeps[n.dataset.vsp] = n.value; });
+  const v = (k, d) => (keeps[k] !== undefined ? keeps[k] : d);
+  const node = (id, label, inner) => `<div class="d-row"><label>${label}</label>${inner}</div>`;
+
+  let html = "";
+  if (isFlash) {
+    html += node("vsSeconds", "时长", `<select class="d-input st-param" id="vsSeconds" data-vsp="vsSeconds">
+      ${(meta.seconds || ["4", "5", "6", "8", "10", "12"]).map((s) => `<option ${String(v("vsSeconds", "5")) === s ? "selected" : ""}>${s}</option>`).join("")}</select>
+      <span class="d-empty" style="margin:0">秒（4–12）</span>`);
+    html += node("vsRatio", "画幅", `<select class="d-input st-param" id="vsRatio" data-vsp="vsRatio">
+      ${(meta.aspect_ratios || ["16:9"]).map((r) => `<option ${v("vsRatio", "16:9") === r ? "selected" : ""}>${r}</option>`).join("")}</select>
+      <span class="d-empty" style="margin:0">720P · ${escapeHtml(meta.size || "720P")}</span>`);
+  } else {
+    html += node("vsDur", "时长", `<select class="d-input st-param" id="vsDur" data-vsp="vsDur">
+      ${(meta.durations || []).map((d) => `<option value="${d.num_frames}" ${String(v("vsDur", "121")) === String(d.num_frames) ? "selected" : ""}>${d.label}（${d.num_frames} 帧）</option>`).join("")}</select>`);
+    html += node("vsFps", "帧率", `<select class="d-input st-param" id="vsFps" data-vsp="vsFps">
+      ${(meta.frame_rates || [24, 30]).map((f) => `<option ${String(v("vsFps", "24")) === String(f) ? "selected" : ""}>${f}</option>`).join("")}</select>
+      <span class="d-empty" style="margin:0">fps</span>`);
+    html += node("vsRes", "分辨率", `<select class="d-input st-param" id="vsRes" data-vsp="vsRes">
+      ${(meta.resolutions || ["480p", "720p", "1080p"]).map((r) => `<option ${v("vsRes", "720p") === r ? "selected" : ""}>${r}</option>`).join("")}</select>`);
+    html += node("vsRatio", "画幅", `<select class="d-input st-param" id="vsRatio" data-vsp="vsRatio">
+      ${(meta.ratios || ["16:9"]).map((r) => `<option ${v("vsRatio", "16:9") === r ? "selected" : ""}>${r}</option>`).join("")}</select>`);
+    html += node("vsNeg", "反向词", `<input class="d-input st-param" id="vsNeg" data-vsp="vsNeg" placeholder="可选：需要避免的内容" value="${escapeHtml(v("vsNeg", ""))}">`);
+  }
+  html += node("vsSeed", "种子", `<input class="d-input st-param" id="vsSeed" data-vsp="vsSeed" placeholder="可选：固定后结果可复现" value="${escapeHtml(v("vsSeed", ""))}">`);
+  VideoStudio.el.params.innerHTML = html;
+}
+
+/* ---------- 参考图上传 ---------- */
+async function onVideoRefFiles(files) {
+  const spec = refSpec();
+  if (!spec) return;
+  for (const f of Array.from(files || [])) {
+    if (!f.type.startsWith("image/") && !/\.(png|jpe?g|gif|webp|bmp)$/i.test(f.name)) { toast("仅支持图片文件: " + f.name, "error"); continue; }
+    if (f.size > 20 * 1024 * 1024) { toast("图片超过 20MB: " + f.name, "error"); continue; }
+    if (VideoStudio.refs.length >= spec.max) { toast(`该模式最多 ${spec.max} 张参考图`, "error"); break; }
+    try {
+      const fd = new FormData(); fd.append("file", f);
+      const up = await fetch("/api/upload", { method: "POST", body: fd });
+      if (up.status === 401) return onUnauthorized();
+      const ud = await up.json().catch(() => ({}));
+      if (!up.ok) throw new Error(ud.error || "上传失败");
+      VideoStudio.refs.push({ path: ud.path, name: ud.path.split("/").pop() });
+    } catch (e) { toast("参考图上传失败: " + e.message, "error"); }
+  }
+  paintVideoRefs();
+}
+
+/* ---------- 生成 ---------- */
+async function generateVideo() {
+  if (VideoStudio.busy) return;
+  const prompt = VideoStudio.el.prompt.value.trim();
+  if (!prompt) { toast("请先填写提示词", "error"); VideoStudio.el.prompt.focus(); return; }
+  const spec = refSpec();
+  if (spec && VideoStudio.refs.length < spec.min) { toast(`${spec.title}至少需要 ${spec.min} 张`, "error"); return; }
+
+  const val = (id, d) => { const n = $("#" + id, VideoStudio.el.params); return n ? n.value : d; };
+  const isFlash = VideoStudio.model === "agnes-video-2.5-flash";
+  const body = {
+    model: VideoStudio.model,
+    mode: VideoStudio.mode,
+    prompt,
+    refs: VideoStudio.refs.map((r) => r.path),
+    seed: val("vsSeed", ""),
+    aspect_ratio: val("vsRatio", "16:9"),
+  };
+  if (isFlash) {
+    body.seconds = val("vsSeconds", "5");
+  } else {
+    body.num_frames = Number(val("vsDur", 121));
+    body.frame_rate = Number(val("vsFps", 24));
+    body.resolution = val("vsRes", "720p");
+    body.width = 0; body.height = 0;
+    body.negative_prompt = val("vsNeg", "");
+  }
+
+  VideoStudio.busy = true;
+  VideoStudio.el.gen.disabled = true;
+  VideoStudio.el.busy.style.display = "";
+  VideoStudio.el.busy.textContent = "⏳ 已提交，视频生成中（约 1–5 分钟），完成后自动入库…";
+  try {
+    const r = await apiPost("/api/video/generate", body);
+    for (const it of r.items) VideoStudio.gallery.unshift(it);
+    toast("任务已提交，正在生成", "success");
+    paintVideoGallery();
+    (r.items || []).forEach((it) => pollVideoTask(it.id));
+  } catch (e) {
+    toast("提交失败: " + e.message, "error");
+  } finally {
+    VideoStudio.busy = false;
+    VideoStudio.el.gen.disabled = false;
+    VideoStudio.el.busy.style.display = "none";
+  }
+}
+
+/* ---------- 轮询 ---------- */
+function resumeVideoPolling() {
+  VideoStudio.gallery.filter((it) => !isTerminal(it.status)).forEach((it) => pollVideoTask(it.id));
+}
+
+function isTerminal(s) { return s === "completed" || s === "failed"; }
+
+function pollVideoTask(id) {
+  if (VideoStudio.pollers[id]) return;
+  const tick = async () => {
+    try {
+      const r = await apiGet("/api/video/task/" + encodeURIComponent(id));
+      const it = r.item;
+      if (it) {
+        const i = VideoStudio.gallery.findIndex((g) => g.id === id);
+        if (i >= 0) VideoStudio.gallery[i] = it; else VideoStudio.gallery.unshift(it);
+        paintVideoGallery();
+        if (isTerminal(it.status)) {
+          clearTimeout(VideoStudio.pollers[id]);
+          delete VideoStudio.pollers[id];
+          if (it.status === "completed") toast("✅ 视频已生成并入库", "success");
+          else toast("❌ 生成失败: " + (it.error || ""), "error");
+          return;
+        }
+      }
+    } catch (e) { /* 网络抖动，继续轮询 */ }
+    VideoStudio.pollers[id] = setTimeout(tick, 3000);
+  };
+  VideoStudio.pollers[id] = setTimeout(tick, 1500);
+}
+
+/* ---------- 作品库 ---------- */
+async function loadVideoGallery() {
+  try {
+    const r = await apiGet("/api/video/history?limit=120");
+    VideoStudio.gallery = r.items || [];
+  } catch (e) { /* 保留现有视图 */ }
+  paintVideoGallery();
+  resumeVideoPolling();
+}
+
+function videoStatusBadge(it) {
+  if (it.status === "completed") return "";
+  if (it.status === "failed") return `<span class="vs-badge failed">失败</span>`;
+  return `<span class="vs-badge doing">生成中 ${it.progress || 0}%</span>`;
+}
+
+function paintVideoGallery() {
+  if (!VideoStudio.el) return;
+  VideoStudio.el.countLbl.textContent = VideoStudio.gallery.length ? `共 ${VideoStudio.gallery.length} 件` : "";
+  if (!VideoStudio.gallery.length) {
+    VideoStudio.el.grid.innerHTML = `<div class="d-empty" style="padding:36px 0;text-align:center">视频作品库为空 —— 从左侧创作台生成第一条视频吧。</div>`;
+    return;
+  }
+  VideoStudio.el.grid.innerHTML = VideoStudio.gallery.map((it) => {
+    const done = it.status === "completed" && it.file;
+    const poster = it.thumb ? `/api/video/file/${it.id}?thumb=1` : "";
+    const media = done
+      ? `<video class="vs-vid" src="/api/video/file/${it.id}" ${poster ? `poster="${poster}"` : ""} preload="metadata" muted playsinline></video>
+         <span class="vs-play">▶</span>`
+      : `<div class="vs-ph">${videoStatusBadge(it)}<span class="vs-ph-hint">${escapeHtml(it.status === "failed" ? (it.error || "生成失败") : "视频生成中…")}</span></div>`;
+    const dl = done ? `href="/api/video/file/${it.id}" download="${escapeHtml(it.id)}.mp4"` : `href="#" onclick="return false"`;
+    return `
+    <figure class="st-card" data-id="${escapeHtml(it.id)}">
+      <div class="st-card-img vs-card-vid">${media}</div>
+      <figcaption class="st-card-meta">
+        <span class="st-card-chip">${escapeHtml(modelShort(it.model))}</span>
+        <span class="st-card-chip">${escapeHtml(it.size || "")}${it.seconds ? " · " + escapeHtml(it.seconds) + "s" : ""}</span>
+        <span class="st-card-time">${escapeHtml(fmtAgo(it.created_at))}</span>
+      </figcaption>
+      <div class="st-card-prompt">${escapeHtml(truncate(it.prompt || "", 80))}</div>
+      <div class="st-card-ops">
+        <button class="d-btn sm" data-act="open" ${done ? "" : "disabled"}>播放</button>
+        <a class="d-btn sm" data-act="dl" ${dl}>下载</a>
+        <button class="d-btn sm" data-act="copy">复用提示词</button>
+        <button class="d-btn sm danger" data-act="del">删除</button>
+      </div>
+    </figure>`;
+  }).join("");
+
+  $$(".st-card", VideoStudio.el.grid).forEach((card) => {
+    const item = VideoStudio.gallery.find((g) => g.id === card.dataset.id);
+    if (!item) return;
+    $$("[data-act]", card).forEach((b) => b.addEventListener("click", async (ev) => {
+      try {
+        if (b.dataset.act === "open") openVideoLightbox(item);
+        else if (b.dataset.act === "copy") { await navigator.clipboard.writeText(item.prompt || ""); toast("提示词已复制", "success"); }
+        else if (b.dataset.act === "del") {
+          if (!confirm("从作品库移除该视频（含服务器文件）？")) return;
+          const r = await apiPost("/api/video/delete", { ids: [item.id] });
+          if (!r.ok) throw new Error(r.error || "删除失败");
+          VideoStudio.gallery = VideoStudio.gallery.filter((g) => g.id !== item.id);
+          paintVideoGallery();
+        }
+      } catch (e) { toast("操作失败: " + e.message, "error"); }
+    }));
+  });
+}
+
+function modelShort(id) {
+  if (id === "agnes-video-2.5-flash") return "2.5 Flash";
+  if (id === "agnes-video-v2.0") return "V2.0";
+  return id;
+}
+
+function openVideoLightbox(item) {
+  const src = "/api/video/file/" + item.id;
+  const wrap = document.createElement("div");
+  wrap.className = "rag-modal-mask";
+  wrap.innerHTML = `
+    <div class="rag-modal st-lightbox">
+      <div class="rag-modal-hd">
+        <h4>${escapeHtml(modelShort(item.model))} · ${escapeHtml(item.size || "")}${item.seconds ? " · " + escapeHtml(item.seconds) + "s" : ""}</h4>
+        <button class="icon-btn rg-modal-x">✕</button>
+      </div>
+      <div class="rag-modal-bd">
+        <video class="st-lb-img" src="${src}" controls autoplay playsinline></video>
+        <pre class="d-pre">${escapeHtml(item.prompt || "")}</pre>
+        <div class="d-row">
+          <a class="d-btn primary" download="${escapeHtml(item.id)}.mp4" href="${src}">⬇ 下载视频</a>
+          <button class="d-btn" data-close>关闭</button>
+        </div>
+      </div>
+    </div>`;
+  document.body.appendChild(wrap);
+  const close = () => { const v = wrap.querySelector("video"); if (v) v.pause(); wrap.remove(); };
+  wrap.addEventListener("click", (e) => { if (e.target === wrap) close(); });
+  wrap.querySelector(".rg-modal-x").addEventListener("click", close);
+  wrap.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", close));
+}

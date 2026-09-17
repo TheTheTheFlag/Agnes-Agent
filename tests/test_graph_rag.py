@@ -77,8 +77,81 @@ class RecordGraphTest(unittest.TestCase):
                          "写入失败：boom")
 
 
+class NamespaceScopeTest(unittest.TestCase):
+    """检索范围以勾选列表为准：勾了什么查什么，什么都没勾就什么都不查。"""
+
+    def setUp(self):
+        from app.memory import ligraphrag_adapter as LA
+        self.LA = LA
+        self.addCleanup(lambda: LA.set_current_kbs(None))
+
+    def test_explicit_scope_does_not_prepend_global(self):
+        self.assertEqual(grt._namespaces("tid", ["kb-1"]), ["kb-1"])
+
+    def test_global_token_resolves_to_session_ns(self):
+        self.assertEqual(grt._namespaces("tid", ["__global__"]), ["__global__"])
+
+    def test_nothing_selected_returns_empty(self):
+        self.LA.set_current_kbs([])
+        self.assertEqual(grt._namespaces("tid", None), [])
+        self.assertEqual(grt._namespaces("tid", []), [])
+
+    def test_falls_back_to_current_kbs_when_none(self):
+        self.LA.set_current_kbs(["kb-7"])
+        self.assertEqual(grt._namespaces("tid", None), ["kb-7"])
+
+    def test_dedup_preserves_order(self):
+        self.assertEqual(grt._namespaces("tid", ["kb-2", "kb-1", "kb-2"]), ["kb-2", "kb-1"])
+
+
+class GraphRelevanceThresholdTest(unittest.TestCase):
+    """图谱实体/关系向量库使用更高相似度阈值，过滤跨领域无关召回。"""
+
+    def setUp(self):
+        from app.memory import ligraphrag_adapter as LA
+        self.LA = LA
+
+    def _fake_rag(self):
+        class _V:
+            def __init__(self, t):
+                self.cosine_better_than_threshold = t
+
+        class _R:
+            def __init__(self):
+                self.entities_vdb = _V(0.2)
+                self.relationships_vdb = _V(0.2)
+                self.chunks_vdb = _V(0.2)
+
+        return _R()
+
+    def test_raises_entity_and_relation_thresholds(self):
+        rag = self._fake_rag()
+        self.LA._apply_graph_relevance_threshold(rag)
+        self.assertEqual(rag.entities_vdb.cosine_better_than_threshold, 0.5)
+        self.assertEqual(rag.relationships_vdb.cosine_better_than_threshold, 0.5)
+
+    def test_chunks_threshold_untouched(self):
+        rag = self._fake_rag()
+        self.LA._apply_graph_relevance_threshold(rag)
+        self.assertEqual(rag.chunks_vdb.cosine_better_than_threshold, 0.2)
+
+    def test_env_override(self):
+        rag = self._fake_rag()
+        with mock.patch.dict("os.environ", {"GRAPH_COSINE_THRESHOLD": "0.62"}):
+            self.LA._apply_graph_relevance_threshold(rag)
+        self.assertEqual(rag.entities_vdb.cosine_better_than_threshold, 0.62)
+
+    def test_tolerates_missing_vdbs(self):
+        class _R:
+            pass
+
+        self.LA._apply_graph_relevance_threshold(_R())  # 不应抛错
+
+
 class LightgraphQueryTest(unittest.TestCase):
     def setUp(self):
+        from app.memory import ligraphrag_adapter as LA
+        self.LA = LA
         self._patchers = [
             mock.patch.object(grt, "get_lightrag", return_value=object()),
             mock.patch.object(grt, "lightrag_query"),
@@ -86,40 +159,56 @@ class LightgraphQueryTest(unittest.TestCase):
         for p in self._patchers:
             p.start()
         self.addCleanup(self._stop)
+        self.addCleanup(lambda: LA.set_current_kbs(None))
 
     def _stop(self):
         for p in self._patchers:
             p.stop()
 
     def test_hit_returns_content(self):
+        self.LA.set_current_kbs(["__global__"])
         grt.lightrag_query.return_value = "Entity: HarmonyOS 5.0 supports DeepSeek V4"
         self.assertEqual(grt.lightgraph_query("tid", "HarmonyOS"),
                          "【全局图谱】\nEntity: HarmonyOS 5.0 supports DeepSeek V4")
 
     def test_miss_returns_empty(self):
+        self.LA.set_current_kbs(["__global__"])
         grt.lightrag_query.return_value = ""
         self.assertEqual(grt.lightgraph_query("tid", "x"), "")
 
     def test_failure_degrades_to_hint(self):
+        self.LA.set_current_kbs(["__global__"])
         grt.lightrag_query.side_effect = ValueError("no endpoint")
         self.assertEqual(grt.lightgraph_query("tid", "x"),
                          "【__global__】检索失败：no endpoint")
 
+    def test_nothing_selected_skips_all_namespaces(self):
+        # 什么都没勾选 → 一个命名空间都不查
+        self.LA.set_current_kbs([])
+        self.assertEqual(grt.lightgraph_query("tid", "x"), "")
+        self.assertEqual(grt.get_l6_context("tid", "x"), "")
+        grt.lightrag_query.assert_not_called()
+
+    def test_only_checked_kb_excludes_global(self):
+        # 只勾选一个知识库 → 只查它，不再自动追加全局对话图谱
+        self.LA.set_current_kbs(["kb-1"])
+        grt.lightrag_query.return_value = "库命中"
+        out = grt.lightgraph_query("tid", "q")
+        self.assertEqual(out, "【kb-1】\n库命中")
+        grt.lightrag_query.assert_called_once_with("tid", "q", top_k=12, ns="kb-1")
+
     def test_multi_namespace_merges_results(self):
-        # 勾选知识库后，全局图谱 + 库各自查询并带前缀合并；单个失败不阻塞
+        # 勾选后各命名空间独立查询并带前缀合并；单个失败不阻塞
         grt.lightrag_query.side_effect = ["全局命中", "库命中", "", ValueError("boom")]
-        from app.memory import ligraphrag_adapter as LA
-        LA.set_current_kbs(["kb-1", "kb-2", "kb-3"])
-        try:
-            out = grt.lightgraph_query("tid", "q", top_k=4)
-        finally:
-            LA.set_current_kbs(None)
+        self.LA.set_current_kbs(["__global__", "kb-1", "kb-2", "kb-3"])
+        out = grt.lightgraph_query("tid", "q", top_k=4)
         self.assertIn("【全局图谱】\n全局命中", out)
         self.assertIn("【kb-1】\n库命中", out)
         # kb-2 空命中跳过，kb-3 失败降级前缀标注
         self.assertIn("【kb-3】检索失败：boom", out)
 
     def test_l6_context_formatting_truncates(self):
+        self.LA.set_current_kbs(["__global__"])
         grt.lightrag_query.return_value = "\n\n".join([f"内容第{i}行，实测长度不算太长" for i in range(1, 30)])
         ctx = grt.get_l6_context("tid", "q", limit_chars=100)
         self.assertTrue(ctx.startswith("【GraphRAG（知识图谱检索）】"))
@@ -167,12 +256,28 @@ class GraphToolsTest(unittest.TestCase):
 
     def test_lightgraph_query_forwards_thread(self):
         from app.tools.graph_rag_tools import lightgraph_query
+        from app.memory import ligraphrag_adapter as LA
         self._resolve.return_value = "t1"
-        grt.lightrag_query.return_value = "Entity: A supports B"
-        out = lightgraph_query.invoke({"query": "q1", "top_k": 6})
+        LA.set_current_kbs(["__global__"])
+        try:
+            grt.lightrag_query.return_value = "Entity: A supports B"
+            out = lightgraph_query.invoke({"query": "q1", "top_k": 6})
+        finally:
+            LA.set_current_kbs(None)
         self.assertEqual(out, "【全局图谱】\nEntity: A supports B")
-        # 勾选的当前知识库为空时退化为只查全局对话图谱
         grt.lightrag_query.assert_called_once_with("t1", "q1", top_k=6, ns="__global__")
+
+    def test_lightgraph_query_without_selection_skips(self):
+        from app.tools.graph_rag_tools import lightgraph_query
+        from app.memory import ligraphrag_adapter as LA
+        self._resolve.return_value = "t1"
+        LA.set_current_kbs([])
+        try:
+            out = lightgraph_query.invoke({"query": "q1", "top_k": 6})
+        finally:
+            LA.set_current_kbs(None)
+        self.assertEqual(out, "")
+        grt.lightrag_query.assert_not_called()
 
     def test_lightgraph_query_forwards_checked_kbs(self):
         from app.tools.graph_rag_tools import lightgraph_query

@@ -13,7 +13,7 @@ import uvicorn
 import threading
 import time as _time
 
-from app.config import DB_PATH, CHECKPOINT_DB_PATH, STATIC_DIR as _STATIC_DIR
+from app.config import DB_PATH, CHECKPOINT_DB_PATH, STATIC_DIR as _STATIC_DIR, DATA_DIR as _DATA_DIR
 from app.server.store import (update_state, update_prompt, add_log_entry, add_event, _state_snapshot, _state_snapshots, _prompt_snapshot, _log_entries, _events, _event_listeners)
 
 # FastAPI 应用实例
@@ -22,6 +22,12 @@ app = FastAPI(title="Agnes Agent Debug Panel", version="1.0.0")
 # 静态文件（marked.min.js 等本地资源，避免 CDN 依赖）
 if _os.path.isdir(_STATIC_DIR):
     app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
+
+# 视频参考图公开挂载：Agnes Video 2.5 Flash 的上游要求图片是公网可访问的 http(s) URL，
+# 该目录下文件名为随机 token（能力 URL）。此路径不以 /api/ 开头，不受登录中间件保护。
+_PUB_REF_DIR = _os.path.join(_DATA_DIR, "video_ref")
+_os.makedirs(_PUB_REF_DIR, exist_ok=True)
+app.mount("/pub/video-ref", StaticFiles(directory=_PUB_REF_DIR), name="video_ref")
 
 app.add_middleware(
     CORSMiddleware,
@@ -130,6 +136,7 @@ from app.server.api import upload as _api_upload
 from app.server.api import graph as _api_graph
 from app.server.api import kb as _api_kb
 from app.server.api import image as _api_image
+from app.server.api import video as _api_video
 app.include_router(_api_system.router)
 app.include_router(_api_memory.router)
 app.include_router(_api_tools.router)
@@ -140,6 +147,7 @@ app.include_router(_api_upload.router)
 app.include_router(_api_graph.router)
 app.include_router(_api_kb.router)
 app.include_router(_api_image.router)
+app.include_router(_api_video.router)
 
 # 登录校验：登录接口 + 全 API 保护中间件
 from app.server.auth import router as _auth_router, install_auth_middleware

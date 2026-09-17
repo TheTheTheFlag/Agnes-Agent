@@ -30,8 +30,10 @@ const State = {
   todosExpanded: false,       // 待办面板是否展开
   todoPanelDismissed: false,  // 用户是否手动关闭了面板
   pendingAttachments: [],     // 待发送附件 [{path, name, isImg}]：上传/粘贴后先进附件条，点发送才发出
-  selectedKbs: null,          // 本轮勾选参与检索的知识库 id 列表（含 __global__）；null=默认只查 __global__
+  selectedKbs: null,          // 本轮勾选参与检索的知识库 id 列表；勾选即范围，[]=不检索任何库（默认）
 };
+// 恢复上次勾选的检索范围（首次访问为空 = 不检索任何库）
+State.selectedKbs = loadSelectedKbs();
 
 /* ==================== 工具函数 ==================== */
 const $ = (sel, root) => (root || document).querySelector(sel);
@@ -294,9 +296,22 @@ function renderAttachBar() {
 }
 
 /* ==================== 知识库选择器（消息框多选） ==================== */
-/* 勾选的知识库参与 L6 检索；__global__ 全局对话图谱默认勾选，选择随 /api/chat 的
-   selected_kbs 透传，供 chatbot 节点的 L6 注入与 lightgraph_query 工具使用。 */
+/* 勾选的知识库参与 L6 检索（勾选即范围，默认一个都不勾 = 不检索任何库）；勾选结果
+   持久化到 localStorage，随 /api/chat 的 selected_kbs 透传，供 L6 注入与 lightgraph_query
+   工具使用。__global__ 全局对话图谱只是列表里的一项，勾选才参与。 */
 let _kbCache = null;   // [{thread_id, name, kind, description}]，列表接口结果缓存
+
+function loadSelectedKbs() {
+  try {
+    const raw = localStorage.getItem("agnes.selectedKbs");
+    if (raw == null) return [];
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr.filter((x) => typeof x === "string" && x) : [];
+  } catch (e) { return []; }
+}
+function saveSelectedKbs(sel) {
+  try { localStorage.setItem("agnes.selectedKbs", JSON.stringify(sel || [])); } catch (e) {}
+}
 
 async function loadKbOptions(force) {
   if (_kbCache && !force) return _kbCache;
@@ -313,6 +328,15 @@ async function loadKbOptions(force) {
     if (!_kbCache.some((k) => k.thread_id === "__global__")) {
       _kbCache = [{ thread_id: "__global__", name: "全局图谱", kind: "global", description: "跨会话共享的对话知识" }].concat(_kbCache || []);
     }
+    // 用真实列表裁剪上次记住的选择，避免已删除的库残留
+    const valid = new Set(_kbCache.map((k) => k.thread_id));
+    if (State.selectedKbs && State.selectedKbs.length) {
+      const pruned = State.selectedKbs.filter((id) => valid.has(id));
+      if (pruned.length !== State.selectedKbs.length) {
+        State.selectedKbs = pruned;
+        saveSelectedKbs(pruned);
+      }
+    }
   } catch (e) {
     _kbCache = [{ thread_id: "__global__", name: "全局图谱", kind: "global", description: "跨会话共享的对话知识" }];
   }
@@ -320,9 +344,8 @@ async function loadKbOptions(force) {
 }
 
 function kbCheckedSet() {
-  // 默认 __global__ 勾选；用户从未改过 selectedKbs 时也保持 __global__
-  const sel = State.selectedKbs;
-  return new Set(sel && sel.length ? sel : ["__global__"]);
+  // 勾选即范围；默认（含首次访问、未恢复过）一个都不勾
+  return new Set(State.selectedKbs || []);
 }
 
 function renderKbMenu() {
@@ -350,12 +373,13 @@ function renderKbMenu() {
     const sel = Array.from($$("input[type=checkbox]", menu))
       .filter((x) => x.checked).map((x) => x.dataset.id);
     State.selectedKbs = sel;
+    saveSelectedKbs(sel);
     renderKbMenu();
   }));
   const allBtn = $("#kbSelAll", menu);
-  if (allBtn) allBtn.addEventListener("click", (e) => { e.stopPropagation(); State.selectedKbs = kbs.map((k) => k.thread_id); renderKbMenu(); });
+  if (allBtn) allBtn.addEventListener("click", (e) => { e.stopPropagation(); State.selectedKbs = kbs.map((k) => k.thread_id); saveSelectedKbs(State.selectedKbs); renderKbMenu(); });
   const gBtn = $("#kbSelGlobal", menu);
-  if (gBtn) gBtn.addEventListener("click", (e) => { e.stopPropagation(); State.selectedKbs = ["__global__"]; renderKbMenu(); });
+  if (gBtn) gBtn.addEventListener("click", (e) => { e.stopPropagation(); State.selectedKbs = ["__global__"]; saveSelectedKbs(State.selectedKbs); renderKbMenu(); });
 }
 
 async function toggleKbMenu() {
@@ -380,9 +404,8 @@ function hideKbMenu() {
 }
 
 function kbSelectionForSend() {
-  const sel = State.selectedKbs;
-  if (!sel || !sel.length) return ["__global__"];
-  return Array.from(new Set(sel));
+  // 勾选即范围：返回当前勾选（可能为空数组 = 不检索任何库）
+  return Array.from(new Set((State.selectedKbs || []).filter((x) => x)));
 }
 
 /* ==================== 发送框状态条（轮数 / 上下文占用 / 附件上下文） ==================== */
@@ -1942,6 +1965,7 @@ async function bulkDeleteThreads() {
 
 async function selectThread(tid) {
   if (isMobile()) closeSidebar();  // 手机端选择会话后自动收起边栏抽屉
+  if (isStudioOpen()) closeStudioView();
   if (State.streaming) stopChat();
   State.threadId = tid;
   await loadHistory(tid);
@@ -1951,6 +1975,7 @@ async function selectThread(tid) {
 
 async function newThread() {
   try {
+    if (isStudioOpen()) closeStudioView();
     const data = await apiPost("/api/command", { command: "/new" });
     State.threadId = data.thread_id || State.threadId;
     messagesInner().innerHTML = "";
@@ -2213,6 +2238,47 @@ function drawerSection(title, bodyHtml) {
 
 function drawerErr(e) {
   return `<div class="d-empty">加载失败: ${escapeHtml(e.message || e)}</div>`;
+}
+
+/* ==================== 创作工作台视图（图片 / 视频） ==================== */
+let _studioTab = "image";
+let _studioImageReady = false;
+let _studioVideoReady = false;
+
+function isStudioOpen() { return $("#app").classList.contains("studio-open"); }
+
+function openStudioView(tab) {
+  $("#app").classList.add("studio-open");
+  $("#studio").classList.remove("hidden");
+  $("#btnStudio").classList.add("active");
+  switchStudioTab(tab || _studioTab);
+}
+
+function closeStudioView() {
+  $("#app").classList.remove("studio-open");
+  $("#studio").classList.add("hidden");
+  $("#btnStudio").classList.remove("active");
+  chatInput.focus();
+}
+
+async function switchStudioTab(tab) {
+  _studioTab = tab;
+  $$("#studioSeg button").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
+  const imgP = $("#studioImagePanel");
+  const vidP = $("#studioVideoPanel");
+  imgP.classList.toggle("hidden", tab !== "image");
+  vidP.classList.toggle("hidden", tab !== "video");
+  try {
+    if (tab === "image") {
+      if (!_studioImageReady) { _studioImageReady = true; await renderStudioTab(imgP); }
+    } else if (!_studioVideoReady) {
+      _studioVideoReady = true;
+      await renderVideoTab(vidP);
+    }
+  } catch (e) {
+    if (tab === "image") _studioImageReady = false; else _studioVideoReady = false;
+    (tab === "image" ? imgP : vidP).innerHTML = drawerErr(e);
+  }
 }
 
 /* ---- State ---- */
@@ -2874,7 +2940,6 @@ const DRAWER_LOADERS = {
   memorydb: renderMemoryDBTab,
   graph: renderGraphTab,
   rag: renderRagTab,
-  studio: renderStudioTab,
   tools: renderToolsTab,
   skills: renderSkillsTab,
   sched: renderSchedTab,
@@ -2892,7 +2957,6 @@ const DRAWER_TABS = [
   { id: "memorydb", label: "记忆", icon: "🗄️" },
   { id: "graph", label: "图谱", icon: "🕸" },
   { id: "rag", label: "RAG 管理", icon: "🗂️" },
-  { id: "studio", label: "图片创作", icon: "🎨" },
   { id: "tools", label: "工具", icon: "🔧" },
   { id: "skills", label: "技能", icon: "✨" },
   { id: "sched", label: "定时任务", icon: "🗓️" },
@@ -3002,6 +3066,13 @@ function bindEvents() {
   $("#threadSearch").addEventListener("input", () => loadThreads());
   $("#btnDrawer").addEventListener("click", openDrawer);
   $("#drawerMask").addEventListener("click", closeDrawer);
+  // 创作工作台：侧边栏品牌下方入口 → 独立全屏视图（图片 / 视频）
+  $("#btnStudio").addEventListener("click", () => {
+    if (isStudioOpen()) closeStudioView(); else openStudioView("image");
+  });
+  $("#btnStudioBack").addEventListener("click", closeStudioView);
+  $("#btnStudioSettings").addEventListener("click", () => openDrawer());
+  $$("#studioSeg button").forEach((b) => b.addEventListener("click", () => switchStudioTab(b.dataset.tab)));
   // 交付物入口（主页设置按钮左边）：打开抽屉并激活交付物页
   $("#btnDeliverables").addEventListener("click", () => {
     openDrawer();
@@ -3019,6 +3090,7 @@ function bindEvents() {
     }
     if (e.key === "Escape") {
       if (!$("#drawer").classList.contains("hidden") && $("#drawer").classList.contains("show")) closeDrawer();
+      else if (isStudioOpen()) closeStudioView();
       else if ($("#approvalModeBar").classList.contains("open")) $("#approvalModeBar").classList.remove("open");
       else if ($("#app").classList.contains("side-open")) closeSidebar();
       else hideCmdMenu();

@@ -789,6 +789,25 @@ def get_lightrag(thread_id: str, ns: Optional[str] = None) -> Any:
     return build_lightrag_instance(thread_id, ns=ns)
 
 
+def _apply_graph_relevance_threshold(rag: Any) -> None:
+    """给图谱向量存储（实体/关系）设置更高的相似度阈值，过滤低相关召回。
+
+    背景：LightRAG 默认 ``cosine_better_than_threshold=0.2``，而对 bge-m3 这类
+    嵌入，跨领域无关文本的相似度也有 0.3~0.45，导致对话图（__global__）里与
+    本轮问题无关的实体/关系被召进 L6 注入与"知识检索"面板。这里只把实体/关系
+    向量库的阈值调高；分块向量库（chunks_vdb）保持默认，避免伤害向量库召回。
+    可用 ``GRAPH_COSINE_THRESHOLD`` 覆盖（默认 0.5）。
+    """
+    try:
+        thr = float(os.getenv("GRAPH_COSINE_THRESHOLD", "0.5"))
+    except Exception:
+        thr = 0.5
+    for name in ("entities_vdb", "relationships_vdb"):
+        vdb = getattr(rag, name, None)
+        if vdb is not None and hasattr(vdb, "cosine_better_than_threshold"):
+            vdb.cosine_better_than_threshold = thr
+
+
 def _ensure_initialized(thread_id: str, ns: Optional[str] = None) -> None:
     """确保某会话/知识库的 storages 已在 worker loop 上初始化过。"""
     rag = get_lightrag(thread_id, ns=ns)
@@ -796,6 +815,7 @@ def _ensure_initialized(thread_id: str, ns: Optional[str] = None) -> None:
         from lightrag import LightRAG
         status = getattr(rag, "_storages_status", None)
         if status == LightRAG._storages_status.__class__.INITIALIZED:
+            _apply_graph_relevance_threshold(rag)
             return
     except Exception:
         pass
@@ -804,6 +824,7 @@ def _ensure_initialized(thread_id: str, ns: Optional[str] = None) -> None:
     except Exception:
         # 并发初始化由 LightRAG 内部去重/排队兜底；失败时让后续操作报错更可诊断
         pass
+    _apply_graph_relevance_threshold(rag)
 
 
 _VECTOR_NOOP_STORES = ("chunks_vdb", "entities_vdb", "relationships_vdb")

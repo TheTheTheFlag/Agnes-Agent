@@ -348,7 +348,7 @@ async def file(item_id: str, thumb: int = 0):
     return FileResponse(fp, headers=headers)
 
 
-@router.delete("")
+@router.post("/delete")
 async def delete(payload: dict):
     ids = set(str(x) for x in ((payload or {}).get("ids") or []) if str(x).strip())
     if not ids:
