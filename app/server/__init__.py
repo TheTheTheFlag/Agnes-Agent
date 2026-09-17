@@ -23,6 +23,17 @@ app = FastAPI(title="Agnes Agent Debug Panel", version="1.0.0")
 if _os.path.isdir(_STATIC_DIR):
     app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 
+
+@app.middleware("http")
+async def _static_no_cache(request, call_next):
+    """静态资源统一 no-cache（仍需带 ETag 协商，命中即 304）：
+    前端 JS/CSS 更新后浏览器必须重新拉取，避免"改了代码页面不生效"。
+    见下方 root() 对 index.html 的同类处理。"""
+    resp = await call_next(request)
+    if request.url.path.startswith("/static/"):
+        resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
 # 视频参考图公开挂载：Agnes Video 2.5 Flash 的上游要求图片是公网可访问的 http(s) URL，
 # 该目录下文件名为随机 token（能力 URL）。此路径不以 /api/ 开头，不受登录中间件保护。
 _PUB_REF_DIR = _os.path.join(_DATA_DIR, "video_ref")

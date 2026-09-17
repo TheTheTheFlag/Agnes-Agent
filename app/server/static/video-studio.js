@@ -57,6 +57,7 @@ async function renderVideoTab(el) {
             <div class="st-refs" id="vsRefs"><div class="d-empty">暂无参考图</div></div>
             <div class="d-row" style="margin-top:8px">
               <button class="d-btn" id="vsAddRef">＋ 添加参考图</button>
+              <button class="d-btn" id="vsPickLib">🖼 从作品库选择</button>
               <span class="d-empty" style="margin:0" id="vsRefNote"></span>
             </div>
             <input type="file" id="vsRefFile" accept="image/*" multiple style="display:none">
@@ -123,6 +124,7 @@ async function renderVideoTab(el) {
   paintVideoPrompt();
 
   $("#vsAddRef", el).addEventListener("click", () => $("#vsRefFile", el).click());
+  $("#vsPickLib", el).addEventListener("click", () => openVideoRefPicker());
   $("#vsRefFile", el).addEventListener("change", (e) => { const f = e.target.files; e.target.value = ""; onVideoRefFiles(f); });
   $$(".st-chip", el).forEach((c) => c.addEventListener("click", () => {
     const v = VideoStudio.el.prompt.value;
@@ -196,7 +198,7 @@ function paintVideoRefs() {
   }
   box.innerHTML = VideoStudio.refs.map((r, i) => `
     <div class="st-ref">
-      <img src="/api/uploads/${encodeURIComponent(r.name)}" alt="">
+      <img src="${r.url || ("/api/uploads/" + encodeURIComponent(r.name))}" alt="">
       <div class="st-ref-body">
         <span class="st-ref-tag">${escapeHtml(spec.labels[i] || ("图 " + (i + 1)))}</span>
         <div class="st-ref-ops">
@@ -273,6 +275,75 @@ async function onVideoRefFiles(files) {
   paintVideoRefs();
 }
 
+/* ---------- 从图片作品库选择参考图 ---------- */
+async function openVideoRefPicker() {
+  const spec = refSpec();
+  if (!spec) return;
+  let items = [];
+  try {
+    const r = await apiGet("/api/image/history?limit=120");
+    items = r.items || [];
+  } catch (e) { toast("作品库加载失败: " + e.message, "error"); return; }
+
+  const room = Math.max(0, spec.max - VideoStudio.refs.length);
+  const body = items.length
+    ? `<div class="vs-pick-grid">${items.map((it) => `
+        <button class="vs-pick-item" data-id="${escapeHtml(it.id)}">
+          <img loading="lazy" src="/api/image/file/${encodeURIComponent(it.id)}${it.thumb ? "?thumb=1" : ""}" alt="">
+          <span>${escapeHtml(IMAGE_MODE_LBL[it.mode] || it.mode || "")} · ${escapeHtml(fmtAgo(it.created_at))}</span>
+        </button>`).join("")}</div>`
+    : `<div class="d-empty" style="padding:28px 0;text-align:center">图片作品库为空 —— 先去「图片创作」生成几张图吧。</div>`;
+
+  const wrap = document.createElement("div");
+  wrap.className = "rag-modal-mask";
+  wrap.innerHTML = `
+    <div class="rag-modal st-lightbox">
+      <div class="rag-modal-hd">
+        <h4>从图片作品库选择${escapeHtml(spec.title)}（可选 ${room} 张 / 上限 ${spec.max}）</h4>
+        <button class="icon-btn rg-modal-x">✕</button>
+      </div>
+      <div class="rag-modal-bd">
+        ${body}
+        <div class="d-row" style="margin-top:12px">
+          <button class="d-btn primary" data-ok disabled>＋ 加入选中（0）</button>
+          <button class="d-btn" data-close>关闭</button>
+          <span class="d-empty" style="margin:0">点缩略图多选，按顺序加入</span>
+        </div>
+      </div>
+    </div>`;
+  document.body.appendChild(wrap);
+  const close = () => wrap.remove();
+  wrap.addEventListener("click", (e) => { if (e.target === wrap) close(); });
+  wrap.querySelector(".rg-modal-x").addEventListener("click", close);
+  wrap.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", close));
+
+  const picked = new Set();
+  const okBtn = wrap.querySelector("[data-ok]");
+  const sync = () => { okBtn.textContent = `＋ 加入选中（${picked.size}）`; okBtn.disabled = !picked.size; };
+  wrap.querySelectorAll(".vs-pick-item").forEach((btn) => btn.addEventListener("click", () => {
+    const id = btn.dataset.id;
+    if (picked.has(id)) { picked.delete(id); btn.classList.remove("sel"); }
+    else {
+      if (VideoStudio.refs.length + picked.size >= spec.max) { toast(`该模式最多 ${spec.max} 张参考图`, "error"); return; }
+      picked.add(id); btn.classList.add("sel");
+    }
+    sync();
+  }));
+  sync();
+  okBtn.addEventListener("click", () => {
+    let n = 0;
+    for (const it of items) {
+      if (!picked.has(it.id)) continue;
+      if (VideoStudio.refs.length >= spec.max) break;
+      const name = it.file || (it.id + ".png");
+      VideoStudio.refs.push({ path: "image_library/" + name, name, url: "/api/image/file/" + encodeURIComponent(it.id) });
+      n++;
+    }
+    paintVideoRefs();
+    toast(`已加入 ${n} 张参考图`, "success");
+    close();
+  });
+}
 /* ---------- 生成 ---------- */
 async function generateVideo() {
   if (VideoStudio.busy) return;

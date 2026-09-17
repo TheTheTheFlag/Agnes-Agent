@@ -133,8 +133,6 @@ async function renderStudioTab(el) {
   paintPromptPlaceholder();
 
   // —— 事件 ——
-  $$(".st-mode-btn", Studio.el.seg).forEach((b) =>
-    b.addEventListener("click", () => { Studio.mode = b.dataset.mode; paintMode(); paintPromptPlaceholder(); }));
   $("#stAddRef", el).addEventListener("click", () => $("#stRefFile", el).click());
   $("#stRefFile", el).addEventListener("change", (e) => onRefFiles(e.target.files));
   $$(".st-chip", el).forEach((c) => c.addEventListener("click", () => {
@@ -159,6 +157,8 @@ function paintMode() {
   Studio.el.seg.innerHTML = Object.entries(IMAGE_MODE_META).map(([k, m]) =>
     `<button class="st-mode-btn ${k === Studio.mode ? "active" : ""}" data-mode="${k}">
        <b>${m.i} ${escapeHtml(m.t)}</b><small>${escapeHtml(m.d)}</small></button>`).join("");
+  $$(".st-mode-btn", Studio.el.seg).forEach((b) =>
+    b.addEventListener("click", () => { Studio.mode = b.dataset.mode; paintMode(); paintPromptPlaceholder(); }));
   Studio.el.refBlock.style.display = Studio.mode === "txt2img" ? "none" : "";
   Studio.el.refHint.textContent = Studio.mode === "img2img" ? "1 张" : "≥2 张";
   paintRefs();
