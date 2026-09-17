@@ -2457,3 +2457,150 @@ input, textarea { font-family: inherit; }
   .studio-seg button { padding: 6px 9px; font-size: 12px; }
   .studio-body { padding: 12px; }
 }
+
+/* ==================== 移动端适配：设置抽屉 / 创作工作台 / 触控细节 ====================
+   ① 设置抽屉：桌面端是「左侧 268px 标签栏 + 右侧内容」，手机上没有横向空间，
+      改为「顶部横向可滚动标签条 + 全宽内容」，标签条可左右滑动找全部标签。
+   ② 抽屉内的 RAG 管理台同样是「左导航 + 内容」两栏，一并改为顶部标签条。
+   ③ 创作工作台：顶栏紧凑化；模式选择由 3 列小卡片改为整行列表（说明不再折行）；
+      作品库网格、速选 chip、小按钮加大到可点区域 ≥32px。
+   ④ 表单控件字号 16px，避免 iOS 聚焦时自动放大页面。 */
+
+/* ---- ① 设置抽屉 ---- */
+@media (max-width: 767.98px) {
+  .drawer { flex-direction: column; }
+
+  .drawer-tabs {
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+    flex: 0 0 auto;
+    width: 100%;
+    min-width: 0;
+    padding: 7px 8px;
+    border-right: none;
+    border-bottom: 1px solid var(--border-soft);
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+  .drawer-tabs::-webkit-scrollbar { display: none; }
+  .drawer-tabs-header { margin: 0; flex: 0 0 auto; }
+  .drawer-tabs-header .drawer-tabs-title { display: none; }
+  .drawer-tabs-header .drawer-close-tab { padding: 8px 12px; min-height: 36px; }
+  .drawer-tab {
+    flex: 0 0 auto;
+    width: auto;
+    min-height: 36px;
+    padding: 8px 12px;
+    border: 1px solid var(--border-soft);
+    border-radius: 999px;
+    background: var(--bg-elev);
+    font-size: 13px;
+  }
+  .drawer-tab .drawer-tab-label { flex: 0 0 auto; }
+  .drawer-tab.active { border-color: var(--accent); }
+  .drawer-body { padding: 12px; }
+
+  /* 设置项表单：允许换行，控件不再被压成一条 */
+  .d-row { flex-wrap: wrap; }
+  .d-row label { width: 72px; }
+  .d-row > .d-input, .d-row > .d-select, .d-row > textarea { min-width: 140px; }
+  .rg-cfg-row { flex-wrap: wrap; }
+  .rg-cfg-row label:first-child { min-width: 0; width: auto; flex: 1 1 100%; }
+
+  /* ---- ② 抽屉内的 RAG 管理台 ---- */
+  .rag { flex-direction: column; }
+  .rag-nav {
+    position: static;
+    flex: 0 0 auto;
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    padding: 0 0 10px;
+    border-right: none;
+    border-bottom: 1px solid var(--border-soft);
+    overflow-x: auto;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+  .rag-nav::-webkit-scrollbar { display: none; }
+  .rag-nav-brand, .rag-nav-hint { display: none; }
+  .rag-nav-item, .rag-nav-new {
+    flex: 0 0 auto;
+    padding: 7px 12px;
+    border: 1px solid var(--border-soft);
+    border-radius: 999px;
+    font-size: 12.5px;
+    white-space: nowrap;
+  }
+  .rag-nav-item.active::before { display: none; }
+  .rag-nav-new { margin-top: 0; box-shadow: none; }
+  .rag-content { padding: 12px 0 20px; }
+  .rag-subtabs { width: 100%; overflow-x: auto; scrollbar-width: none; }
+  .rag-subtabs::-webkit-scrollbar { display: none; }
+  .rag-subtab { flex: 0 0 auto; padding: 7px 11px; font-size: 12.5px; white-space: nowrap; }
+  .rg-stats { grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); }
+
+  /* ---- ④ 触控目标与 iOS 聚焦缩放 ---- */
+  .sidebar-search { padding: 4px 11px; }
+  .sidebar-search input { padding: 6px 0; align-self: stretch; }
+  .sidebar-search input, .d-input, .d-select, .st-prompt, .st-param { font-size: 16px; }
+  .login-card { padding: 28px 20px 22px; }
+  .login-card input { font-size: 16px; }
+  .thread-item .t-del { min-width: 30px; min-height: 30px; padding: 5px 8px; font-size: 15px; }
+  .thread-toolbar .t-btn { padding: 6px 12px; min-height: 34px; font-size: 12.5px; }
+  .approval-mode-btn { min-height: 32px; padding: 6px 11px; }
+}
+
+/* ---- ③ 创作工作台 / 表单触控目标：窄屏与手机横屏（≤1000px） ---- */
+@media (max-width: 1000px) {
+  .studio-seg button { min-height: 30px; }
+  .st-chip { min-height: 32px; padding: 6px 11px; }
+  .d-btn.sm { min-height: 32px; padding: 6px 10px; }
+  .st-gen { min-height: 44px; }
+  .approval-mode-btn { min-height: 32px; }
+}
+
+/* ---- ③ 创作工作台布局：手机竖屏 ---- */
+@media (max-width: 720px) {
+  #studioTopbar { height: 50px; padding: 0 10px; gap: 6px; }
+  .studio-title { flex: 0 0 auto; }
+  .studio-name { font-size: 13px; white-space: nowrap; }
+  #btnStudioBack { min-width: 34px; }
+  .studio-seg { margin-left: 0; padding: 2px; }
+  .studio-seg button { min-height: 30px; padding: 6px 9px; font-size: 11.5px; white-space: nowrap; }
+  .studio-body { padding: 12px 12px 20px; }
+
+  .st-head { padding-bottom: 6px; }
+  .st-head-title { font-size: 14px; }
+  .st-head-hint { font-size: 11px; line-height: 1.5; }
+  .st-cols { gap: 10px; }
+
+  /* 模式选择：3 列小卡片 → 整行列表 */
+  .st-mode-seg { grid-template-columns: 1fr; gap: 6px; }
+  .st-mode-btn {
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+    min-height: 46px;
+    padding: 10px 12px;
+  }
+  .st-mode-btn b { flex: 0 0 auto; font-size: 13.5px; }
+  .st-mode-btn small { flex: 1 1 auto; min-width: 0; text-align: right; font-size: 11px; }
+
+  .st-grid { grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 10px; }
+  .st-ref { gap: 8px; padding: 7px; }
+  .st-ref img { width: 56px; height: 56px; flex-basis: 56px; }
+
+  .st-actions { flex-wrap: wrap; }
+  .st-gen { flex: 1 1 auto; }
+  .st-lightbox { width: 94vw; }
+}
+
+/* ---- 极窄屏：让出工作台标题宽度给「图片/视频」切换 ---- */
+@media (max-width: 420px) {
+  .studio-title { display: none; }
+}
