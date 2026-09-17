@@ -19,6 +19,7 @@
 - [模块架构（按 Agent 能力分类）](#-模块架构按-agent-能力分类)
 - [设计思路与实现过程](#-设计思路与实现过程)
 - [踩坑与解决实录](#-踩坑与解决实录)
+- [实战案例：22 万条医疗问答全量入库](#-实战案例22-万条医疗问答全量入库本地嵌入--服务器替换)
 - [项目文件结构](#-项目文件结构)
 - [Roadmap 与致谢](#-roadmap-与致谢)
 
@@ -495,6 +496,53 @@ pending ──(强依赖父全部 success)──► ready ──► running ─�
 
 8. **坑：多 Key 轮换把 `attempt_count` 在 invoke 前清零，无限退避重试卡死 13+ 分钟。**
    → while 条件恒为真。解决：仅在**调用成功之后**复位计数（`llm_factory.py`）。流式同理，只重连接建立阶段，token 中途不重试。
+
+9. **坑：入库后文档状态查不到，被反复重试成 dup 失败记录。**
+   → 自行复算的 `doc_id` 与 LightRAG 落盘键对不上：LightRAG 在 `compute_mdhash_id` 前会先 `sanitize_text_for_encoding`（strip / unescape / 去控制字符），而适配器直接用原文 `md5`，尾部换行差一点就全错。解决：`_doc_id_for_text` 改为对**同一份 sanitize 后文本**取 hash，续跑与状态判断才可靠。详见[实战案例](#-实战案例22-万条医疗问答全量入库本地嵌入--服务器替换)。
+
+10. **坑（最凶险）：替换大库后，首次检索直接把 8GB 服务器打 OOM。**
+   → 不是向量本身，而是 LightRAG 的 `FaissVectorDBStorage._load_faiss_index` 在加载时对**每一条**记录执行 `index.reconstruct(fid).tolist()` 塞进 `_id_to_meta["__vector__"]`：22 万条 × 1024 维 ≈ 7GB 常驻。解决：monkeypatch 掉预重建（`_patch_faiss_lazy_vectors`），改为完全不预载向量，峰值 6.3GB → **2.7GB**；主检索路径 `chunks_vdb.query` 只读 `content`，不受影响。
+
+11. **坑：纯向量库检索永远返回 `[no-context]`。**
+   → LightRAG 的 `local/global/hybrid` 只走图谱（实体/关系），对 `target=vector`（无实体）的库必然空命中。解决：`_auto_query_mode` 在检测到实体向量库为空时，把 `local/global/hybrid` 自动降级为 `naive`（含 `naive` 的 `mix` 不动）；有图谱的 `__global__` 对话图谱仍走 `hybrid`。
+
+---
+
+## 🧪 实战案例：22 万条医疗问答全量入库（本地嵌入 → 服务器替换）
+
+**背景**：把一份 22 万+ 问答对的中文医疗 CSV（列 `question,answer`，约 98MB / 3370 万字符）全量灌进一个独立知识库，并在一台只有 8GB 内存的服务器上提供检索。直接用服务器嵌入 API 会撞 TPM 限流，因此改用**本地嵌入构建 → 整目录搬运**。
+
+### 方案
+
+| 环节 | 做法 |
+| --- | --- |
+| 数据 | `med_qa.csv` 共 223,851 行；读取用 `utf-8-sig` 吃掉 BOM |
+| 分块 | C 策略：每问一答一个 chunk、整对不拆；超大文件按服务器同规则切成 224 段（每段约 15 万字符、逐段保留表头） |
+| 目标 | `target=vector`（仅向量库，跳过 LLM 实体抽取，省时省钱） |
+| 嵌入 | 本地 Ollama `bge-m3`（1024 维）；`EMBEDDING_MAX_BATCH=128` 批量提速 |
+| 产物 | 224 docs 全 `processed`、223,851 chunks、faiss 向量 223,851 / dim 1024；构建约 60 分钟 |
+| 交付 | 打包 930MB → scp → 校验 MD5 → 就地替换旧库（保留 `.bak_` 备份）→ 重启服务 |
+
+### 三个必须跨过的坑
+
+1. **续跑 / 状态判断错乱**：`doc_id` 复算必须与 LightRAG 内部一致（**先 `sanitize_text_for_encoding` 再 hash**），否则状态读不到、会被当成失败反复重试。
+2. **查询时 OOM**：内存大头是 LightRAG 载入 faiss meta 时对**每条**向量做 `reconstruct().tolist()`，而非索引本身；用惰性加载补丁把峰值从 6.3GB 压到 2.7GB。
+3. **纯向量库查空**：无图谱的库必须走 `naive`（或含 `naive` 的 `mix`），不能沿用默认 `hybrid`。
+
+### 检验结果
+
+- `kb_status`：224 docs 全 `processed`、223,851 chunks，后端 faiss / 图 neo4j
+- 向量检索 Top-5 相似度约 **0.73**，命中内容与问题强相关
+- 真实工具链 `lightgraph_query` + L6 注入均能返回带引用的答案
+- HTTP 面板登录后 `/api/kb/list`、`/api/kb/status`、`/api/kb/search` 全部正常
+
+### 教训清单
+
+- **嵌入维度必须全链路一致**：本地构建与服务器查询都用 `bge-m3`（1024 维），否则相似度会系统性崩坏。
+- **巨量语料的瓶颈在"对象化"**：向量落盘只几百 MB，加载成 Python 对象后可能膨胀十几倍——部署前按**内存峰值**而非磁盘体积评估容量。
+- **`sanitize` 差异是隐性炸弹**：凡自算 ID / 复算 hash 之处，都要与框架内部保持完全一致的预处理。
+- **绕限流的最优解常是"离线生产 + 搬运"**：本地嵌入不受 TPM 约束，构建一次即可反复部署；搬运时 MD5 校验 + 备份目录兜底。
+- **别在状态判断上"猜"**：先用探针打印 expected vs actual 的 ID，比对一致后再谈续跑。
 
 ---
 

@@ -62,6 +62,92 @@ def _faiss_available() -> bool:
         return False
 
 
+_FAISS_LAZY_PATCHED = False
+
+
+def _patch_faiss_lazy_vectors() -> None:
+    """让 FaissVectorDBStorage 载入索引时不再预先把每条向量还原成 Python list。
+
+    LightRAG 上游 `_load_faiss_index` 会对每行执行
+    `self._index.reconstruct(fid).tolist()` 并塞进 `_id_to_meta["__vector__"]`。
+    22 万条 1024 维向量约合 7GB 常驻内存，仅服务于 `get_vectors_by_ids`，
+    在 8GB 服务器上直接 OOM。这里改为完全不预载向量：
+      - 主检索路径 `chunks_vdb.query` 直接读 `_id_to_meta` 里的 content，不受影响；
+      - `get_by_id(s)` 走 `_format_record`（本就剥离向量），不受影响；
+      - 仅 `get_vectors_by_ids` 返回空，上层 `_vector_similarity_chunk_selection`
+        会回退到 WEIGHT 排序（纯向量库没有图谱实体，此路径本就不触发）。
+    置 LIGHTRAG_LAZY_FAISS_VECTORS=0 可关闭该补丁。
+    """
+    global _FAISS_LAZY_PATCHED
+    if _FAISS_LAZY_PATCHED:
+        return
+    _FAISS_LAZY_PATCHED = True
+    if str(os.environ.get("LIGHTRAG_LAZY_FAISS_VECTORS", "1")).strip() == "0":
+        return
+    try:
+        import faiss
+        from lightrag.kg.faiss_impl import FaissVectorDBStorage
+        from lightrag.utils import logger
+    except Exception:
+        return
+    if getattr(FaissVectorDBStorage, "_agnes_lazy_vectors", False):
+        return
+
+    def _load_faiss_index(self):
+        if not os.path.exists(self._faiss_index_file):
+            logger.warning(
+                f"[{self.workspace}] No existing Faiss index file found for {self.namespace}"
+            )
+            return
+        dim_mismatch = False
+        try:
+            self._index = faiss.read_index(self._faiss_index_file)
+            if self._index.d != self._dim:
+                dim_mismatch = True
+                raise ValueError(
+                    f"Dimension mismatch: loaded Faiss index has dimension {self._index.d}, "
+                    f"but embedding function expects dimension {self._dim}."
+                )
+            with open(self._meta_file, "r", encoding="utf-8") as f:
+                stored_dict = json.load(f)
+            ntotal = int(self._index.ntotal)
+            id_to_meta = {}
+            for fid_str, meta in stored_dict.items():
+                fid = int(fid_str)
+                if fid >= ntotal:
+                    logger.warning(
+                        f"[{self.workspace}] Skipping metadata row fid={fid}: "
+                        f"exceeds index size ({ntotal})"
+                    )
+                    continue
+                # 与上游唯一差异：不重建 __vector__（避免逐条 reconstruct().tolist()）
+                if "__vector__" in meta:
+                    meta.pop("__vector__", None)
+                id_to_meta[fid] = meta
+            self._id_to_meta = id_to_meta
+            if ntotal > len(self._id_to_meta):
+                logger.warning(
+                    f"[{self.workspace}] FAISS index has {ntotal} vectors but only "
+                    f"{len(self._id_to_meta)} metadata rows — index > meta skew."
+                )
+            logger.info(
+                f"[{self.workspace}] Faiss index loaded with {ntotal} vectors from "
+                f"{self._faiss_index_file} (lazy vectors)"
+            )
+        except Exception as e:
+            if dim_mismatch:
+                raise
+            logger.error(
+                f"[{self.workspace}] Failed to load Faiss index or metadata: {e}"
+            )
+            logger.warning(f"[{self.workspace}] Starting with an empty Faiss index.")
+            self._index = faiss.IndexFlatIP(self._dim)
+            self._id_to_meta = {}
+
+    FaissVectorDBStorage._load_faiss_index = _load_faiss_index
+    FaissVectorDBStorage._agnes_lazy_vectors = True
+
+
 def _resolve_llm() -> Any:
     """对话 LLM：走项目的主配置（用户当前选的那个模型），并把 base_url/api_key 注入环境变量。"""
     _load_dotenv()
@@ -161,9 +247,10 @@ def _make_embedding_func() -> "EmbeddingFunc":
     client = OpenAI(base_url=ep["base_url"], api_key=ep["api_key"],
                     http_client=_no_proxy_client)
 
-    # 控制单次请求最多同时嵌入的文本数（bge-m3 单次最多 8192 token）
-    max_batch = 16
-    max_tokens_per_batch = 8000
+    # 控制单次请求最多同时嵌入的文本数（bge-m3 单次最多 8192 token）。
+    # 本地 Ollama（EMBEDDING_MAX_BATCH）可调大提速；默认 16 保持远程 API 保守行为。
+    max_batch = int(os.environ.get("EMBEDDING_MAX_BATCH", "16"))
+    max_tokens_per_batch = int(os.environ.get("EMBEDDING_MAX_TOKENS", "8000"))
 
     def _embed_batch(texts: List[str]) -> List[List[float]]:
         resp = client.embeddings.create(input=texts, model=ep["model"])
@@ -176,8 +263,17 @@ def _make_embedding_func() -> "EmbeddingFunc":
 
         def _do() -> np.ndarray:
             vecs: List[np.ndarray] = []
-            for i in range(0, len(texts), max_batch):
-                for emb in _embed_batch(texts[i : i + max_batch]):
+            batch: List[str] = []
+            batch_chars = 0
+            for t in texts:
+                batch.append(t)
+                batch_chars += len(t)
+                if len(batch) >= max_batch or batch_chars >= max_tokens_per_batch:
+                    for emb in _embed_batch(batch):
+                        vecs.append(np.asarray(emb, dtype="float32"))
+                    batch, batch_chars = [], 0
+            if batch:
+                for emb in _embed_batch(batch):
                     vecs.append(np.asarray(emb, dtype="float32"))
             return np.vstack(vecs) if vecs else np.zeros((0, 1024), dtype="float32")
 
@@ -588,6 +684,7 @@ def build_lightrag_instance(thread_id: str, ns: Optional[str] = None) -> Any:
     with _lock:
         if ns in _instances:
             return _instances[ns]
+        _patch_faiss_lazy_vectors()
         import lightrag as _lh
         llm = _make_llm_func()
         emb_fn = _make_embedding_func()
@@ -900,6 +997,35 @@ def _summarize_retrieval(raw: Any, query: str, ns: str, mode: str, top_k: int,
     }
 
 
+def _is_graphless(rag: Any) -> bool:
+    """判断该 LightRAG 实例是否"无图谱"（纯向量库）。
+
+    以 entities_vdb 的已载入条目数判定：target=vector 的库不建图，实体向量库为空；
+    普通对话图谱/混合库的实体向量库非空。取不到内部结构时按"有图谱"处理，保持原行为。
+    """
+    try:
+        ev = getattr(rag, "entities_vdb", None)
+        meta = getattr(ev, "_id_to_meta", None)
+        if meta is not None:
+            return len(meta) == 0
+    except Exception:
+        pass
+    return False
+
+
+def _auto_query_mode(rag: Any, mode: str) -> str:
+    """纯向量库把图谱依赖的检索模式自动降级为 naive，避免空上下文。
+
+    LightRAG 的 local/global/hybrid 只走图谱（实体/关系），对无图谱的纯向量库
+    会返回 [no-context]；这类库必须走 naive（或含 naive 的 mix）才能命中分块。
+    显式传 naive/mix 时不改动。
+    """
+    m = (mode or "hybrid").strip().lower()
+    if m in ("local", "global", "hybrid") and _is_graphless(rag):
+        return "naive"
+    return m
+
+
 def lightrag_query(thread_id: str, query: str, top_k: int = 12, mode: str = "hybrid",
                    ns: Optional[str] = None) -> Any:
     """同步桥：在 worker loop 上执行查询，返回查询文本（str）。
@@ -911,6 +1037,7 @@ def lightrag_query(thread_id: str, query: str, top_k: int = 12, mode: str = "hyb
     """
     _ensure_initialized(thread_id, ns=ns)
     rag = get_lightrag(thread_id, ns=ns)
+    mode = _auto_query_mode(rag, mode)
     from lightrag import QueryParam
     param = QueryParam(mode=mode, top_k=top_k)
     resolved_ns = ns or _graph_ns(thread_id)
@@ -1159,8 +1286,14 @@ def _read_json_if_exists(path: str) -> dict:
 
 
 def _doc_id_for_text(text: str) -> str:
-    """与 LightRAG 一致的 doc 主键：md5(内容)，前缀 'doc-'。"""
-    return "doc-" + hashlib.md5(text.encode("utf-8")).hexdigest()
+    """与 LightRAG 一致的 doc 主键：md5(内容)，前缀 'doc-'。
+
+    须与 LightRAG 实际写入键完全一致（LightRAG 在 hash 前会先执行
+    sanitize_text_for_encoding —— 内含 strip/unescape/去控制字符）。
+    """
+    from lightrag.utils import sanitize_text_for_encoding
+
+    return "doc-" + hashlib.md5(sanitize_text_for_encoding(text).encode("utf-8")).hexdigest()
 
 
 def kb_status(thread_id: str) -> dict:
