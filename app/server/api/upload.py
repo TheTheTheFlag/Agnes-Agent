@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from app.config import BASE_DIR
 
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
-MAX_SIZE = 20 * 1024 * 1024  # 20MB
+MAX_SIZE = 200 * 1024 * 1024  # 200MB（大表格/语料经 kb 自动拆分后喂入知识库）
 
 # 允许的扩展名：图片为主（视觉技能），辅以常见文档
 _ALLOWED_EXT = {
