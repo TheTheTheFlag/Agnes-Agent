@@ -254,20 +254,42 @@ async function ragDocs(content, tid, body) {
         </tr>`).join("") + `</tbody></table>` : `
       <div class="d-empty">暂无文档。上传文件 / 导入 URL / 粘贴文本即可建立第一条知识。</div>`}`);
 
-    // 分页
+    // 分页：上一页 / 页码 / 下一页 / 跳页（页码从 1 开始）
     const pages = Math.max(1, Math.ceil(r.total / 15));
-    if (pages > 1) {
-      const pg = document.createElement("div");
-      pg.className = "d-row";
-      pg.style.cssText = "gap:8px;margin-top:8px";
-      pg.innerHTML = `<span class="d-empty" style="margin:0">${escapeHtml(String(page + "/" + pages))}</span>
-        ${page > 1 ? `<button class="d-btn d-btn-sm">上一页</button>` : ""}
-        ${page < pages ? `<button class="d-btn d-btn-sm">下一页</button>` : ""}`;
-      body.appendChild(pg);
-      const [p, n] = $$("button", pg);
-      if (p) p.addEventListener("click", () => { page--; render(); });
-      if (n) n.addEventListener("click", () => { page++; render(); });
+    const pg = document.createElement("div");
+    pg.className = "d-row";
+    pg.style.cssText = "gap:8px;margin-top:8px;flex-wrap:wrap";
+    let pgHtml = `<span class="d-empty" style="margin:0">共 ${r.total} 条 · 第 ${escapeHtml(String(page))}/${escapeHtml(String(pages))} 页</span>`;
+    pgHtml += `<button class="d-btn d-btn-sm" id="rgPrev" ${page > 1 ? "" : "disabled"}>‹ 上一页</button>`;
+    const win = 5;
+    const lo = Math.max(1, page - Math.floor(win / 2));
+    const hi = Math.min(pages, lo + win - 1);
+    pgHtml += `<span class="d-row" style="gap:4px;flex-wrap:wrap">`;
+    if (lo > 1) pgHtml += `<button class="d-btn d-btn-sm" data-pg="1">1</button>`;
+    if (lo > 2) pgHtml += `<span class="d-empty" style="margin:0">…</span>`;
+    for (let p = lo; p <= hi; p++) {
+      pgHtml += `<button class="d-btn d-btn-sm${p === page ? " primary" : ""}" data-pg="${escapeHtml(String(p))}">${escapeHtml(String(p))}</button>`;
     }
+    if (hi < pages - 1) pgHtml += `<span class="d-empty" style="margin:0">…</span>`;
+    if (hi < pages) pgHtml += `<button class="d-btn d-btn-sm" data-pg="${escapeHtml(String(pages))}">${escapeHtml(String(pages))}</button>`;
+    pgHtml += `</span>`;
+    pgHtml += `<button class="d-btn d-btn-sm" id="rgNext" ${page < pages ? "" : "disabled"}>下一页 ›</button>`;
+    pgHtml += `<span class="d-row" style="gap:4px"><input type="number" class="d-input" id="rgJump" min="1" max="${escapeHtml(String(pages))}" style="width:64px" placeholder="页码">&nbsp;<button class="d-btn d-btn-sm" id="rgJumpGo">跳转</button></span>`;
+    pg.innerHTML = pgHtml;
+    body.appendChild(pg);
+    const go = (p) => {
+      p = Math.min(pages, Math.max(1, parseInt(p, 10) || page));
+      if (p !== page) { page = p; render(); }
+    };
+    const prev = $("#rgPrev", pg);
+    const next = $("#rgNext", pg);
+    if (prev) prev.addEventListener("click", () => go(page - 1));
+    if (next) next.addEventListener("click", () => go(page + 1));
+    $$("button[data-pg]", pg).forEach((b) => b.addEventListener("click", () => go(parseInt(b.dataset.pg, 10) || 1)));
+    const jgo = $("#rgJumpGo", pg);
+    if (jgo) jgo.addEventListener("click", () => go($("#rgJump", pg).value));
+    const jin = $("#rgJump", pg);
+    if (jin) jin.addEventListener("keydown", (e) => { if (e.key === "Enter") go(jin.value); });
 
     // 行操作
     $$("button[data-act]", body).forEach((b) => b.addEventListener("click", async () => {
@@ -291,14 +313,53 @@ async function ragDocs(content, tid, body) {
     // 喂入文本
     const strat = () => { const s = $("#rgStrat", body); return s ? s.value : ""; };
     const target = () => { const t = $("#rgTarget", body); return t ? t.value : "both"; };
+    const progressHost = document.createElement("div");
+    progressHost.id = "rgProgressHost";
+    content.appendChild(progressHost);
+    const splitTip = (r2) => r2.splits && r2.splits > 1 ? `（过大的内容已自动拆为 ${r2.splits} 份，后台逐份串行喂入）` : "";
+    const startIngestPoll = (trackId, label) => new Promise((resolve) => {
+      progressHost.innerHTML = `<div class="rg-progress">
+        <div class="d-empty" style="margin:0">⏳ ${escapeHtml(label)}…</div>
+        <div class="rg-progress-bar" id="rgPbar"><i style="width:0%"></i></div>
+        <div class="d-row" style="justify-content:space-between;flex-wrap:wrap;gap:4px">
+          <span class="d-empty" id="rgPtext" style="margin:0">准备中…</span>
+          <span class="d-row" id="rgChips" style="gap:3px;flex-wrap:wrap"></span>
+        </div>
+      </div>`;
+      const pbar = $("#rgPbar", progressHost);
+      const ptext = $("#rgPtext", progressHost);
+      const chips = $("#rgChips", progressHost);
+      const draw = (p) => {
+        const total = Math.max(1, p.total || 1);
+        const done = p.done || 0;
+        const failed = p.failed || 0;
+        const pct = Math.min(100, Math.round((done * 100) / total));
+        if (pbar) { pbar.style.display = "block"; const i = $("i", pbar); if (i) i.style.width = pct + "%"; }
+        if (ptext) ptext.textContent = `完成 ${done}/${total}${failed ? `（失败 ${failed}）` : ""}`;
+        if (chips) {
+          chips.innerHTML = (p.docs || []).map((d) => `<span title="${escapeHtml((d.error || "").slice(0, 60) || d.status)}" class="rg-chip ${escapeHtml(d.status)}">${d.status === "queued" ? "·" : d.status === "processing" ? "◌" : d.status === "done" ? "✓" : "✗"}</span>`).join("");
+        }
+      };
+      const poll = () => apiGet(`/api/kb/ingest_progress?track_id=${encodeURIComponent(trackId)}`).then((p) => {
+        if (!progressHost.isConnected) { resolve("gone"); return; }
+        draw(p);
+        if (p.status === "done") { toast(`已完成导入：成功 ${p.done}，失败 ${p.failed}${p.failed ? "（可点击「重试失败」）" : ""}`, p.failed ? "warning" : "success"); progressHost.innerHTML = ""; resolve("done"); }
+        else if (p.status === "error") { toast("导入失败: " + (p.error || "未知错误"), "error"); progressHost.innerHTML = ""; resolve("error"); }
+        else if (p.status === "cancelled") { progressHost.innerHTML = ""; resolve("cancelled"); }
+        else setTimeout(poll, 1500);
+      }).catch((e) => { progressHost.innerHTML = ""; toast("进度查询失败: " + e.message, "error"); resolve("error"); });
+      setTimeout(poll, 300);
+    });
     $("#rgFeed", body).addEventListener("click", async () => {
       const txt = $("#rgFeedText", body).value.trim();
       if (!txt) { toast("请先输入内容", "error"); return; }
-      toggleBusy(true);
-      try { const r2 = await apiPost("/api/kb/ingest", { thread_id: tid, texts: [txt], chunking_strategy: strat(), target: target() }); if (!r2.ok) throw new Error(r2.error); toast("已喂入", "success"); $("#rgFeedText", body).value = ""; }
-      catch (e) { toast("喂入失败: " + e.message, "error"); }
-      toggleBusy(false); await render();
+      const r2 = await apiPost("/api/kb/ingest", { thread_id: tid, texts: [txt], chunking_strategy: strat(), target: target() });
+      if (!r2.ok) { if (r2.error) toast(r2.error, "error"); else toast("喂入失败", "error"); return; }
+      $("#rgFeedText", body).value = "";
+      const fl = await startIngestPoll(r2.track_id, `喂入文本${splitTip(r2)}`);
+      if (fl !== "gone") await render();
     });
+
     const toggleBusy = (on) => { const b = $("#rgBusy", body); if (b) b.style.display = on ? "" : "none"; };
 
     // 上传
@@ -310,25 +371,28 @@ async function ragDocs(content, tid, body) {
       if (!up.ok) throw new Error(ud.error || "上传失败");
       return apiPost("/api/kb/ingest_file", { thread_id: tid, path: ud.path, chunking_strategy: strat(), target: target() });
     };
-    const splitTip = (r2) => r2.splits && r2.splits > 1 ? `（过大的文件已自动拆为 ${r2.splits} 份）` : "";
     $("#rgUpFile", body).addEventListener("click", () => $("#rgFile1", body).click());
     $("#rgUpBatch", body).addEventListener("click", () => $("#rgFileN", body).click());
     $("#rgFile1", body).addEventListener("change", async (e) => {
       const f = e.target.files[0]; if (!f) return;
-      toggleBusy(true);
-      try { const r2 = await uploadOne(f); if (!r2.ok) throw new Error(r2.error); toast(`「${f.name}」已喂入${splitTip(r2)}`, "success"); }
-      catch (err) { toast("失败: " + err.message, "error"); }
-      toggleBusy(false); e.target.value = ""; await render();
+      try {
+        const r2 = await uploadOne(f); if (!r2.ok) throw new Error(r2.error);
+        const fl = await startIngestPoll(r2.track_id, `上传「${f.name}」${splitTip(r2)}`);
+        if (fl !== "gone") await render();
+      } catch (err) { toast("失败: " + err.message, "error"); }
+      e.target.value = "";
     });
     $("#rgFileN", body).addEventListener("change", async (e) => {
       const files = Array.from(e.target.files || []); if (!files.length) return;
-      toggleBusy(true);
       let ok = 0;
       for (const [i, f] of files.entries()) {
-        $("#rgBusy", body).textContent = `⏳ 喂入 ${i + 1}/${files.length}：${f.name} …`;
-        try { const r2 = await uploadOne(f); if (r2.ok) ok++; } catch (err) { toast(`「${f.name}」失败: ${err.message}`, "error"); }
+        try {
+          const r2 = await uploadOne(f); if (!r2.ok) throw new Error(r2.error);
+          ok++;
+          const fl = await startIngestPoll(r2.track_id, `批量喂入 ${i + 1}/${files.length}「${f.name}」${splitTip(r2)}`);
+          if (fl === "gone") return;
+        } catch (err) { toast(`「${f.name}」失败: ${err.message}`, "error"); }
       }
-      toggleBusy(false); e.target.value = "";
       toast(`批量完成：成功 ${ok}/${files.length}`, "success");
       await render();
     });
@@ -341,15 +405,12 @@ async function ragDocs(content, tid, body) {
       toggleBusy(false); await render();
     });
     $("#rgRetryFail", body).addEventListener("click", async () => {
-      toggleBusy(true);
       try {
-        const r2 = await apiGet(`/api/kb/documents?${new URLSearchParams({ thread_id: tid, page: 1, page_size: 200 })}`);
-        const failed = (r2.docs || []).filter((d) => d.status.toLowerCase() === "failed");
-        let ok = 0;
-        for (const d of failed) { const rr = await apiPost("/api/kb/reprocess", { thread_id: tid, doc_id: d.id }); if (rr.ok) ok++; }
-        toast(`已重试 ${ok}/${failed.length} 个失败文档`, "success");
+        const r2 = await apiPost("/api/kb/retry_failed", { thread_id: tid, chunking_strategy: strat(), target: target() });
+        if (!r2.ok) throw new Error(r2.error || "没有可重试的失败文档");
+        const fl = await startIngestPoll(r2.track_id, `重试 ${r2.total} 个失败文档（串行 + 退避）`);
+        if (fl !== "gone") await render();
       } catch (e) { toast("重试失败: " + e.message, "error"); }
-      toggleBusy(false); await render();
     });
 
     // 后台轮询：解析中任务自动刷新

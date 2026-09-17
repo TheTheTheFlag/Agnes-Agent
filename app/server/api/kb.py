@@ -18,7 +18,7 @@ router = APIRouter(prefix="/api/kb", tags=["kb"])
 
 # 上传文件/粘贴文本过大时自动拆分的阈值（字符数）与单段目标大小
 _AUTO_SPLIT_CHARS = 1_000_000
-_AUTO_SPLIT_TARGET = 500_000
+_AUTO_SPLIT_TARGET = 150_000
 _INGEST_TARGETS = ("both", "vector", "graph")
 
 
@@ -82,6 +82,26 @@ class IngestFileReq(BaseModel):
     target: str = "both"  # both/vector/graph；导入目标（向量库/图库/都）
 
 
+class TrackReq(BaseModel):
+    track_id: str
+
+
+class RetryFailedReq(BaseModel):
+    thread_id: str
+    chunking_strategy: str = ""  # F/R/V/P/C；空串=跟随知识库配置
+    target: str = "both"  # both/vector/graph；导入目标（向量库/图库/都）
+
+
+class TrackReq(BaseModel):
+    track_id: str
+
+
+class RetryFailedReq(BaseModel):
+    thread_id: str
+    chunking_strategy: str = ""  # F/R/V/P/C；空串=跟随知识库配置
+    target: str = "both"  # both/vector/graph；导入目标（向量库/图库/都）
+
+
 @router.get("/threads")
 async def kb_threads() -> dict:
     return {"threads": L.kb_threads()}
@@ -121,14 +141,31 @@ async def search(thread_id: str = Query(...), q: str = Query(""), top_k: int = Q
 
 @router.post("/ingest")
 async def ingest(req: IngestReq) -> dict:
+    """喂入多段文本（后台串行 + 限速，立即返回 track_id，前端轮询进度）。"""
     texts = []
     for t in req.texts or []:
         if isinstance(t, str) and t.strip():
             texts.extend(_auto_split_document(t, ""))
-    return L.kb_ingest(req.thread_id, texts, strategy=req.chunking_strategy, target=req.target)
+    return L.kb_ingest_async(req.thread_id, texts, strategy=req.chunking_strategy, target=req.target)
 
 
-@router.post("/delete")
+@router.get("/ingest_progress")
+async def ingest_progress(track_id: str = Query(...)) -> dict:
+    return L.kb_ingest_progress(track_id)
+
+
+@router.post("/ingest_cancel")
+async def ingest_cancel(req: TrackReq) -> dict:
+    return L.kb_ingest_cancel(req.track_id)
+
+
+@router.post("/retry_failed")
+async def retry_failed(req: RetryFailedReq) -> dict:
+    """把所有失败文档按原内容重新喂入（后台串行 + 限速重试），返回 track_id。"""
+    return L.kb_retry_failed_async(req.thread_id, strategy=req.chunking_strategy, target=req.target)
+
+
+@router.delete("/delete")
 async def delete(req: DeleteReq) -> dict:
     return L.kb_delete_doc(req.thread_id, req.doc_id)
 
@@ -164,10 +201,7 @@ async def ingest_file(req: IngestFileReq) -> dict:
     if not content.strip():
         raise HTTPException(status_code=400, detail="文件内容为空（扫描件或无文本层的文件暂无法处理）")
     segments = _auto_split_document(content, ext)
-    out = L.kb_ingest(req.thread_id, segments, strategy=req.chunking_strategy, target=req.target)
-    out["splits"] = len(segments)
-    out["auto_split"] = len(segments) > 1
-    return out
+    return L.kb_ingest_async(req.thread_id, segments, strategy=req.chunking_strategy, target=req.target) | {"splits": len(segments), "auto_split": len(segments) > 1}
 
 
 _SAFE_TEXT_EXTS = {".txt", ".md", ".json", ".csv", ".html", ".htm"}

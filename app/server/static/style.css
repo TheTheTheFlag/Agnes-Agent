@@ -2328,3 +2328,24 @@ input, textarea { font-family: inherit; }
 .st-lightbox { width: 720px; max-width: 94vw; }
 .st-lb-img { width: 100%; border-radius: 8px; background: #000; margin-bottom: 10px; }
 .st-lightbox .d-pre { max-height: 180px; overflow: auto; white-space: pre-wrap; word-break: break-all; margin-bottom: 12px; }
+
+/* 后台喂入进度条（自动拆分时逐段显示状态） */
+.rg-progress {
+  margin: 10px 0; padding: 10px 12px; border: 1px solid var(--border, #2c2f38);
+  border-radius: var(--radius-sm, 8px); background: var(--bg-elev, #1e2026);
+  display: flex; flex-direction: column; gap: 8px;
+}
+.rg-progress-bar {
+  height: 8px; border-radius: 999px; background: var(--bg-input, #23252c);
+  overflow: hidden; border: 1px solid var(--border, #2c2f38);
+}
+.rg-progress-bar i { display: block; height: 100%; border-radius: 999px; background: var(--accent-grad, linear-gradient(135deg, #7c5cff, #5a9cff)); transition: width .5s ease; }
+.rg-chip {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; border-radius: 50%; font-size: 10.5px; font-weight: 700;
+  border: 1px solid var(--border, #2c2f38); color: var(--text-faint, #6c7079);
+}
+.rg-chip.done { color: #3fb950; border-color: rgba(63,185,80,.5); }
+.rg-chip.processing { color: #58a6ff; border-color: rgba(88,166,255,.5); animation: rg-blink .8s ease-in-out infinite alternate; }
+.rg-chip.failed { color: #f2555a; border-color: rgba(242,85,90,.5); }
+@keyframes rg-blink { from { opacity: .55; } to { opacity: 1; } }

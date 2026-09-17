@@ -1354,6 +1354,200 @@ def kb_ingest(thread_id: str, texts: List[str], strategy: str = "", target: str 
     return {"ok": True, "doc_ids": doc_ids}
 
 
+# ---------------------------------------------------------------------------
+# 后台异步喂入（串行 + 限速 + 429 退避重试 + 进度）
+#
+# 大文本/大文件自动拆成多段后，若一次性并行喂入，嵌入 API 会瞬间打爆 TPM
+# 限流（429），导致整批文档失败。因此改为：后台线程逐段串行喂入，段与段之间
+# 间隔 _INGEST_PACE_SECONDS 秒限速；单段喂入后主动核对 doc_status，失败时按
+# 指数退避重试。前端轮询 ingest_progress 渲染进度条（含每段状态）。
+# ---------------------------------------------------------------------------
+
+_INGEST_JOBS: dict = {}
+_INGEST_PACE_SECONDS = 4.0  # 段与段之间的最小间隔（嵌入 API TPM 限速）
+_INGEST_MAX_RETRY = 3  # 单段最多额外重试次数
+_INGEST_BACKOFF = (20, 40, 80)  # 429 退避秒数
+_INGEST_DONE_STATUS = ("processed", "completed", "complete")
+
+
+def _doc_status_rec(thread_id: str, ns: str, doc_id: str) -> dict:
+    """读取 kv_store_doc_status.json 中某文档的记录（键兼容/不含 doc- 前缀两种写法）。"""
+    ws = _workspace_dir(thread_id, ns=ns)
+    data = _read_json_if_exists(os.path.join(ws, "kv_store_doc_status.json")) or {}
+    rec = data.get(doc_id)
+    if rec is None and doc_id.startswith("doc-"):
+        rec = data.get(doc_id[4:])
+    return rec or {}
+
+
+def _start_ingest_job(thread_id: str, ns: str, entries: List[tuple], strategy: str, target: str, kind: str) -> str:
+    """入队一个后台喂入/重试作业，返回 track_id。entries=[(text, doc_id, label_or_None)]。"""
+    import uuid
+
+    track_id = f"{kind}_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}"
+    job = {
+        "track_id": track_id,
+        "kind": kind,
+        "status": "running",
+        "total": len(entries),
+        "done": 0,
+        "failed": 0,
+        "started": time.time(),
+        "error": None,
+        "cancelled": False,
+        "docs": [{"idx": i, "status": "queued", "doc_id": str(did)} for i, (_, did, _) in enumerate(entries)],
+    }
+    _INGEST_JOBS[track_id] = job
+    t = threading.Thread(
+        target=_run_ingest_job, args=(thread_id, ns, entries, strategy, target, job),
+        name=f"kb-{kind}-{track_id[:12]}", daemon=True,
+    )
+    t.start()
+    return track_id
+
+
+def _insert_doc_with_retry(thread_id: str, ns: str, doc_id: str, text: str, target: str, active_chunk_func: Any) -> None:
+    """单段喂入，喂完核对 doc_status；非成功则按退避重试（应对嵌入 429 限流）。"""
+    nid = doc_id if doc_id.startswith("doc-") else "doc-" + doc_id
+    for attempt in range(_INGEST_MAX_RETRY + 1):
+        rag = get_lightrag(thread_id, ns=ns)
+        old = getattr(rag, "chunking_func", None)
+        try:
+            if active_chunk_func is not None:
+                rag.chunking_func = active_chunk_func
+            lightrag_insert(thread_id, [text], ns=ns, target=target)
+        finally:
+            rag.chunking_func = old
+        rec = _doc_status_rec(thread_id, ns, nid)
+        status = str(rec.get("status") or "").lower()
+        if status in _INGEST_DONE_STATUS:
+            return
+        if attempt >= _INGEST_MAX_RETRY:
+            err = str(rec.get("error_msg") or "")[:160]
+            raise RuntimeError(f"文档未处理成功（最终状态: {status or '未知'}；{err}）")
+        time.sleep(_INGEST_BACKOFF[min(attempt, len(_INGEST_BACKOFF) - 1)])
+
+
+def _run_ingest_job(thread_id: str, ns: str, entries: List[tuple], strategy: str, target: str, job: dict) -> None:
+    """后台作业主循环：逐段串行喂入 + 限速 + 退避重试，实时写 job['docs']。"""
+    strat = (strategy or "").strip().upper()
+    active = _make_chunking_func(strat) if strat in _CHUNK_STRATEGIES else None
+    try:
+        for i, (text, doc_id, label) in enumerate(entries):
+            if job.get("cancelled"):
+                break
+            job["docs"][i] = {"idx": i, "status": "processing", "doc_id": str(doc_id)}
+            try:
+                _insert_doc_with_retry(thread_id, ns, doc_id, text, target, active)
+                job["docs"][i] = {"idx": i, "status": "done", "doc_id": str(doc_id)}
+                job["done"] += 1
+            except Exception as e:
+                job["docs"][i] = {"idx": i, "status": "failed", "doc_id": str(doc_id), "error": str(e)[:300]}
+                job["failed"] += 1
+            if i < len(entries) - 1 and not job.get("cancelled"):
+                time.sleep(_INGEST_PACE_SECONDS)
+    except Exception as e:  # 作业级兜底，避免线程无声退出
+        job["status"] = "error"
+        job["error"] = str(e)
+        return
+    if not job.get("cancelled"):
+        try:
+            _patch_text_doc_paths(
+                thread_id,
+                [label for _, _, label in entries],
+                [did for _, did, _ in entries],
+                ns=ns,
+            )
+        except Exception:
+            pass
+    job["status"] = "cancelled" if job.get("cancelled") else "done"
+
+
+def kb_ingest_async(thread_id: str, texts: List[str], strategy: str = "", target: str = "both") -> dict:
+    """异步喂入多段文本：立即返回 track_id，后台串行处理（限速 + 429 退避重试），
+    前端可轮询 kb_ingest_progress 获取进度。返回结构兼容原同步 kb_ingest 的字段。"""
+    texts = [t for t in (texts or []) if isinstance(t, str) and t.strip()]
+    if not texts:
+        return {"ok": False, "error": "没有可喂入的文本", "doc_ids": [], "track_id": "", "splits": 0}
+    target = target if target in ("vector", "graph") else "both"
+    prefixed = [_with_doc_locator(t) for t in texts]
+    doc_ids = [_doc_id_for_text(t) for t in prefixed]
+    ns = _kb_resolve_ns(thread_id)
+    entries = list(zip(prefixed, doc_ids, texts))
+    track_id = _start_ingest_job(thread_id, ns, entries, strategy, target, "ingest")
+    return {
+        "ok": True,
+        "track_id": track_id,
+        "splits": len(entries),
+        "total_splits": len(entries),
+        "auto_split": len(entries) > 1,
+        "doc_ids": doc_ids,
+    }
+
+
+def kb_retry_failed_async(thread_id: str, strategy: str = "", target: str = "both") -> dict:
+    """把该知识库所有 failed 状态的文档按原内容重新喂入（后台串行 + 限速重试）。"""
+    ns = _kb_resolve_ns(thread_id)
+    rag = get_lightrag(thread_id, ns=ns)
+    ws = _workspace_dir(thread_id, ns=ns)
+    data = _read_json_if_exists(os.path.join(ws, "kv_store_doc_status.json")) or {}
+    entries: List[tuple] = []
+    for key, rec in sorted(
+        data.items(), key=lambda kv: str((kv[1] or {}).get("updated_at") or ""), reverse=True
+    ):
+        if str((rec or {}).get("status") or "").lower() != "failed":
+            continue
+        nid = key if key.startswith("doc-") else "doc-" + key
+        content = None
+        try:
+            rec_doc = _run_on_worker(rag.full_docs.get_by_id(nid), timeout=60)
+        except Exception:
+            rec_doc = None
+        if isinstance(rec_doc, dict):
+            content = str(rec_doc.get("content") or "")
+        elif rec_doc is not None and getattr(rec_doc, "content", None):
+            content = str(rec_doc.content or "")
+        if not content.strip():
+            continue
+        entries.append((content, nid, None))
+    if not entries:
+        return {"ok": False, "error": "没有可重试的失败文档", "track_id": "", "splits": 0}
+    track_id = _start_ingest_job(thread_id, ns, entries, strategy, target, "retry")
+    return {"ok": True, "track_id": track_id, "total": len(entries), "splits": len(entries), "doc_ids": [e[1] for e in entries]}
+
+
+def kb_ingest_progress(track_id: str) -> dict:
+    """返回后台喂入作业进度（供前端轮询渲染进度条）。"""
+    job = _INGEST_JOBS.get(track_id or "")
+    if not job:
+        return {"ok": False, "error": f"未知的 feed 任务: {track_id}", "track_id": track_id or ""}
+    total = max(1, int(job["total"]))
+    return {
+        "ok": True,
+        "track_id": track_id,
+        "kind": job.get("kind"),
+        "status": job["status"],
+        "total": int(job["total"]),
+        "done": int(job["done"]),
+        "failed": int(job["failed"]),
+        "remaining": max(0, int(job["total"]) - int(job["done"]) - int(job["failed"])),
+        "percent": int(int(job["done"]) * 100 / total),
+        "error": job.get("error"),
+        "started": job.get("started"),
+        "elapsed": round(time.time() - float(job.get("started") or time.time()), 1),
+        "docs": list(job.get("docs") or []),
+    }
+
+
+def kb_ingest_cancel(track_id: str) -> dict:
+    """取消后台喂入作业（进行中的当前段会跑完，之后不再继续）。"""
+    job = _INGEST_JOBS.get(track_id or "")
+    if not job:
+        return {"ok": False, "error": f"未知的 feed 任务: {track_id}"}
+    job["cancelled"] = True
+    return {"ok": True, "track_id": track_id}
+
+
 def _patch_text_doc_paths(thread_id: str, texts: List[str], doc_ids: List[str], ns: Optional[str] = None) -> None:
     """文本喂入后，把 doc_status 里的 file_path 从 'unknown_source' 改为有意义的摘要。"""
     ws = _workspace_dir(thread_id, ns=ns)
@@ -1365,6 +1559,8 @@ def _patch_text_doc_paths(thread_id: str, texts: List[str], doc_ids: List[str], 
         return
     changed = False
     for text, doc_id in zip(texts, doc_ids):
+        if not text:
+            continue
         nid = doc_id if doc_id.startswith("doc-") else "doc-" + doc_id
         rec = data.get(nid)
         if not isinstance(rec, dict):
