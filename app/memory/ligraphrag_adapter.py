@@ -709,7 +709,53 @@ def _ensure_initialized(thread_id: str, ns: Optional[str] = None) -> None:
         pass
 
 
-def lightrag_insert(thread_id: str, texts: List[str], ns: Optional[str] = None) -> Any:
+_VECTOR_NOOP_STORES = ("chunks_vdb", "entities_vdb", "relationships_vdb")
+
+
+def _run_ainsert_patched(rag, texts: List[str], target: str) -> Any:
+    """在 ainsert 期间按导入目标临时屏蔽建图或向量落盘。
+
+    - target == "vector"：跳过 LLM 实体/关系抽取（_process_extract_entities
+      返回空列表 []，merge 阶段照常跑但无候选），只做分块 + 向量嵌入。
+    - target == "graph"：把三个向量存储（chunks/entities/relationships_vdb）
+      的 upsert/delete/index_done_callback/flush 临时置为 no-op，只做分块 +
+      LLM 建图，不写任何向量（含空索引文件）。
+    两种空实现都在 ainsert 执行完毕后由 finally 还原实例方法。
+    """
+
+    async def _noop(*_a, **_k):
+        return None
+
+    async def _no_extract(*_a, **_k):
+        return []
+
+    patches = []
+    try:
+        if target == "vector" and getattr(rag, "_process_extract_entities", None):
+            patches.append(
+                (rag, "_process_extract_entities", rag._process_extract_entities)
+            )
+            rag._process_extract_entities = _no_extract
+        elif target == "graph":
+            for name in _VECTOR_NOOP_STORES:
+                store = getattr(rag, name, None)
+                if store is None:
+                    continue
+                for method in ("upsert", "delete", "index_done_callback", "flush"):
+                    orig = getattr(store, method, None)
+                    if orig is None:
+                        continue
+                    setattr(store, method, _noop)
+                    patches.append((store, method, orig))
+        return _run_on_worker(rag.ainsert(texts), timeout=600)
+    finally:
+        for obj, method, orig in patches:
+            setattr(obj, method, orig)
+
+
+def lightrag_insert(
+    thread_id: str, texts: List[str], ns: Optional[str] = None, target: str = "both"
+) -> Any:
     """同步桥：在 worker loop 上执行 ainsert。
 
     入库前先对文本做术语还原（normalize_terms）：把同一概念的常见变体
@@ -718,6 +764,8 @@ def lightrag_insert(thread_id: str, texts: List[str], ns: Optional[str] = None) 
     入库后再执行一次图谱级变体合并（merge_entity_variants），把依然漏网
     的大小写变体节点（如 GraphRAG / GraphRag）并在图上合二为一。
     ns 缺省解析会话命名空间（default: __global__）；显式传 ns 写入该知识库。
+    target：both（默认，分块+嵌入+建图）/ vector（仅向量，跳过建图）/
+    graph（仅图，跳过向量落盘）。
     """
     _ensure_initialized(thread_id, ns=ns)
     rag = get_lightrag(thread_id, ns=ns)
@@ -725,11 +773,12 @@ def lightrag_insert(thread_id: str, texts: List[str], ns: Optional[str] = None) 
     texts = [normalize_terms(t or "") for t in texts if t]
     if not texts:
         return None
-    result = _run_on_worker(rag.ainsert(texts), timeout=600)
-    try:
-        merge_entity_variants(thread_id, ns=ns)
-    except Exception:
-        pass  # 合并是优化项，失败不阻塞主链路
+    result = _run_ainsert_patched(rag, texts, target)
+    if target != "vector":
+        try:
+            merge_entity_variants(thread_id, ns=ns)
+        except Exception:
+            pass  # 合并是优化项，失败不阻塞主链路
     return result
 
 
@@ -1265,7 +1314,7 @@ def _with_doc_locator(text: str) -> str:
     return f"{_DOC_LOCATOR_PREFIX} {summary}\n{text}"
 
 
-def kb_ingest(thread_id: str, texts: List[str], strategy: str = "") -> dict:
+def kb_ingest(thread_id: str, texts: List[str], strategy: str = "", target: str = "both") -> dict:
     """向某知识库喂入文本（同步，含建图）；返回生成的 doc_id 列表。
 
     每条文本自动加上 '[文档定位] <摘要>' 元数据头：_chunking_func 会把该行
@@ -1274,10 +1323,12 @@ def kb_ingest(thread_id: str, texts: List[str], strategy: str = "") -> dict:
 
     strategy：本次喂入临时采用的分块策略（F/R/V/P/C，空串=跟随知识库配置）。
     临时切换：上传时指定 C 会把整份 CSV 按"一问一答"切成键值对 chunk。
+    target：both（默认，向量+图）/ vector（仅向量库）/ graph（仅图库）。
     """
     texts = [t for t in (texts or []) if isinstance(t, str) and t.strip()]
     if not texts:
         return {"ok": False, "error": "没有可喂入的文本", "doc_ids": []}
+    target = target if target in ("vector", "graph") else "both"
     # doc_id 依据加入定位头后的实际 content 计算，与 LightRAG 内部一致
     prefixed = [_with_doc_locator(t) for t in texts]
     doc_ids = [_doc_id_for_text(t) for t in prefixed]
@@ -1291,11 +1342,11 @@ def kb_ingest(thread_id: str, texts: List[str], strategy: str = "") -> dict:
             old = getattr(rag, "chunking_func", None)
             try:
                 rag.chunking_func = _make_chunking_func(strat)
-                lightrag_insert(thread_id, prefixed, ns=ns)
+                lightrag_insert(thread_id, prefixed, ns=ns, target=target)
             finally:
                 rag.chunking_func = old
         else:
-            lightrag_insert(thread_id, prefixed, ns=ns)
+            lightrag_insert(thread_id, prefixed, ns=ns, target=target)
     except Exception as e:
         return {"ok": False, "error": f"喂入失败: {e}", "doc_ids": []}
     # label 用原始文本摘要（不带定位头），doc_ids 用加头后的

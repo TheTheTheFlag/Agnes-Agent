@@ -2098,6 +2098,9 @@ input, textarea { font-family: inherit; }
   border-color: var(--accent, #7c5cff); box-shadow: 0 0 0 3px rgba(124,92,255,.15);
 }
 
+/* 喂入文本 / 检索调试等文本域顶到头（.d-input 的 flex:1 在非 flex 容器里不生效） */
+.rag textarea.d-input { width: 100%; box-sizing: border-box; display: block; }
+
 /* 状态徽章 */
 .kc-badge, .rag .kc-badge {
   display: inline-flex; align-items: center; gap: 4px; padding: 3px 9px;

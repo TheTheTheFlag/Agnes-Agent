@@ -4,6 +4,7 @@
 所有读写都走 app.memory.ligraphrag_adapter（worker 事件循环桥 + 会话实例）。
 受登录中间件保护。"""
 import os
+import re
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
@@ -15,11 +16,53 @@ from app.server.api.upload import UPLOAD_DIR
 
 router = APIRouter(prefix="/api/kb", tags=["kb"])
 
+# 上传文件/粘贴文本过大时自动拆分的阈值（字符数）与单段目标大小
+_AUTO_SPLIT_CHARS = 1_000_000
+_AUTO_SPLIT_TARGET = 500_000
+_INGEST_TARGETS = ("both", "vector", "graph")
+
+
+def _auto_split_document(content: str, ext: str) -> list[str]:
+    """过大的文本/表格自动拆成多段，避免单个文档过大导致抽取/嵌入超时。
+
+    CSV/TSV 保留表头按行分组拆；其余文本按段落聚合到目标大小。
+    不超过阈值时原样返回。
+    """
+    if len(content) <= _AUTO_SPLIT_CHARS:
+        return [content]
+    if ext in (".csv", ".tsv"):
+        lines = content.splitlines()
+        if not lines:
+            return [content]
+        header = lines[0]
+        body = lines[1:]
+        segments, cur, cur_len = [], [], 0
+        for ln in body:
+            if cur and cur_len + len(ln) + 1 > _AUTO_SPLIT_TARGET:
+                segments.append("\n".join([header, *cur]))
+                cur, cur_len = [], 0
+            cur.append(ln)
+            cur_len += len(ln) + 1
+        if cur:
+            segments.append("\n".join([header, *cur]))
+        return segments
+    paragraphs = re.split(r"\n{2,}", content)
+    segments, cur = [], []
+    for p in paragraphs:
+        if cur and sum(len(x) for x in cur) + len(p) > _AUTO_SPLIT_TARGET:
+            segments.append("\n\n".join(cur))
+            cur = []
+        cur.append(p)
+    if cur:
+        segments.append("\n\n".join(cur))
+    return segments
+
 
 class IngestReq(BaseModel):
     thread_id: str
     texts: list[str] = []
     chunking_strategy: str = ""  # F/R/V/P/C；空串=跟随知识库配置
+    target: str = "both"  # both/vector/graph；导入目标（向量库/图库/都）
 
 
 class DeleteReq(BaseModel):
@@ -36,6 +79,7 @@ class IngestFileReq(BaseModel):
     thread_id: str
     path: str  # uploads/ 下的相对路径
     chunking_strategy: str = ""  # F/R/V/P/C；空串=跟随知识库配置
+    target: str = "both"  # both/vector/graph；导入目标（向量库/图库/都）
 
 
 @router.get("/threads")
@@ -77,7 +121,11 @@ async def search(thread_id: str = Query(...), q: str = Query(""), top_k: int = Q
 
 @router.post("/ingest")
 async def ingest(req: IngestReq) -> dict:
-    return L.kb_ingest(req.thread_id, req.texts, strategy=req.chunking_strategy)
+    texts = []
+    for t in req.texts or []:
+        if isinstance(t, str) and t.strip():
+            texts.extend(_auto_split_document(t, ""))
+    return L.kb_ingest(req.thread_id, texts, strategy=req.chunking_strategy, target=req.target)
 
 
 @router.post("/delete")
@@ -115,7 +163,11 @@ async def ingest_file(req: IngestFileReq) -> dict:
         raise HTTPException(status_code=500, detail=f"解析文件失败: {e}")
     if not content.strip():
         raise HTTPException(status_code=400, detail="文件内容为空（扫描件或无文本层的文件暂无法处理）")
-    return L.kb_ingest(req.thread_id, [content], strategy=req.chunking_strategy)
+    segments = _auto_split_document(content, ext)
+    out = L.kb_ingest(req.thread_id, segments, strategy=req.chunking_strategy, target=req.target)
+    out["splits"] = len(segments)
+    out["auto_split"] = len(segments) > 1
+    return out
 
 
 _SAFE_TEXT_EXTS = {".txt", ".md", ".json", ".csv", ".html", ".htm"}
