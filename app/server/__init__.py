@@ -129,6 +129,7 @@ from app.server.api import skills as _api_skills
 from app.server.api import upload as _api_upload
 from app.server.api import graph as _api_graph
 from app.server.api import kb as _api_kb
+from app.server.api import image as _api_image
 app.include_router(_api_system.router)
 app.include_router(_api_memory.router)
 app.include_router(_api_tools.router)
@@ -138,6 +139,7 @@ app.include_router(_api_skills.router)
 app.include_router(_api_upload.router)
 app.include_router(_api_graph.router)
 app.include_router(_api_kb.router)
+app.include_router(_api_image.router)
 
 # 登录校验：登录接口 + 全 API 保护中间件
 from app.server.auth import router as _auth_router, install_auth_middleware

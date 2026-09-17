@@ -42,5 +42,8 @@ system_commands.log
 # 调试面板本地静态缓存
 app/server/static/marked.min.js
 
+# 图片创作工作台作品库（原图 + 缩略图 + manifest）
+data/image_library/
+
 # 用户上传文件
 uploads/
