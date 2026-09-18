@@ -23,6 +23,10 @@ from contextlib import asynccontextmanager
 
 import uvicorn
 
+# 统一配置：.env → data/.model_config 并写回环境变量（须在 builder 读取 env 之前）
+from app.config_store import bootstrap as _bootstrap_config
+_bootstrap_config()
+
 # Windows 控制台默认 GBK：Agent 输出含中文/emoji 时 print 会抛
 # UnicodeEncodeError 中断流程。统一按 UTF-8 输出（Linux 上无影响）。
 if hasattr(sys.stdout, "reconfigure"):

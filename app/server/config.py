@@ -1,8 +1,9 @@
 """app.server.config — 模型配置管理（厂商目录 / 凭据存储 / 默认模型 / 运行时全局）。"""
 import json
 import os as _os
+import threading as _threading
 from typing import Dict, Any, List, Optional
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from app.config import MODEL_CONFIG_PATH as _MODEL_CONFIG_FILE
@@ -12,6 +13,46 @@ router = APIRouter()
 # 运行时全局（由 main.py 注入 graph 与 config）
 _GRAPH = None
 _CONFIG = None
+
+# 每用户 graph 注册表（多用户隔离核心）。缺省用户（Mirror/admin）沿用 _GRAPH，
+# 保证既有测试用 set_graph(FakeGraph) 覆盖 _GRAPH 的写法继续有效。
+_GRAPHS: dict = {}
+_GRAPHS_LOCK = _threading.RLock()
+
+
+def _build_user_graph(user: str):
+    """在指定用户上下文里构建 graph（节点闭包捕获该用户的 LLM，DB 路径经代理解析）。"""
+    from app.userctx import (set_current_user, reset_current_user,
+                             set_current_llm, reset_current_llm, get_user_llm,
+                             ensure_user_dirs)
+    from app.graph.builder import build_graph
+    ensure_user_dirs(user)
+    tok = set_current_user(user)
+    ltok = set_current_llm(get_user_llm(user))
+    try:
+        return build_graph()
+    finally:
+        reset_current_llm(ltok)
+        reset_current_user(tok)
+
+
+def get_graph(username: Optional[str] = None):
+    """取当前用户的 graph；首次访问时构建并缓存。"""
+    from app.userctx import current_user
+    user = username or current_user()
+    with _GRAPHS_LOCK:
+        g = _GRAPHS.get(user)
+        if g is not None:
+            return g
+        g = _build_user_graph(user)
+        _GRAPHS[user] = g
+        return g
+
+
+def clear_user_graphs():
+    """清空每用户 graph 缓存（切换模型 / 用户密钥变更后调用）。"""
+    with _GRAPHS_LOCK:
+        _GRAPHS.clear()
 
 # 内置来源目录已弃用（置空）：模型目录完全由自定义接入（.model_config 的 custom 列表）驱动，
 # 避免模型页出现"内置"标签——所有来源统一以"自定义"呈现。凭据/模型均由用户在调试面板接入。
@@ -127,28 +168,66 @@ def rebuild_graph_with_model(provider: str, model: str):
     from app.tools import tools
 
     real_provider = resolve_provider_env(provider)
-    # 重建模块级 llm（graph.py 的 chatbot 用 llm_with_tools；planner/executor 在 build_graph 时捕获）
+    save_model_config(provider, model)   # 先落盘：每用户 LLM 构建时读取新默认模型
+    _current_model = {"provider": provider, "model": model}
+    # 重建模块级 llm（兜底：无用户上下文时 chatbot/planner 使用）
     g_mod.llm = create_llm(provider=real_provider, model=model)
     g_mod.llm_with_tools = g_mod.llm.bind_tools(tools)
-    new_graph = g_mod.build_graph()
+    # 每用户 LLM/graph 依赖全局默认模型：全部失效后按用户重建
+    try:
+        from app.userctx import clear_llm_cache, current_user
+        clear_llm_cache()
+        clear_user_graphs()
+        new_graph = _build_user_graph(current_user())
+    except Exception:
+        new_graph = g_mod.build_graph()
     _GRAPH = new_graph
-    _current_model = {"provider": provider, "model": model}
-    save_model_config(provider, model)
     return dict(_current_model)
 
 
+def _is_request_admin(request: Optional[Request]) -> bool:
+    user = getattr(getattr(request, "state", None), "username", None)
+    if not user:
+        return True  # 无请求上下文（内部/测试调用）按管理员处理
+    try:
+        from app.server.auth import is_admin
+        return is_admin(user)
+    except Exception:
+        try:
+            from app.server import accounts
+            return accounts.is_admin(user)
+        except Exception:
+            return False
+
+
+def _mask_catalog(catalog: dict) -> dict:
+    out = {}
+    for pid, info in (catalog or {}).items():
+        info = dict(info or {})
+        key = info.get("api_key") or ""
+        if key:
+            info["api_key"] = ("****" + key[-4:]) if len(key) > 4 else "****"
+        out[pid] = info
+    return out
+
+
 @router.get("/api/models")
-async def get_models():
+async def get_models(request: Request = None):
+    catalog = get_full_catalog()
+    if not _is_request_admin(request):
+        catalog = _mask_catalog(catalog)
     return {
-        "catalog": get_full_catalog(),
+        "catalog": catalog,
         "current": get_current_model(),
     }
 
 
 @router.post("/api/models/fetch")
-async def fetch_models(payload: dict):
+async def fetch_models(payload: dict, request: Request = None):
     """从 OpenAI 兼容网关拉取可用模型列表（GET {base_url}/models）。
     payload: {base_url, api_key}  api_key 支持逗号分隔多 key（逐个尝试）"""
+    if not _is_request_admin(request):
+        return JSONResponse({"error": "仅管理员可探测模型网关"}, status_code=403)
     base_url = ((payload or {}).get("base_url") or "").strip().rstrip("/")
     api_key = ((payload or {}).get("api_key") or "").strip()
     if not base_url.startswith(("http://", "https://")):
@@ -176,7 +255,9 @@ async def fetch_models(payload: dict):
 
 
 @router.post("/api/switch-model")
-async def switch_model(payload: dict):
+async def switch_model(payload: dict, request: Request = None):
+    if not _is_request_admin(request):
+        return JSONResponse({"error": "仅管理员可切换全局模型"}, status_code=403)
     p = payload or {}
     provider = p.get("provider", "")
     model = p.get("model", "")
@@ -190,8 +271,10 @@ async def switch_model(payload: dict):
 
 
 @router.post("/api/models/add")
-async def add_model(payload: dict):
+async def add_model(payload: dict, request: Request = None):
     """新增自定义 openai 格式模型接入。payload: {label, base_url, api_key, models}"""
+    if not _is_request_admin(request):
+        return JSONResponse({"error": "仅管理员可新增全局模型接入"}, status_code=403)
     p = payload or {}
     label = (p.get("label") or "").strip()
     base_url = (p.get("base_url") or "").strip()
@@ -222,8 +305,10 @@ async def add_model(payload: dict):
 
 
 @router.post("/api/models/delete")
-async def delete_model(payload: dict):
+async def delete_model(payload: dict, request: Request = None):
     """删除自定义模型接入。若当前正在用它，回退到默认模型。"""
+    if not _is_request_admin(request):
+        return JSONResponse({"error": "仅管理员可删除全局模型接入"}, status_code=403)
     pid = (payload or {}).get("id", "")
     custom = get_custom_models()
     remaining = [c for c in custom if c.get("id") != pid]
@@ -243,8 +328,10 @@ async def delete_model(payload: dict):
 
 
 @router.post("/api/models/set-default")
-async def set_default_model(payload: dict):
+async def set_default_model(payload: dict, request: Request = None):
     """设置默认模型（写入 .model_config，下次启动生效 + 立即重建）。"""
+    if not _is_request_admin(request):
+        return JSONResponse({"error": "仅管理员可设置全局默认模型"}, status_code=403)
     provider = (payload or {}).get("provider", "")
     model = (payload or {}).get("model", "")
     catalog = get_full_catalog()

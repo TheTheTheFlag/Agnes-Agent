@@ -27,7 +27,7 @@ import requests
 from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, JSONResponse
 
-from app.config import BASE_DIR, DATA_DIR, MODEL_CONFIG_PATH
+from app.config import BASE_DIR, MODEL_CONFIG_PATH, user_subdir
 from app.server.api.image import _agnes_keys, _mask_key
 
 router = APIRouter(prefix="/api/video", tags=["video"])
@@ -36,9 +36,9 @@ _CREATE_URL = "https://api.agnes-ai.cn/v1/videos"
 _QUERY_URL = "https://api.agnes-ai.cn/agnesapi"
 _TIMEOUT = 120              # 创建任务超时
 _DL_TIMEOUT = 900           # 下载视频（大文件）
-_LIB = os.path.join(DATA_DIR, "video_library")
-_REF_DIR = os.path.join(DATA_DIR, "video_ref")
-_MANIFEST = os.path.join(_LIB, "manifest.json")
+_LIB = user_subdir("data_dir", "video_library")          # 按当前用户解析
+_REF_DIR = user_subdir("data_dir", "video_ref")
+_MANIFEST = user_subdir("data_dir", "video_library", "manifest.json")
 _THUMB_MAX = 720
 _MAX_GALLERY = 200
 _REF_KEEP_SEC = 3 * 24 * 3600   # 参考图临时文件保留 3 天
@@ -169,16 +169,17 @@ def _resolve_local_file(relpath: str) -> str:
     """把前端传来的相对路径解析到项目内真实文件（uploads/ 或 image_library/）。"""
     rel = (relpath or "").replace("\\", "/").replace("/api/uploads/", "uploads/")
     name = os.path.basename(rel)
+    _uploads = str(user_subdir("uploads_dir"))
+    _img_lib = str(user_subdir("data_dir", "image_library"))
     if rel.startswith("uploads/"):
-        cand = os.path.join(BASE_DIR, rel)
+        cand = os.path.join(_uploads, name)
         if os.path.isfile(cand):
             return cand
     elif rel.startswith("image_library/"):
-        cand = os.path.join(DATA_DIR, "image_library", name)
+        cand = os.path.join(_img_lib, name)
         if os.path.isfile(cand):
             return cand
-    for cand in (os.path.join(BASE_DIR, "uploads", name),
-                 os.path.join(DATA_DIR, "image_library", name)):
+    for cand in (os.path.join(_uploads, name), os.path.join(_img_lib, name)):
         if os.path.isfile(cand):
             return cand
     raise ValueError(f"参考图文件不存在: {relpath}")

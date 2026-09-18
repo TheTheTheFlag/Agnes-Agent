@@ -4,7 +4,7 @@ import asyncio
 import uuid as _uuid
 from langgraph.types import Command
 from langchain_core.messages import AIMessageChunk
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.server import store as _store  # 模块引用，保证 _GRAPH/_CONFIG 实时读取
@@ -12,6 +12,8 @@ from app.server import config as _srv_cfg
 from app.server.store import add_log_entry
 from app.server.api.memory import get_threads
 from app.config import DB_PATH, CHECKPOINT_DB_PATH
+from app.userctx import (current_user, set_current_user, reset_current_user,
+                         set_current_llm, reset_current_llm, get_user_llm)
 import os as _os
 _BASE_DIR = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 
@@ -52,7 +54,7 @@ def _filter_internal_tokens(node: str, run_id, text: str, state: dict) -> str:
     return text
 
 @router.post("/api/chat")
-async def chat_endpoint(payload: dict):
+async def chat_endpoint(payload: dict, request: Request = None):
     """主对话窗口的发送端点（流式 SSE 推送 token）。
     payload: { "message": "用户输入", "thread_id": "可选" }
     推送事件类型：
@@ -64,8 +66,18 @@ async def chat_endpoint(payload: dict):
       - "done"        流程结束
       - "error"       出错
     """
-    if _srv_cfg._GRAPH is None:
+    if _srv_cfg._GRAPH is None and not _srv_cfg._GRAPHS:
         return JSONResponse({"error": "graph 未注入，请先启动 main.py"}, status_code=503)
+
+    # 多用户：按登录用户选 graph（每用户 LLM / DB / RAG 隔离）
+    try:
+        _user = getattr(request.state, "username", None) or current_user()
+    except Exception:
+        _user = current_user()
+    try:
+        _graph = _srv_cfg.get_graph(_user)
+    except Exception as e:
+        return JSONResponse({"error": f"用户 graph 构建失败: {e}"}, status_code=500)
 
     # resume 模式：从中断点继续（payload 带 resume=true, allow, mode）
     is_resume = bool((payload or {}).get("resume"))
@@ -117,6 +129,12 @@ async def chat_endpoint(payload: dict):
             sync_q: Queue = Queue()
 
             def sync_runner():
+                # 每用户上下文（Thread 不继承 ContextVar）：DB/RAG/LLM 均按此用户解析
+                _u_tok = set_current_user(_user)
+                try:
+                    _l_tok = set_current_llm(get_user_llm(_user))
+                except Exception:
+                    _l_tok = None
                 # 内部 LLM 输出过滤：update_summary 等节点内的非对话 LLM 调用（摘要生成）也会
                 # 被 messages 流以 node='chatbot' 捕获，必须丢弃，否则摘要文本污染聊天框。
                 _tok_state = {}
@@ -226,7 +244,7 @@ async def chat_endpoint(payload: dict):
                                            meta=r)
 
                 try:
-                    for mode, payload in _srv_cfg._GRAPH.stream(
+                    for mode, payload in _graph.stream(
                         inputs, config,
                         stream_mode=["updates", "messages"],
                         recursion_limit=40,
@@ -375,10 +393,16 @@ async def chat_endpoint(payload: dict):
                     # 之前 update_state 从未被调用 → _state_snapshots 恒空 → State 面板 messages 永远为空。
                     try:
                         from app.server import update_state as _upd_state
-                        _gs = _srv_cfg._GRAPH.get_state(config)
+                        _gs = _graph.get_state(config)
                         _vals = getattr(_gs, "values", None) or {}
                         if isinstance(_vals, dict):
                             _upd_state(dict(_vals))
+                    except Exception:
+                        pass
+                    try:
+                        if _l_tok is not None:
+                            reset_current_llm(_l_tok)
+                        reset_current_user(_u_tok)
                     except Exception:
                         pass
                     sync_q.put(None)  # 哨兵
@@ -429,10 +453,18 @@ async def chat_endpoint(payload: dict):
 
 
 @router.post("/api/command")
-async def command_endpoint(payload: dict):
+async def command_endpoint(payload: dict, request: Request = None):
     """斜杠命令端点：/new, /resume, /threads, /model, /help, /clear, /save, /system 等。
     返回 JSON 结果，UI 负责呈现。
     """
+    _is_admin = True
+    try:
+        _u = getattr(getattr(request, "state", None), "username", None)
+        if _u:
+            from app.server.accounts import is_admin as _is_admin_fn
+            _is_admin = _is_admin_fn(_u)
+    except Exception:
+        _is_admin = True
     cmd = (payload or {}).get("command", "").strip()
     if not cmd.startswith("/"):
         return JSONResponse({"error": "命令必须以 / 开头"}, status_code=400)
@@ -460,15 +492,17 @@ async def command_endpoint(payload: dict):
         new_tid = str(_uuid.uuid4())
         # 只切换 thread_id，保留 approval_mode（审批模式是用户意图，切换会话不应重置——
         # 否则前端按钮还高亮着 per_ask，后端却悄悄回到 session_allow，造成"不弹卡直接执行"）
-        _cfg = dict(_srv_cfg._CONFIG or {})
-        _cfg.setdefault("configurable", {})["thread_id"] = new_tid
-        _srv_cfg._CONFIG = _cfg
-        # 写入 .thread_id 文件以保持 main.py 行为一致
-        try:
-            with open(_os.path.join(_BASE_DIR, ".thread_id"), "w", encoding="utf-8") as f:
-                f.write(new_tid)
-        except Exception:
-            pass
+        # 非管理员只返回新 tid 供前端使用，不改全局默认会话
+        if _is_admin:
+            _cfg = dict(_srv_cfg._CONFIG or {})
+            _cfg.setdefault("configurable", {})["thread_id"] = new_tid
+            _srv_cfg._CONFIG = _cfg
+            # 写入 .thread_id 文件以保持 main.py 行为一致
+            try:
+                with open(_os.path.join(_BASE_DIR, ".thread_id"), "w", encoding="utf-8") as f:
+                    f.write(new_tid)
+            except Exception:
+                pass
         return {"result": f"已开新对话: {new_tid}", "thread_id": new_tid}
     if name == "resume":
         if not arg:
@@ -476,14 +510,15 @@ async def command_endpoint(payload: dict):
             r = await get_threads()
             return {"result": "请用 /resume <thread_id> 选择：", "candidates": r["threads"][:10]}
         # 同样只切换 thread_id，保留 approval_mode
-        _cfg = dict(_srv_cfg._CONFIG or {})
-        _cfg.setdefault("configurable", {})["thread_id"] = arg
-        _srv_cfg._CONFIG = _cfg
-        try:
-            with open(_os.path.join(_BASE_DIR, ".thread_id"), "w", encoding="utf-8") as f:
-                f.write(arg)
-        except Exception:
-            pass
+        if _is_admin:
+            _cfg = dict(_srv_cfg._CONFIG or {})
+            _cfg.setdefault("configurable", {})["thread_id"] = arg
+            _srv_cfg._CONFIG = _cfg
+            try:
+                with open(_os.path.join(_BASE_DIR, ".thread_id"), "w", encoding="utf-8") as f:
+                    f.write(arg)
+            except Exception:
+                pass
         return {"result": f"已切到 thread: {arg}", "thread_id": arg}
     if name == "threads":
         r = await get_threads()
@@ -492,6 +527,8 @@ async def command_endpoint(payload: dict):
         from app.llm import create_llm
         return {"result": f"当前 provider: openai_compatible, model: glm-5.1 (实际由 .env OPENAI_* 决定)"}
     if name == "system":
+        if not _is_admin:
+            return {"error": "审批模式仅管理员可修改"}
         if not arg:
             return {"result": f"当前审批模式: {(_srv_cfg._CONFIG or {}).get('configurable', {}).get('approval_mode', 'session_allow')}"}
         if arg not in ("per_ask", "session_allow", "always_allow"):

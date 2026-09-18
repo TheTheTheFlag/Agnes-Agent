@@ -28,14 +28,19 @@ from typing import Any, List, Optional
 
 import httpx
 
-from app.config import DB_PATH
+from app.config import DB_PATH, BASE_DIR
 
 
 def _load_dotenv() -> None:
-    """轻量 .env 加载（不依赖 python-dotenv），重复调用安全。"""
+    """统一配置加载：优先 data/.model_config（写回环境变量），.env 仅作回退。重复调用安全。"""
     if os.environ.get("_ENV_LOADED"):
         return
-    env_path = os.path.join(os.path.dirname(os.path.dirname(str(DB_PATH))), ".env")
+    try:
+        from app.config_store import bootstrap as _bootstrap_config
+        _bootstrap_config()
+    except Exception:
+        pass
+    env_path = os.path.join(BASE_DIR, ".env")
     if not os.path.isfile(env_path):
         return
     try:
@@ -181,6 +186,15 @@ def _resolve_endpoint(env_prefix: str) -> dict:
                 base_url = mc.get("base_url")
             if not api_key:
                 api_key = mc.get("api_key")
+        except Exception:
+            pass
+    # 多用户：Embedding/Rerank 一律用当前用户自己的硅基流动 Key（管理员用轮换池）
+    if env_prefix in ("EMBEDDING", "RERANK"):
+        try:
+            from app.userctx import resolve_user_keys
+            _ukeys = resolve_user_keys().get("siliconflow") or []
+            if _ukeys:
+                api_key = ",".join(_ukeys)
         except Exception:
             pass
     if not (base_url and api_key):
@@ -364,6 +378,15 @@ def _run_on_worker(coro: Any, timeout: float = 300.0) -> Any:
 # 线程安全：不同线程各实例互不影响
 _lock = threading.Lock()
 _instances: dict = {}
+
+
+def _cache_key(ns: str) -> str:
+    """实例缓存键 = 用户 + 命名空间（多用户下同名 KB 不串实例）。"""
+    try:
+        from app.userctx import current_user
+        return f"{current_user()}::{ns}"
+    except Exception:
+        return str(ns)
 
 # 图谱命名空间：
 #   - 会话对话图谱默认全局共享一张图：所有会话 thread_id 归一化到 ``__global__``，
@@ -681,9 +704,10 @@ def build_lightrag_instance(thread_id: str, ns: Optional[str] = None) -> Any:
     缓存键 / work_dir / Neo4j workspace 均以实际命名空间为准。
     """
     ns = (ns or "").strip() or _graph_ns(thread_id)
+    _ck = _cache_key(ns)
     with _lock:
-        if ns in _instances:
-            return _instances[ns]
+        if _ck in _instances:
+            return _instances[_ck]
         _patch_faiss_lazy_vectors()
         import lightrag as _lh
         llm = _make_llm_func()
@@ -776,7 +800,7 @@ def build_lightrag_instance(thread_id: str, ns: Optional[str] = None) -> Any:
             else:
                 logging.getLogger(__name__).warning("VECTOR_STORAGE=faiss 但未安装 faiss-cpu，回退 NanoVectorDB")
         inst = _lh.LightRAG(**kwargs)
-        _instances[ns] = inst
+        _instances[_ck] = inst
         return inst
 
 
@@ -1175,9 +1199,9 @@ async def _neo4j_snapshot(storage: Any) -> dict:
 
 
 def clear_instance(thread_id: str, ns: Optional[str] = None) -> None:
-    """清理某会话/知识库的实例。"""
+    """清理某会话/知识库的实例（当前用户维度）。"""
     with _lock:
-        _instances.pop((ns or "").strip() or _graph_ns(thread_id), None)
+        _instances.pop(_cache_key((ns or "").strip() or _graph_ns(thread_id)), None)
 
 
 def reset_all() -> None:

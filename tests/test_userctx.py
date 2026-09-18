@@ -1,0 +1,222 @@
+"""tests/test_userctx.py — 多用户上下文（每用户路径 / 密钥 / 模型脱敏）。"""
+import os
+import sys
+import unittest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import app.config as config
+from app import userctx
+from app.userctx import (set_current_user, reset_current_user, current_user,
+                         user_paths, resolve_user_keys)
+
+
+class UserPathTest(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.mkdtemp()
+        self._orig_users_dir = userctx.USERS_DIR
+        userctx.USERS_DIR = os.path.join(self._tmp, "users")
+
+    def tearDown(self):
+        userctx.USERS_DIR = self._orig_users_dir
+        userctx._ensured_users.clear()
+
+    def test_default_user_is_mirror(self):
+        tok = set_current_user("")
+        try:
+            self.assertEqual(current_user(), "Mirror")
+            self.assertIn(os.path.join("users", "Mirror"), str(config.DB_PATH))
+        finally:
+            reset_current_user(tok)
+
+    def test_path_changes_per_user(self):
+        tok = set_current_user("alice")
+        try:
+            p1 = str(config.DB_PATH)
+            self.assertTrue(p1.endswith(os.path.join("users", "alice", "data", "memory.db")))
+            self.assertTrue(str(config.UPLOADS_DIR).endswith(os.path.join("users", "alice", "uploads")))
+        finally:
+            reset_current_user(tok)
+        tok = set_current_user("bob")
+        try:
+            self.assertNotEqual(str(config.DB_PATH), p1)
+            self.assertIn(os.path.join("users", "bob"), str(config.DB_PATH))
+        finally:
+            reset_current_user(tok)
+
+    def test_checkpoint_and_rag_paths(self):
+        tok = set_current_user("carol")
+        try:
+            self.assertIn("checkpoints.db", str(config.CHECKPOINT_DB_PATH))
+            self.assertIn(os.path.join("users", "carol", "lightrag_storage"), str(config.RAG_ROOT))
+        finally:
+            reset_current_user(tok)
+
+    def test_ensure_user_dirs(self):
+        tok = set_current_user("dave")
+        try:
+            p = userctx.ensure_user_dirs("dave")
+            for d in (p.data_dir, p.uploads_dir, p.deliverables_dir, p.rag_root, p.skills_dir):
+                self.assertTrue(os.path.isdir(d), d)
+        finally:
+            reset_current_user(tok)
+
+
+class UserKeysTest(unittest.TestCase):
+    def setUp(self):
+        from app.server import accounts
+        import tempfile
+        self._tmp = tempfile.mkdtemp()
+        self._orig_acc = accounts.ACCOUNTS_DB_PATH
+        self._orig_legacy = accounts.LEGACY_AUTH_FILE
+        self._orig_users_dir = userctx.USERS_DIR
+        accounts.ACCOUNTS_DB_PATH = os.path.join(self._tmp, "accounts.db")
+        accounts.LEGACY_AUTH_FILE = os.path.join(self._tmp, "nonexistent_auth.json")
+        userctx.USERS_DIR = os.path.join(self._tmp, "users")  # 避免在真实 data/users 建目录
+        self.accounts = accounts
+        accounts.init_db()
+
+    def tearDown(self):
+        self.accounts.ACCOUNTS_DB_PATH = self._orig_acc
+        self.accounts.LEGACY_AUTH_FILE = self._orig_legacy
+        userctx.USERS_DIR = self._orig_users_dir
+
+    def test_normal_user_uses_own_keys(self):
+        self.accounts.create_user("u1", "pw123456", "agnes-1", "sf-1",
+                                  role="user", status="active")
+        keys = resolve_user_keys("u1")
+        self.assertEqual(keys["agnes"], ["agnes-1"])
+        self.assertEqual(keys["siliconflow"], ["sf-1"])
+
+    def test_admin_pools_all_active_users(self):
+        self.accounts.create_user("Mirror", "pw123456", "agnes-admin", "sf-admin",
+                                  role="admin", status="active")
+        self.accounts.create_user("u2", "pw123456", "agnes-2", "sf-2",
+                                  role="user", status="active")
+        self.accounts.create_user("u3", "pw123456", "agnes-3", "sf-3",
+                                  role="user", status="pending")
+        keys = resolve_user_keys("Mirror")
+        self.assertIn("agnes-2", keys["agnes"])
+        self.assertNotIn("agnes-3", keys["agnes"])  # pending 不纳入
+
+    def test_multi_key_split(self):
+        self.accounts.create_user("u4", "pw123456", "k1,k2", "s1, s2",
+                                  role="user", status="active")
+        keys = resolve_user_keys("u4")
+        self.assertEqual(keys["agnes"], ["k1", "k2"])
+        self.assertEqual(keys["siliconflow"], ["s1", "s2"])
+
+
+class MigrationTest(unittest.TestCase):
+    def test_migrate_legacy_to_mirror(self):
+        import tempfile
+        base = tempfile.mkdtemp()
+        data = os.path.join(base, "data")
+        os.makedirs(data)
+        with open(os.path.join(data, "memory.db"), "w", encoding="utf-8") as f:
+            f.write("legacy-memory")
+        with open(os.path.join(data, "checkpoints.db"), "w", encoding="utf-8") as f:
+            f.write("legacy-ck")
+        os.makedirs(os.path.join(base, "uploads"))
+        with open(os.path.join(base, "uploads", "a.txt"), "w", encoding="utf-8") as f:
+            f.write("up")
+
+        old = (userctx.BASE_DIR, userctx.DATA_DIR, userctx.USERS_DIR, userctx._MIGRATION_FLAG)
+        userctx.BASE_DIR = base
+        userctx.DATA_DIR = data
+        userctx.USERS_DIR = os.path.join(data, "users")
+        userctx._MIGRATION_FLAG = os.path.join(userctx.USERS_DIR, ".migrated_to_mirror")
+        try:
+            result = userctx.migrate_legacy_to_mirror()
+            self.assertEqual(result.get("memory.db"), "moved")
+            self.assertEqual(result.get("checkpoints.db"), "moved")
+            self.assertEqual(result.get("uploads"), "moved")
+            my = userctx.user_paths("Mirror")
+            self.assertTrue(os.path.isfile(os.path.join(my.data_dir, "memory.db")))
+            self.assertTrue(os.path.isfile(os.path.join(my.uploads_dir, "a.txt")))
+            # 幂等：再次调用不再移动
+            self.assertEqual(userctx.migrate_legacy_to_mirror(), {})
+        finally:
+            userctx.BASE_DIR, userctx.DATA_DIR, userctx.USERS_DIR, userctx._MIGRATION_FLAG = old
+
+
+class MigrationMergeTest(unittest.TestCase):
+    def test_merge_into_preexisting_empty_dir(self):
+        """目标目录被 ensure_user_dirs 预建为空时，仍应合并内容而非漏迁。"""
+        import tempfile
+        base = tempfile.mkdtemp()
+        data = os.path.join(base, "data")
+        os.makedirs(data)
+        os.makedirs(os.path.join(base, "uploads"))
+        with open(os.path.join(base, "uploads", "a.txt"), "w", encoding="utf-8") as f:
+            f.write("up")
+        # 预建空的 Mirror/uploads，模拟 ensure_user_dirs 的副作用
+        os.makedirs(os.path.join(data, "users", "Mirror", "uploads"))
+
+        old = (userctx.BASE_DIR, userctx.DATA_DIR, userctx.USERS_DIR, userctx._MIGRATION_FLAG)
+        userctx.BASE_DIR = base
+        userctx.DATA_DIR = data
+        userctx.USERS_DIR = os.path.join(data, "users")
+        userctx._MIGRATION_FLAG = os.path.join(userctx.USERS_DIR, ".migrated_to_mirror")
+        try:
+            result = userctx.migrate_legacy_to_mirror()
+            self.assertEqual(result.get("uploads"), "moved")
+            self.assertTrue(os.path.isfile(os.path.join(userctx.user_paths("Mirror").uploads_dir, "a.txt")))
+        finally:
+            userctx.BASE_DIR, userctx.DATA_DIR, userctx.USERS_DIR, userctx._MIGRATION_FLAG = old
+
+
+class StoreEventIsolationTest(unittest.TestCase):
+    def setUp(self):
+        import asyncio
+        import tempfile
+        from app.server import store
+        self.store = store
+        self.asyncio = asyncio
+        self._tmp = tempfile.mkdtemp()
+        self._orig_users_dir = userctx.USERS_DIR
+        userctx.USERS_DIR = os.path.join(self._tmp, "users")
+        self._orig_listeners = store._event_listeners
+        store._event_listeners = []
+
+    def tearDown(self):
+        self.store._event_listeners = self._orig_listeners
+        userctx.USERS_DIR = self._orig_users_dir
+        userctx._ensured_users.clear()
+
+    def test_event_not_delivered_to_other_user(self):
+        q_alice = self.asyncio.Queue()
+        q_bob = self.asyncio.Queue()
+        q_admin = self.asyncio.Queue()
+        self.store._register_listener(q_alice, "alice")
+        self.store._register_listener(q_bob, "bob")
+        self.store._register_listener(q_admin, "Mirror")
+
+        tok = set_current_user("alice")
+        try:
+            self.store.add_event("tool_call", {"name": "x"}, "t1")
+        finally:
+            reset_current_user(tok)
+
+        self.assertFalse(q_alice.empty(), "本人应收到自己的事件")
+        self.assertTrue(q_bob.empty(), "其他普通用户不应收到")
+        self.assertFalse(q_admin.empty(), "管理员应能看到全部事件")
+
+
+class ModelsMaskTest(unittest.TestCase):
+    def test_catalog_masked_for_non_admin(self):
+        from app.server import config as srv_cfg
+        catalog = {"p1": {"label": "x", "api_key": "supersecret9999"}}
+        masked = srv_cfg._mask_catalog(catalog)
+        self.assertNotEqual(masked["p1"]["api_key"], "supersecret9999")
+        self.assertTrue(masked["p1"]["api_key"].endswith("9999"))
+
+    def test_catalog_untouched_for_admin(self):
+        from app.server import config as srv_cfg
+        # 无请求上下文（None）按管理员处理，不脱敏
+        self.assertTrue(srv_cfg._is_request_admin(None))
+
+
+if __name__ == "__main__":
+    unittest.main()

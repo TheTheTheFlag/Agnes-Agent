@@ -147,7 +147,11 @@ def _feed_turn_async(thread_id: str, user_text: str, assistant_text: str) -> Non
         except Exception:
             pass  # 静默：图谱不可用时不阻塞对话
 
-    threading.Thread(target=_run, name=f"lightrag-feed-{thread_id[:8]}", daemon=True).start()
+    try:
+        from app.userctx import run_in_user_thread, current_user
+        run_in_user_thread(current_user(), _run)
+    except Exception:
+        threading.Thread(target=_run, name=f"lightrag-feed-{thread_id[:8]}", daemon=True).start()
 
 
 def _triage_triplets_json(raw: str) -> list:

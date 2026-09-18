@@ -3026,6 +3026,61 @@ async function renderUsersTab(el) {
   await reload();
 }
 
+/* ---- 全局设置（仅管理员） ---- */
+const SETTINGS_META = {
+  embedding: { title: "Embedding（向量嵌入）", fields: { base_url: "Base URL", api_key: "API Key", model: "模型名" } },
+  rerank: { title: "Rerank（重排）", fields: { base_url: "Base URL", api_key: "API Key", model: "模型名" } },
+  tavily: { title: "Tavily 搜索", fields: { api_key: "API Key" } },
+  graph: { title: "图谱存储（Neo4j）", fields: { storage: "后端(networkx/neo4j)", neo4j_uri: "URI", neo4j_username: "用户名", neo4j_password: "密码", neo4j_database: "数据库", cosine_threshold: "余弦阈值", namespace: "命名空间" } },
+  wechat: { title: "企业微信机器人", fields: { bot_id: "BotID", secret: "Secret", enabled: "启用(1/0)", welcome: "欢迎语", prefix: "thread 前缀", timeout: "超时", concurrency: "并发", kbs: "知识库" } },
+  limits: { title: "限额", fields: { embedding_max_batch: "Embedding 批大小", embedding_max_tokens: "Embedding 最大 token" } },
+};
+const SETTINGS_SECRET = new Set(["api_key", "secret", "neo4j_password"]);
+
+async function renderSettingsTab(el) {
+  el.innerHTML = `<div class="tab-title">全局设置</div><div class="d-empty">加载中…</div>`;
+  try {
+    const data = await apiGet("/api/admin/settings");
+    const cfg = data.config || {};
+    let html = `<div class="tab-title">全局设置</div>
+      <div class="tab-note">写入 <code>data/.model_config</code>；密钥仅显示尾部 4 位，留空/不改动的掩码不会被覆盖。</div>`;
+    for (const sec of (data.editable || [])) {
+      const meta = SETTINGS_META[sec];
+      if (!meta) continue;
+      const val = cfg[sec];
+      if (typeof val !== "object" || val === null) {
+        html += `<div class="d-card"><h4>${escapeHtml(sec)}</h4>
+          <div class="d-row"><input class="d-input" data-sec="${sec}" data-scalar="1" value="${escapeHtml(String(val ?? ""))}"></div></div>`;
+        continue;
+      }
+      const rows = Object.entries(meta.fields).map(([k, label]) => {
+        const v = val[k];
+        const isSecret = SETTINGS_SECRET.has(k);
+        return `<div class="d-row"><label>${escapeHtml(label)}</label>
+          <input class="d-input" data-sec="${sec}" data-key="${k}" ${isSecret ? 'type="password"' : ""} value="${escapeHtml(v == null ? "" : String(v))}"></div>`;
+      }).join("");
+      html += `<div class="d-card"><h4 style="margin-bottom:8px">${escapeHtml(meta.title)}</h4>${rows}</div>`;
+    }
+    html += `<div class="d-row"><button class="d-btn primary" id="setSave">💾 保存</button></div>`;
+    el.innerHTML = html;
+
+    $("#setSave", el).addEventListener("click", async () => {
+      const patch = {};
+      $$("input[data-sec]", el).forEach((inp) => {
+        const sec = inp.dataset.sec;
+        const val = inp.value;
+        if (inp.dataset.scalar) { patch[sec] = val; return; }
+        patch[sec] = patch[sec] || {};
+        patch[sec][inp.dataset.key] = val;
+      });
+      try {
+        await apiPost("/api/admin/settings", { config: patch });
+        toast("已保存全局设置", "success");
+      } catch (e) { toast("保存失败：" + e.message, "error"); }
+    });
+  } catch (e) { el.innerHTML = drawerErr(e); }
+}
+
 /* ---- 抽屉 tab 注册表 ---- */
 const DRAWER_LOADERS = {
   state: renderStateTab,
@@ -3041,6 +3096,7 @@ const DRAWER_LOADERS = {
   models: renderModelsTab,
   deliv: renderDelivTab,
   users: renderUsersTab,
+  settings: renderSettingsTab,
 };
 
 const DRAWER_TABS = [
@@ -3056,7 +3112,8 @@ const DRAWER_TABS = [
   { id: "tools", label: "工具", icon: "🔧" },
   { id: "skills", label: "技能", icon: "✨" },
   { id: "sched", label: "定时任务", icon: "🗓️" },
-  { id: "models", label: "模型", icon: "⚙️" },
+  { id: "models", label: "模型", icon: "⚙️", admin: true },
+  { id: "settings", label: "设置", icon: "🧩", admin: true },
   { id: "users", label: "用户管理", icon: "👥", admin: true },
   // 交付物 tab 已移到主页顶栏（#btnDeliverables），点击时仍通过 activateTab("deliv") 渲染
 ];

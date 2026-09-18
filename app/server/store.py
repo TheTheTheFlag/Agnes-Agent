@@ -39,6 +39,37 @@ CREATE TABLE IF NOT EXISTS app_events (
 _MIGRATE_SQL = "ALTER TABLE app_events ADD COLUMN thread_id TEXT"
 
 
+def _current_user_safe():
+    try:
+        from app.userctx import current_user
+        return current_user()
+    except Exception:
+        return None
+
+
+def _register_listener(queue, user=None):
+    """注册一个 SSE/控制台监听队列；user 为该监听所属用户（None=全局，能收全部事件）。"""
+    _event_listeners.append({"queue": queue, "user": user})
+
+
+def _unregister_listener(queue):
+    global _event_listeners
+    _event_listeners = [l for l in _event_listeners
+                        if l is not queue and (not isinstance(l, dict) or l.get("queue") is not queue)]
+
+
+def _dispatch(entry, user):
+    """把事件分发给订阅者：按用户隔离，全局/管理员（Mirror）监听者可收全部。"""
+    from app.userctx import DEFAULT_USER
+    for listener in list(_event_listeners):
+        q, luser = (listener["queue"], listener.get("user")) if isinstance(listener, dict) else (listener, None)
+        if luser is None or luser == user or luser == DEFAULT_USER:
+            try:
+                q.put_nowait(entry)
+            except Exception:
+                pass
+
+
 def _init_persist():
     try:
         with _sqlite.connect(DB_PATH) as conn:
@@ -53,6 +84,21 @@ def _init_persist():
 
 
 _init_persist()
+
+_inited_users = set()
+
+
+def _ensure_persist():
+    """按当前用户确保 app_logs/app_events 表存在（首次访问某用户时建表）。"""
+    try:
+        from app.userctx import current_user
+        u = current_user()
+    except Exception:
+        return
+    if u in _inited_users:
+        return
+    _init_persist()
+    _inited_users.add(u)
 
 
 def delete_thread_records(thread_id: str) -> dict:
@@ -93,6 +139,7 @@ def delete_thread_records(thread_id: str) -> dict:
 
 
 def _persist_log(level: str, message: str, data, timestamp: str):
+    _ensure_persist()
     try:
         with _sqlite.connect(DB_PATH) as conn:
             conn.execute(
@@ -104,6 +151,7 @@ def _persist_log(level: str, message: str, data, timestamp: str):
 
 
 def _persist_event(event_type: str, data, timestamp: str, thread_id: str = None):
+    _ensure_persist()
     try:
         with _sqlite.connect(DB_PATH) as conn:
             conn.execute(
@@ -117,6 +165,7 @@ def _persist_event(event_type: str, data, timestamp: str, thread_id: str = None)
 
 def get_persisted_logs(limit: int = 200) -> List[Dict[str, Any]]:
     """从 DB 读取最近的日志（含历史会话，重启后仍可查）。"""
+    _ensure_persist()
     try:
         with _sqlite.connect(DB_PATH) as conn:
             conn.row_factory = _sqlite.Row
@@ -140,6 +189,7 @@ def get_persisted_logs(limit: int = 200) -> List[Dict[str, Any]]:
 
 def get_persisted_events(limit: int = 100, thread_id: str = None) -> List[Dict[str, Any]]:
     """从 DB 读取最近的事件；thread_id 指定时只返回该会话的事件。"""
+    _ensure_persist()
     try:
         with _sqlite.connect(DB_PATH) as conn:
             conn.row_factory = _sqlite.Row
@@ -198,12 +248,14 @@ def update_prompt(prompt: str, thread_id: str = None):
 
 def add_log_entry(level: str, message: str, data: Optional[Dict] = None):
     global _log_entries
+    user = _current_user_safe()
     entry = {
         "type": "log",  # 供前端 SSE 识别（与 add_event 的 entry 结构对齐）
         "timestamp": datetime.now().isoformat(),
         "level": level,
         "message": message,
-        "data": data
+        "data": data,
+        "user": user,
     }
     _log_entries.append(entry)
     if len(_log_entries) > _max_log_entries:
@@ -212,21 +264,18 @@ def add_log_entry(level: str, message: str, data: Optional[Dict] = None):
     # 持久化到 DB（重启后历史会话仍可查）
     _persist_log(level, message, data, entry["timestamp"])
 
-    global _event_listeners
-    for listener in _event_listeners:
-        try:
-            listener.put_nowait(entry)
-        except:
-            pass
+    _dispatch(entry, user)
 
 
 def add_event(event_type: str, data: Any, thread_id: str = None):
     global _events
+    user = _current_user_safe()
     entry = {
         "type": event_type,
         "timestamp": datetime.now().isoformat(),
         "data": data,
         "thread_id": thread_id,
+        "user": user,
     }
     _events.append(entry)
     if len(_events) > 100:
@@ -235,11 +284,6 @@ def add_event(event_type: str, data: Any, thread_id: str = None):
     # 持久化到 DB
     _persist_event(event_type, data, entry["timestamp"], thread_id)
 
-    global _event_listeners
-    for listener in _event_listeners:
-        try:
-            listener.put_nowait(entry)
-        except:
-            pass
+    _dispatch(entry, user)
 
 

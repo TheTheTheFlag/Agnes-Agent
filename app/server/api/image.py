@@ -21,7 +21,7 @@ import requests
 from fastapi import APIRouter
 from fastapi.responses import FileResponse, JSONResponse
 
-from app.config import BASE_DIR, DATA_DIR, MODEL_CONFIG_PATH
+from app.config import BASE_DIR, MODEL_CONFIG_PATH, user_subdir
 
 router = APIRouter(prefix="/api/image", tags=["image"])
 
@@ -42,8 +42,8 @@ IMAGE_MODES = ("txt2img", "img2img", "multi")
 
 _UPSTREAM = "https://api.agnes-ai.cn/v1/images/generations"
 _TIMEOUT = 360          # 官方建议 60-360s
-_LIB = os.path.join(DATA_DIR, "image_library")
-_MANIFEST = os.path.join(_LIB, "manifest.json")
+_LIB = user_subdir("data_dir", "image_library")          # 按当前用户解析
+_MANIFEST = user_subdir("data_dir", "image_library", "manifest.json")
 _THUMB_MAX = 520
 _MAX_GALLERY = 300      # 作品库保留上限（旧作品仅从列表移除，文件仍在磁盘）
 
@@ -131,15 +131,15 @@ def _path_to_data_uri(relpath: str) -> str:
         name = name.replace(".", "_")
     fp = None
     if rel.startswith("uploads/"):
-        cand = os.path.join(BASE_DIR, rel)
+        cand = os.path.join(str(user_subdir("uploads_dir")), name)
         if os.path.isfile(cand):
             fp = cand
     elif rel.startswith("image_library/"):
-        cand = os.path.join(DATA_DIR, "image_library", name)
+        cand = os.path.join(str(_LIB), name)
         if os.path.isfile(cand):
             fp = cand
     if not fp:
-        cand = os.path.join(BASE_DIR, "uploads", name)
+        cand = os.path.join(str(user_subdir("uploads_dir")), name)
         if os.path.isfile(cand):
             fp = cand
     if not fp:

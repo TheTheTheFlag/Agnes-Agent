@@ -31,12 +31,21 @@ async def get_prompt(thread_id: str = ""):
     return JSONResponse({"prompt": _store._prompt_snapshot})
 
 
+def _user_visible(entry) -> bool:
+    """内存兜底事件/日志按用户过滤（管理员 Mirror 可见全部）。"""
+    from app.userctx import DEFAULT_USER
+    u = _store._current_user_safe()
+    if u in (None, DEFAULT_USER):
+        return True
+    return entry.get("user") in (None, u)
+
+
 @router.get("/api/logs")
 async def get_logs(limit: int = Query(100, ge=1, le=500)):
     # 优先 DB（含历史会话）；内存兜底
     logs = _store.get_persisted_logs(limit)
     if not logs and _store._log_entries:
-        logs = _store._log_entries[-limit:]
+        logs = [e for e in _store._log_entries if _user_visible(e)][-limit:]
     return JSONResponse({"logs": logs, "total": len(logs)})
 
 
@@ -45,7 +54,8 @@ async def get_events(limit: int = Query(50, ge=1, le=200), thread_id: str = ""):
     # 按会话过滤：指定 thread_id 只返回该会话事件，避免跨会话混显
     events = _store.get_persisted_events(limit, thread_id=thread_id or None)
     if not events and _store._events:
-        events = [e for e in _store._events[-limit:] if not thread_id or e.get("thread_id") == thread_id]
+        events = [e for e in _store._events[-limit:]
+                  if _user_visible(e) and (not thread_id or e.get("thread_id") == thread_id)]
     return JSONResponse({"events": events, "total": len(events)})
 
 
@@ -84,19 +94,18 @@ async def clear_logs():
 async def sse_stream():
     async def event_generator():
         queue = asyncio.Queue()
-        _store._event_listeners.append(queue)
+        _store._register_listener(queue, _store._current_user_safe())
         try:
             while True:
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=30)
                     yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
                 except asyncio.TimeoutError:
-                    yield f": heartbeat\n\n"
+                    yield ": heartbeat\n\n"
         except asyncio.CancelledError:
             pass
         finally:
-            if queue in _store._event_listeners:
-                _store._event_listeners.remove(queue)
+            _store._unregister_listener(queue)
 
     return StreamingResponse(
         event_generator(),

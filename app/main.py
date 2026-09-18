@@ -1,5 +1,8 @@
 from dotenv import load_dotenv
 load_dotenv()
+# 统一配置：把 .env 里的历史配置并入 data/.model_config，并写回环境变量
+from app.config_store import bootstrap as _bootstrap_config
+_bootstrap_config()
 import uuid
 import sys
 import os

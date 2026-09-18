@@ -99,7 +99,7 @@ def _messages_to_text(messages) -> str:
     return "\n".join(lines)
 
 
-def compact_in_background(thread_id: str, messages: List, llm, db_path: str) -> bool:
+def compact_in_background(thread_id: str, messages: List, llm, db_path: str, user: str = None) -> bool:
     """按需在**后台线程**压缩历史。返回是否已启动（False = 不需要/已在压缩）。
 
     只写 DB（history_summaries 表），**不改 LangGraph state**——
@@ -141,5 +141,9 @@ def compact_in_background(thread_id: str, messages: List, llm, db_path: str) -> 
             with _LOCK:
                 _INFLIGHT.discard(thread_id)
 
-    threading.Thread(target=_work, name=f"compact-{thread_id[:8]}", daemon=True).start()
+    try:
+        from app.userctx import run_in_user_thread
+        run_in_user_thread(user, _work)
+    except Exception:
+        threading.Thread(target=_work, name=f"compact-{thread_id[:8]}", daemon=True).start()
     return True

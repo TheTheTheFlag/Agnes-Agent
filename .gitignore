@@ -47,3 +47,7 @@ data/image_library/
 
 # 用户上传文件
 uploads/
+# 每用户隔离数据（db/上传/交付物/RAG/技能），绝不入库
+data/users/
+# 交付物（运行时产物）
+deliverables/

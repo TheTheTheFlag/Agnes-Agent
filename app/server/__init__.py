@@ -5,7 +5,7 @@ import os as _os
 from langgraph.types import Command
 from datetime import datetime
 from typing import Dict, Any, List, Optional
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -127,6 +127,13 @@ def set_graph(graph, config: dict):
     global _GRAPH, _CONFIG
     _GRAPH = graph
     _CONFIG = config
+    # 登记为当前（默认/管理员）用户的 graph：非管理员用户首次访问时另建
+    try:
+        from app.userctx import current_user
+        with _cfg._GRAPHS_LOCK:
+            _cfg._GRAPHS[current_user()] = graph
+    except Exception:
+        pass
 
 
 # ==================== 模型配置管理 ====================
@@ -148,6 +155,7 @@ from app.server.api import graph as _api_graph
 from app.server.api import kb as _api_kb
 from app.server.api import image as _api_image
 from app.server.api import video as _api_video
+from app.server.api import settings as _api_settings
 app.include_router(_api_system.router)
 app.include_router(_api_memory.router)
 app.include_router(_api_tools.router)
@@ -159,6 +167,7 @@ app.include_router(_api_graph.router)
 app.include_router(_api_kb.router)
 app.include_router(_api_image.router)
 app.include_router(_api_video.router)
+app.include_router(_api_settings.router)
 
 # 登录校验：登录/注册接口 + 管理员审批 + 全 API 保护中间件
 from app.server.auth import (
@@ -637,13 +646,33 @@ async def mdb_clear(payload: dict):
     return {"ok": True, "affected": affected, "table": table}
 
 
+def _sched_admin_guard(request: Request):
+    """定时任务以管理员（Mirror）身份执行，仅管理员可管理，避免越权。"""
+    try:
+        from app.server.accounts import is_admin
+        u = getattr(getattr(request, "state", None), "username", None)
+        if u and not is_admin(u):
+            return JSONResponse({"error": "定时任务仅管理员可用"}, status_code=403)
+    except Exception:
+        pass
+    return None
+
+
 @app.get("/api/scheduler")
-async def sched_list():
+async def sched_list(request: Request = None):
+    if request is not None:
+        _g = _sched_admin_guard(request)
+        if _g:
+            return _g
     return {"tasks": _sched_all()}
 
 
 @app.post("/api/scheduler")
-async def sched_create(payload: dict):
+async def sched_create(payload: dict, request: Request = None):
+    if request is not None:
+        _g = _sched_admin_guard(request)
+        if _g:
+            return _g
     """新增定时任务。
     payload: { name, schedule_type: 'cron'|'interval'|'daily', cron_expr?("分 时 日 月 周"), interval_seconds?, daily_time?, prompt, thread_id? }
     """
@@ -679,7 +708,11 @@ async def sched_create(payload: dict):
 
 
 @app.post("/api/scheduler/{task_id}/toggle")
-async def sched_toggle(task_id: str):
+async def sched_toggle(task_id: str, request: Request = None):
+    if request is not None:
+        _g = _sched_admin_guard(request)
+        if _g:
+            return _g
     task = _sched_get(task_id)
     if not task:
         return JSONResponse({"error": "任务不存在"}, status_code=404)
@@ -688,7 +721,11 @@ async def sched_toggle(task_id: str):
 
 
 @app.delete("/api/scheduler/{task_id}")
-async def sched_delete(task_id: str):
+async def sched_delete(task_id: str, request: Request = None):
+    if request is not None:
+        _g = _sched_admin_guard(request)
+        if _g:
+            return _g
     task = _sched_get(task_id)
     if not task:
         return JSONResponse({"error": "任务不存在"}, status_code=404)

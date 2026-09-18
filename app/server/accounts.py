@@ -204,6 +204,11 @@ def create_user(
                 role, status, agnes_key or "", siliconflow_key or "", _now(), note,
             ),
         )
+    try:
+        from app.userctx import ensure_user_dirs
+        ensure_user_dirs(username)
+    except Exception:
+        pass
     return get_user(username)
 
 
@@ -242,8 +247,10 @@ def set_status(username: str, status: str, by: str = "", note: str = "") -> bool
             (status, _now() if status != STATUS_PENDING else None, by or "", note, username),
         )
         changed = cur.rowcount > 0
-    if changed and status != STATUS_ACTIVE:
-        revoke_user_sessions(username)  # 被拒/停用后立即失效
+    if changed:
+        _invalidate_user_caches(username)
+        if status != STATUS_ACTIVE:
+            revoke_user_sessions(username)  # 被拒/停用后立即失效
     return changed
 
 
@@ -253,7 +260,25 @@ def set_keys(username: str, agnes_key: str, siliconflow_key: str) -> bool:
             "UPDATE users SET agnes_key=?, siliconflow_key=? WHERE username=?",
             (agnes_key or "", siliconflow_key or "", username),
         )
-        return cur.rowcount > 0
+        changed = cur.rowcount > 0
+    if changed:
+        _invalidate_user_caches(username)
+    return changed
+
+
+def _invalidate_user_caches(username: str) -> None:
+    """用户密钥/状态变化后失效其 LLM 与 graph 缓存。"""
+    try:
+        from app.userctx import clear_llm_cache
+        clear_llm_cache(username)
+    except Exception:
+        pass
+    try:
+        from app.server import config as _cfg
+        with _cfg._GRAPHS_LOCK:
+            _cfg._GRAPHS.pop(username, None)
+    except Exception:
+        pass
 
 
 def get_user_keys(username: str) -> Dict[str, str]:

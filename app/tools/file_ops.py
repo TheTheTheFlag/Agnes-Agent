@@ -1,4 +1,4 @@
-"""
+﻿"""
 file_ops.py — Python 包装的文件/目录能力工具集。
 
 替代直接执行 shell 命令（system_command 在跨平台适配差）。
@@ -10,14 +10,20 @@ import json
 from typing import List, Optional
 from langchain_core.tools import tool
 
-from app.config import BASE_DIR
+from app.config import WORKSPACE_DIR
+
+
+def _root() -> str:
+    """当前用户工作区根目录（多用户隔离；管理员亦可限制在自己的工作区内）。"""
+    return os.path.abspath(str(WORKSPACE_DIR))
 
 
 def _resolve_path(path: str) -> str:
-    """把相对/绝对路径解析到 BASE_DIR 内；越界则抛错。"""
-    p = os.path.abspath(os.path.join(BASE_DIR, path))
-    if not p.startswith(BASE_DIR):
-        raise ValueError(f"路径越界（仅允许项目目录内）: {path}")
+    """把相对/绝对路径解析到当前用户工作区内；越界则抛错。"""
+    root = _root()
+    p = os.path.abspath(os.path.join(root, path))
+    if p != root and not p.startswith(root + os.sep):
+        raise ValueError(f"路径越界（仅允许用户工作区内）: {path}")
     return p
 
 
@@ -40,7 +46,7 @@ def ls(directory: str = ".", recursive: bool = False) -> str:
         return json.dumps({"error": f"目录不存在: {directory}"}, ensure_ascii=False)
     out = []
     for root, dirs, files in os.walk(d):
-        rel = os.path.relpath(root, BASE_DIR)
+        rel = os.path.relpath(root, _root())
         rel = '' if rel == '.' else rel
         for name in sorted(dirs + files):
             full = os.path.join(root, name)
@@ -149,8 +155,8 @@ def glob_files(pattern: str) -> str:
     参数:
       pattern: glob 模式，相对项目根
     返回: 匹配的文件路径列表"""
-    full = os.path.join(BASE_DIR, pattern)
-    matches = [os.path.relpath(p, BASE_DIR).replace('\\', '/') for p in _glob.glob(full, recursive=True) if os.path.isfile(p)]
+    full = os.path.join(_root(), pattern)
+    matches = [os.path.relpath(p, _root()).replace('\\', '/') for p in _glob.glob(full, recursive=True) if os.path.isfile(p)]
     return json.dumps({"matches": matches[:200], "count": len(matches)}, ensure_ascii=False)
 
 
@@ -180,7 +186,7 @@ def grep_files(pattern: str, path: str = ".", max_results: int = 50) -> str:
                 with open(fp, 'r', encoding='utf-8', errors='replace') as f:
                     for i, line in enumerate(f, 1):
                         if rx.search(line):
-                            rel = os.path.relpath(fp, BASE_DIR).replace('\\', '/')
+                            rel = os.path.relpath(fp, _root()).replace('\\', '/')
                             results.append({"file": rel, "line_no": i, "text": line.strip()[:120]})
                             if len(results) >= max_results:
                                 return json.dumps({"results": results, "count": len(results)}, ensure_ascii=False)

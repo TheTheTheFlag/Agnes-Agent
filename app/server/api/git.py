@@ -1,4 +1,4 @@
-"""app.server.api.git — git 版本管理 API。"""
+﻿"""app.server.api.git — git 版本管理 API。"""
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
@@ -11,8 +11,8 @@ router = APIRouter()
 async def api_deliverables():
     """列出交付物目录文件。"""
     import os as _os
-    from app.config import BASE_DIR
-    ddir = _os.path.join(BASE_DIR, "deliverables")
+    from app.config import DELIVERABLES_DIR
+    ddir = str(DELIVERABLES_DIR)
     files = []
     if _os.path.isdir(ddir):
         for name in sorted(_os.listdir(ddir)):
@@ -30,9 +30,9 @@ async def api_deliverables():
 async def api_deliverables_preview(name: str = ""):
     """预览交付物文件内容（文本）。"""
     import os as _os
-    from app.config import BASE_DIR
+    from app.config import DELIVERABLES_DIR
     safe = _os.path.basename(name)  # 防路径穿越
-    p = _os.path.join(BASE_DIR, "deliverables", safe)
+    p = _os.path.join(str(DELIVERABLES_DIR), safe)
     if not _os.path.isfile(p):
         return JSONResponse({"error": "文件不存在"}, status_code=404)
     try:
@@ -48,9 +48,9 @@ async def api_deliverables_download(name: str = ""):
     """下载交付物文件。"""
     import os as _os
     from fastapi.responses import FileResponse
-    from app.config import BASE_DIR
+    from app.config import DELIVERABLES_DIR
     safe = _os.path.basename(name)  # 防路径穿越
-    p = _os.path.join(BASE_DIR, "deliverables", safe)
+    p = _os.path.join(str(DELIVERABLES_DIR), safe)
     if not _os.path.isfile(p):
         return JSONResponse({"error": "文件不存在"}, status_code=404)
     return FileResponse(p, filename=safe)

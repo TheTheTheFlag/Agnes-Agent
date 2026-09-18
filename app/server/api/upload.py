@@ -11,9 +11,9 @@ import uuid
 from fastapi import APIRouter, File, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 
-from app.config import BASE_DIR
+from app.config import UPLOADS_DIR
 
-UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
+UPLOAD_DIR = UPLOADS_DIR  # 按当前用户解析（data/users/<user>/uploads）
 MAX_SIZE = 200 * 1024 * 1024  # 200MB（大表格/语料经 kb 自动拆分后喂入知识库）
 
 # 允许的扩展名：图片为主（视觉技能），辅以常见文档

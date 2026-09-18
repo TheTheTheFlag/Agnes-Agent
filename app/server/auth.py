@@ -246,6 +246,13 @@ def install_auth_middleware(app):
             request.state.username = username
             if path.startswith("/api/admin/") and not is_admin(username):
                 return JSONResponse({"error": "需要管理员权限"}, status_code=403)
+            # 贯穿整条请求链的用户上下文（含线程池里的同步端点）
+            from app.userctx import set_current_user, reset_current_user
+            _utok = set_current_user(username)
+            try:
+                return await call_next(request)
+            finally:
+                reset_current_user(_utok)
         return await call_next(request)
 
     return _auth_middleware

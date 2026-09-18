@@ -37,6 +37,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger("openai_compatible")
 
 from app.config import DB_PATH, CHECKPOINT_DB_PATH, PROMPT_TEMPLATE_PATH
+from app.userctx import current_llm, current_user, user_paths, run_in_user_thread
 
 # 模块级 LLM 实例（供 chatbot / planner / executor 使用）
 _LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai_compatible")
@@ -56,6 +57,10 @@ print(f"LLM 类型: {type(llm)} | provider={_LLM_PROVIDER} model={_LLM_MODEL or 
 def chatbot(state: State, config: RunnableConfig):
     thread_id = config["configurable"]["thread_id"]
     state["thread_id"] = thread_id
+    # 每用户 LLM：优先级 = 本次运行的上下文 LLM > 模块级全局 LLM（离线/兜底）
+    _pair = current_llm()
+    _llm, _llm_with_tools = _pair if _pair else (llm, llm_with_tools)
+    _user = current_user()
     # L6 GraphRAG 工具定位当前会话（record_graph / lightgraph_query 依赖）
     try:
         from app.memory.ligraphrag_adapter import set_current_context, set_current_kbs
@@ -121,8 +126,10 @@ def chatbot(state: State, config: RunnableConfig):
     except Exception:
         pass
 
-    cwd = os.getcwd()
-    deliverables_dir = os.path.join(cwd, "deliverables")
+    # 每用户工作区：交付物 / 文件工具根均限定在该用户目录下
+    _up = user_paths(_user)
+    cwd = _up.workspace
+    deliverables_dir = _up.deliverables_dir
     os.makedirs(deliverables_dir, exist_ok=True)
 
     template = load_prompt_template()
@@ -255,7 +262,7 @@ def chatbot(state: State, config: RunnableConfig):
     initial_messages = prepare_context_messages(history_messages, system_text, keep_recent=KEEP_RECENT)
 
     print(f"[Chatbot] 自决模式（无 L1/L2/L3 硬切）")
-    loop = ReActLoop(llm_with_tools, max_iterations=MAX_TOOL_CALL_ROUNDS, node="chatbot")
+    loop = ReActLoop(_llm_with_tools, max_iterations=MAX_TOOL_CALL_ROUNDS, node="chatbot")
     try:
         result = loop.run(
             messages=initial_messages,
@@ -322,7 +329,7 @@ def chatbot(state: State, config: RunnableConfig):
     #   - 位置：**后台线程**执行，不占用用户等待的同步路径
     try:
         from app.memory.compaction import compact_in_background
-        if compact_in_background(thread_id, state["messages"], llm, DB_PATH):
+        if compact_in_background(thread_id, state["messages"], _llm, DB_PATH, user=_user):
             add_log_entry("info", "已触发后台历史压缩（不阻塞本轮回复）")
     except Exception:
         pass
@@ -347,9 +354,8 @@ def chatbot(state: State, config: RunnableConfig):
     try:
         if _skip_reply is not True and user_content:
             from app.memory import memory_engine
-            threading.Thread(target=memory_engine.consolidate,
-                             args=(thread_id, user_content, content, llm, True),
-                             name="memory-consolidate", daemon=True).start()
+            run_in_user_thread(_user, memory_engine.consolidate,
+                               thread_id, user_content, content, _llm, True)
     except Exception:
         pass
 
@@ -481,8 +487,12 @@ def route_after_summarizer(state: State):
 def build_graph():
     builder = StateGraph(State)
 
+    # 每用户 LLM：上下文里若指定了用户 LLM 则用之（每用户 graph），否则用模块级全局
+    _pair = current_llm()
+    _llm = _pair[0] if _pair else llm
+
     # planner_node 需要做特殊包装：从 state["pending_plan"] 读 goal
-    planner_inner = create_dag_planner_node(llm)
+    planner_inner = create_dag_planner_node(_llm)
 
     def planner_node(state: State):
         # 把 pending_plan 包装为最后一条 human message 供 planner 使用，
@@ -495,11 +505,11 @@ def build_graph():
 
     builder.add_node("chatbot", chatbot)
     builder.add_node("planner", planner_node)
-    builder.add_node("executor", create_executor([llm], tools))
+    builder.add_node("executor", create_executor([_llm], tools))
     # DAG 全部终态后的「交付汇总」节点：把各子任务结果汇总成最终答复交给用户。
     # 注意：它与 build_memory_injection（历史对话压缩注入）是两件事，不能互相替代——
     # 少了它，任务跑完直接 END，用户只看到过程气泡、没有人"复命"。
-    builder.add_node("summarizer", create_dag_summarizer(llm))
+    builder.add_node("summarizer", create_dag_summarizer(_llm))
 
     builder.add_edge(START, "chatbot")
     # chatbot 退出后按 state 决定下一步
