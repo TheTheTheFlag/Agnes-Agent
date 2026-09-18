@@ -86,25 +86,49 @@ def _mask_key(k: str, tail: int = 4) -> str:
 
 
 # ---------------- 作品库 manifest ----------------
-_items: list = []
-_lock = threading.Lock()
+# 改为每用户独立的内存列表 + 锁
+_user_items: dict = {}   # {username: [...]}
+_user_locks: dict = {}   # {username: threading.Lock()}
 
+def _user_items_lock(username: str) -> threading.Lock:
+    if username not in _user_locks:
+        _user_locks[username] = threading.Lock()
+    return _user_locks[username]
 
-def _load_manifest():
-    global _items
-    _items = []
+def _get_user_items(username: str) -> list:
+    if username not in _user_items:
+        _load_user_manifest(username)
+    return _user_items[username]
+
+def _load_user_manifest(username: str):
+    """按用户加载作品列表（模块级 _LIB 是路径代理，会自动按当前用户解析）"""
+    old_user = current_user()
     try:
-        with open(_MANIFEST, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-        _items = raw.get("items", []) if isinstance(raw, dict) else []
-    except Exception:
-        pass
+        set_current_user(username)
+        items = []
+        try:
+            with open(_MANIFEST, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            items = raw.get("items", []) if isinstance(raw, dict) else []
+        except Exception:
+            pass
+        with _user_items_lock(username):
+            _user_items[username] = items
+    finally:
+        set_current_user(old_user)
 
-
-def _save_manifest():
-    os.makedirs(_LIB, exist_ok=True)
-    with open(_MANIFEST, "w", encoding="utf-8") as f:
-        json.dump({"items": _items[: _MAX_GALLERY]}, f, ensure_ascii=False, indent=1)
+def _save_user_manifest(username: str):
+    """保存当前用户的作品列表到磁盘"""
+    old_user = current_user()
+    try:
+        set_current_user(username)
+        os.makedirs(_LIB, exist_ok=True)
+        with _user_items_lock(username):
+            items = _user_items.get(username, [])
+        with open(_MANIFEST, "w", encoding="utf-8") as f:
+            json.dump({"items": items[:_MAX_GALLERY]}, f, ensure_ascii=False, indent=1)
+    finally:
+        set_current_user(old_user)
 
 
 def _make_thumb(src: str, dst: str) -> bool:
@@ -176,57 +200,63 @@ def _call_generate(key: str, payload: dict) -> dict:
 
 
 def _persist_item(mode: str, model: str, prompt: str, size: str, ratio: str,
-                  n_refs: int, b64: str, url: str) -> dict:
-    os.makedirs(_LIB, exist_ok=True)
-    item_id = uuid.uuid4().hex[:12]
-    raw_fp = None
-    thumb_fp = None
-    if b64:
-        try:
-            raw_bytes = base64.b64decode(b64)
-        except Exception:
-            raw_bytes = b""
-        if raw_bytes:
-            raw_fp = os.path.join(_LIB, f"{item_id}.png")
-            with open(raw_fp, "wb") as f:
-                f.write(raw_bytes)
-            thumb_fp = os.path.join(_LIB, f"{item_id}_t.jpg")
-            _make_thumb(raw_fp, thumb_fp)
-    if not raw_fp and url:
-        try:
-            r = requests.get(url, timeout=_TIMEOUT)
-            if r.status_code == 200 and r.content:
-                ext = os.path.splitext(url.split("?")[0])[1][:5] or ".png"
-                raw_fp = os.path.join(_LIB, f"{item_id}{ext}")
+                  n_refs: int, b64: str, url: str, username: str) -> dict:
+    # 切换到目标用户路径
+    old_user = current_user()
+    try:
+        set_current_user(username)
+        os.makedirs(_LIB, exist_ok=True)
+        item_id = uuid.uuid4().hex[:12]
+        raw_fp = None
+        thumb_fp = None
+        if b64:
+            try:
+                raw_bytes = base64.b64decode(b64)
+            except Exception:
+                raw_bytes = b""
+            if raw_bytes:
+                raw_fp = os.path.join(_LIB, f"{item_id}.png")
                 with open(raw_fp, "wb") as f:
-                    f.write(r.content)
+                    f.write(raw_bytes)
                 thumb_fp = os.path.join(_LIB, f"{item_id}_t.jpg")
                 _make_thumb(raw_fp, thumb_fp)
-        except Exception:
-            raw_fp = None
-    if not raw_fp:
-        raise RuntimeError("产物保存失败（上游既无 Base64 也无法下载）")
+        if not raw_fp and url:
+            try:
+                r = requests.get(url, timeout=_TIMEOUT)
+                if r.status_code == 200 and r.content:
+                    ext = os.path.splitext(url.split("?")[0])[1][:5] or ".png"
+                    raw_fp = os.path.join(_LIB, f"{item_id}{ext}")
+                    with open(raw_fp, "wb") as f:
+                        f.write(r.content)
+                    thumb_fp = os.path.join(_LIB, f"{item_id}_t.jpg")
+                    _make_thumb(raw_fp, thumb_fp)
+            except Exception:
+                raw_fp = None
+        if not raw_fp:
+            raise RuntimeError("产物保存失败（上游既无 Base64 也无法下载）")
 
-    item = {
-        "id": item_id,
-        "mode": mode,
-        "model": model,
-        "prompt": prompt[:1000],
-        "size": size,
-        "ratio": ratio,
-        "n_refs": n_refs,
-        "file": os.path.basename(raw_fp),
-        "thumb": os.path.basename(thumb_fp) if thumb_fp else "",
-        "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-    }
-    with _lock:
-        _items.insert(0, item)
-        _items[:] = _items[: _MAX_GALLERY]
-        _save_manifest()
-    return item
+        item = {
+            "id": item_id,
+            "mode": mode,
+            "model": model,
+            "prompt": prompt[:1000],
+            "size": size,
+            "ratio": ratio,
+            "n_refs": n_refs,
+            "file": os.path.basename(raw_fp),
+            "thumb": os.path.basename(thumb_fp) if thumb_fp else "",
+            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "user": username,  # 记录归属用户
+        }
+        with _user_items_lock(username):
+            items = _user_items.setdefault(username, [])
+            items.insert(0, item)
+            items[:] = items[:_MAX_GALLERY]
+        _save_user_manifest(username)
+        return item
+    finally:
+        set_current_user(old_user)
 
-
-_load_manifest()
 
 
 @router.get("/status")
@@ -245,7 +275,7 @@ async def status():
 
 
 @router.post("/generate")
-async def generate(payload: dict):
+async def generate(payload: dict, request: Request):
     p = payload or {}
     mode = str(p.get("mode") or "txt2img")
     model = str(p.get("model") or "agnes-image-2.5-flash")
@@ -254,6 +284,8 @@ async def generate(payload: dict):
     ratio = str(p.get("ratio") or "1:1")
     refs = [str(x) for x in (p.get("refs") or []) if str(x).strip()]
     count = int(p.get("count") or 1)
+    # 获取当前用户
+    username = getattr(getattr(request, "state", None), "username", None) or current_user()
 
     if mode not in IMAGE_MODES:
         return JSONResponse({"error": f"mode 必须是 {'/'.join(IMAGE_MODES)}"}, status_code=400)
@@ -305,7 +337,7 @@ async def generate(payload: dict):
             try:
                 got = _call_generate(key, payload_dup)
                 item = _persist_item(mode, model, prompt, size, ratio, len(data_uris),
-                                     got["b64"], got["url"])
+                                     got["b64"], got["url"], username)
                 items.append(item)
                 ok = True
                 break
@@ -323,21 +355,28 @@ async def generate(payload: dict):
 
 
 @router.get("/history")
-async def history(limit: int = 60, offset: int = 0):
+async def history(limit: int = 60, offset: int = 0, request: Request = None):
+    """返回当前用户的作品列表"""
+    username = getattr(getattr(request, "state", None), "username", None) or current_user()
     limit = max(1, min(limit, _MAX_GALLERY))
     offset = max(0, offset)
-    return {"ok": True, "total": len(_items), "items": _items[offset: offset + limit]}
+    with _user_items_lock(username):
+        items = _get_user_items(username)
+    return {"ok": True, "total": len(items), "items": items[offset: offset + limit]}
 
 
 @router.get("/file/{item_id}")
-async def file(item_id: str, thumb: int = 0):
+async def file(item_id: str, thumb: int = 0, request: Request = None):
+    """获取作品文件，仅允许访问当前用户自己的作品"""
     if not _EXT_RE.match(item_id):
         return JSONResponse({"error": "非法 id"}, status_code=400)
+    username = getattr(getattr(request, "state", None), "username", None) or current_user()
     found = None
-    for it in _items:
-        if it.get("id") == item_id:
-            found = it
-            break
+    with _user_items_lock(username):
+        for it in _get_user_items(username):
+            if it.get("id") == item_id:
+                found = it
+                break
     if not found:
         return JSONResponse({"error": "作品不存在"}, status_code=404)
     name = (found.get("thumb") if thumb else found.get("file")) or found.get("file")
@@ -349,12 +388,16 @@ async def file(item_id: str, thumb: int = 0):
 
 
 @router.post("/delete")
-async def delete(payload: dict):
+async def delete(payload: dict, request: Request):
+    """删除作品，仅允许删除自己创建的作品"""
+    username = getattr(getattr(request, "state", None), "username", None) or current_user()
     ids = set(str(x) for x in ((payload or {}).get("ids") or []) if str(x).strip())
     if not ids:
         return JSONResponse({"error": "ids 必填"}, status_code=400)
-    before = len(_items)
-    with _lock:
-        _items[:] = [it for it in _items if it.get("id") not in ids]
-        _save_manifest()
-    return {"ok": True, "deleted": before - len(_items)}
+    with _user_items_lock(username):
+        items = _get_user_items(username)
+        before = len(items)
+        items[:] = [it for it in items if it.get("id") not in ids]
+        deleted = before - len(items)
+    _save_user_manifest(username)
+    return {"ok": True, "deleted": deleted}
