@@ -233,8 +233,15 @@ async def _finish_reply(client, frame: dict, stream_id: str, text: str):
             _log(f"分段补发失败：{e}", "warn")
 
 
-async def _handle_message(client, frame: dict):
-    """aibot_msg_callback：用户消息 → 一轮 Agent 对话 → 回复。"""
+async def _handle_message(frame: dict):
+    """aibot_msg_callback：用户消息 → 一轮 Agent 对话 → 回复。
+
+    注意：SDK 的事件监听器只收到 frame（不含 client），client 从 _STATE 取。
+    """
+    client = _STATE.get("client")
+    if client is None:
+        _log("长连接客户端未就绪，忽略本条消息", "warn")
+        return
     body = frame.get("body") or {}
 
     msgid = body.get("msgid") or ""
@@ -292,8 +299,11 @@ async def _handle_message(client, frame: dict):
         _log(f"回复发送失败：{e}", "error")
 
 
-async def _handle_event(client, frame: dict):
+async def _handle_event(frame: dict):
     """aibot_event_callback：进入会话 → 欢迎语（需在 5 秒内回复）。"""
+    client = _STATE.get("client")
+    if client is None:
+        return
     body = frame.get("body") or {}
     event = body.get("event") or {}
     eventtype = event.get("eventtype") if isinstance(event, dict) else None
@@ -308,7 +318,7 @@ async def _handle_event(client, frame: dict):
         _log(f"未处理事件：{eventtype}", "debug")
 
 
-async def _handle_disconnected_event(client, frame: dict):
+async def _handle_disconnected_event(frame: dict):
     """被新连接踢出：企微同一 BotID 只允许一条长连接。
     官方 SDK 收到此事件不会自动重连，这里明确报错，避免消息静默丢失。"""
     _log(
@@ -318,12 +328,12 @@ async def _handle_disconnected_event(client, frame: dict):
     )
 
 
-async def _handle_any_message(client, frame: dict):
+async def _handle_any_message(frame: dict):
     """兜底：SDK 未单独分发的高类型（如 video）也给出提示，避免用户消息石沉大海。"""
     body = frame.get("body") or {}
     if (body.get("msgtype") or "").strip().lower() in _SDK_MSGTYPES:
         return  # 已由对应的 message.<type> 处理，避免重复回复
-    await _handle_message(client, frame)
+    await _handle_message(frame)
 
 
 def _register(client):
