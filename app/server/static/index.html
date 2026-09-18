@@ -198,8 +198,16 @@
       <input id="loginUser" type="text" placeholder="账号" autocomplete="username" spellcheck="false">
       <input id="loginPass" type="password" placeholder="密码" autocomplete="current-password">
       <input id="loginPass2" type="password" placeholder="确认密码" autocomplete="new-password" class="hidden">
+      <div id="regKeys" class="hidden">
+        <input id="regAgnesKey" type="password" placeholder="Agnes API Key" autocomplete="off" spellcheck="false">
+        <div class="key-hint">获取：<a href="https://platform.agnes-ai.cn/settings/apiKeys" target="_blank" rel="noopener">platform.agnes-ai.cn/settings/apiKeys</a></div>
+        <input id="regSfKey" type="password" placeholder="硅基流动 API Key" autocomplete="off" spellcheck="false">
+        <div class="key-hint">获取：<a href="https://cloud.siliconflow.cn/me/account/ak" target="_blank" rel="noopener">cloud.siliconflow.cn/me/account/ak</a></div>
+      </div>
       <div id="loginError" class="login-error hidden"></div>
+      <div id="loginPending" class="login-pending hidden">注册已提交，请等待管理员审批通过后再登录。</div>
       <button id="btnLogin" type="submit">登 录</button>
+      <div id="loginSwitch" class="login-switch"><a href="#" id="linkRegister">注册新账号</a></div>
     </form>
   </div>
 </div>

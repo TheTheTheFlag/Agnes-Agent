@@ -31,6 +31,7 @@ const State = {
   todoPanelDismissed: false,  // 用户是否手动关闭了面板
   pendingAttachments: [],     // 待发送附件 [{path, name, isImg}]：上传/粘贴后先进附件条，点发送才发出
   selectedKbs: null,          // 本轮勾选参与检索的知识库 id 列表；勾选即范围，[]=不检索任何库（默认）
+  auth: null,                 // 当前登录用户 {username, role}（由 /api/auth/status 填充）
 };
 // 恢复上次勾选的检索范围（首次访问为空 = 不检索任何库）
 State.selectedKbs = loadSelectedKbs();
@@ -143,28 +144,40 @@ async function apiPost(url, body) {
   return data;
 }
 
-/* ==================== 登录 ==================== */
-// 登录遮罩有两种形态：
-//   initialized=true  → 常规登录
-//   initialized=false → 首次使用，设置账号密码（提交到 /api/auth/setup，凭据存 data/auth.json）
-let _loginNeedsSetup = false;
+/* ==================== 登录 / 注册 ==================== */
+// 登录遮罩有三种形态：
+//   login    → 常规登录
+//   setup    → 首次使用，创建管理员账号（/api/auth/setup）
+//   register → 注册普通账号，需管理员审批（/api/auth/register）
+let _loginMode = "login";
 
-function showLogin(initialized) {
-  // 不传参时沿用上一次已知状态（如登出后返回登录页）
-  if (typeof initialized === "boolean") _loginNeedsSetup = !initialized;
-  const setup = _loginNeedsSetup;
-  $("#loginTitle").textContent = setup ? "首次使用" : "Agnes Agent";
+function showLogin(mode) {
+  // 兼容旧调用：showLogin(true)=已初始化→登录；showLogin(false)=未初始化→首次设置
+  if (mode === true) mode = "login";
+  if (mode === false) mode = "setup";
+  if (mode) _loginMode = mode;
+  const setup = _loginMode === "setup";
+  const register = _loginMode === "register";
+  $("#loginTitle").textContent = setup ? "首次使用" : (register ? "注册账号" : "Agnes Agent");
   $("#loginSub").textContent = setup
-    ? "设置面板账号密码（保存在 data/auth.json，PBKDF2 哈希）"
+    ? "设置管理员账号密码（PBKDF2 哈希加密保存）"
+    : register ? "填写账号、密码与两个 API Key，提交后等待管理员审批"
     : "设置面板 · 登录后使用";
-  $("#loginPass2").classList.toggle("hidden", !setup);
+  $("#loginPass2").classList.toggle("hidden", !(setup || register));
+  $("#regKeys").classList.toggle("hidden", !register);
+  $("#loginSwitch").classList.toggle("hidden", setup);
+  $("#linkRegister").textContent = register ? "已有账号？返回登录" : "注册新账号";
   $("#loginUser").placeholder = setup ? "设置账号" : "账号";
-  $("#loginPass").placeholder = setup ? `设置密码（至少 6 位）` : "密码";
-  $("#btnLogin").textContent = setup ? "创建并登录" : "登 录";
+  $("#loginPass").placeholder = (setup || register) ? "密码（至少 6 位）" : "密码";
+  $("#loginPass").setAttribute("autocomplete", (setup || register) ? "new-password" : "current-password");
+  $("#btnLogin").textContent = setup ? "创建并登录" : (register ? "提交注册" : "登 录");
   $("#loginOverlay").classList.remove("hidden");
   $("#loginError").classList.add("hidden");
+  $("#loginPending").classList.add("hidden");
   $("#loginPass").value = "";
   $("#loginPass2").value = "";
+  $("#regAgnesKey").value = "";
+  $("#regSfKey").value = "";
   setTimeout(() => { const u = $("#loginUser"); if (u) u.focus(); }, 60);
 }
 
@@ -172,14 +185,20 @@ function hideLogin() {
   $("#loginOverlay").classList.add("hidden");
 }
 
-// 返回 {authenticated, initialized}；请求失败按"未登录但已初始化"处理，避免误导用户去重设账号
+// 返回 {authenticated, initialized, username, role, status}；请求失败按"未登录但已初始化"处理
 async function fetchAuthStatus() {
   try {
     const r = await fetch("/api/auth/status");
     const d = await r.json().catch(() => ({}));
-    return { authenticated: !!d.authenticated, initialized: d.initialized !== false };
+    return {
+      authenticated: !!d.authenticated,
+      initialized: d.initialized !== false,
+      username: d.username || "",
+      role: d.role || "",
+      status: d.status || "",
+    };
   } catch (e) {
-    return { authenticated: false, initialized: true };
+    return { authenticated: false, initialized: true, username: "", role: "", status: "" };
   }
 }
 
@@ -189,34 +208,65 @@ function bindAuthEvents() {
     const btn = $("#btnLogin");
     btn.disabled = true;
     $("#loginError").classList.add("hidden");
-    const setup = _loginNeedsSetup;
+    $("#loginPending").classList.add("hidden");
+    const setup = _loginMode === "setup";
+    const register = _loginMode === "register";
     const payload = {
       username: $("#loginUser").value.trim(),
       password: $("#loginPass").value,
     };
-    if (setup) payload.confirm = $("#loginPass2").value;
+    if (setup || register) payload.confirm = $("#loginPass2").value;
+    if (register) {
+      payload.agnes_key = $("#regAgnesKey").value.trim();
+      payload.siliconflow_key = $("#regSfKey").value.trim();
+    }
+    const url = setup ? "/api/auth/setup" : (register ? "/api/auth/register" : "/api/auth/login");
     try {
-      const r = await fetch(setup ? "/api/auth/setup" : "/api/auth/login", {
+      const r = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
       const d = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(d.error || (setup ? "设置失败" : "登录失败"));
-      _loginNeedsSetup = false;
-      if (setup) toast("账号已设置，凭据保存在 data/auth.json", "success");
+      if (register && r.ok) {
+        // 注册成功 → 展示待审批提示，切回登录形态
+        _loginMode = "login";
+        $("#loginPending").classList.remove("hidden");
+        $("#loginSwitch").classList.remove("hidden");
+        $("#linkRegister").textContent = "注册新账号";
+        $("#btnLogin").textContent = "登 录";
+        $("#regKeys").classList.add("hidden");
+        $("#loginPass").value = "";
+        $("#loginPass2").value = "";
+        $("#regAgnesKey").value = "";
+        $("#regSfKey").value = "";
+        toast("注册已提交，等待管理员审批", "success");
+        return;
+      }
+      if (!r.ok) {
+        if (d.status === "pending") throw new Error("账号待管理员审批，通过后即可登录");
+        if (d.status === "rejected") throw new Error("注册申请已被拒绝");
+        throw new Error(d.error || (setup ? "设置失败" : (register ? "注册失败" : "登录失败")));
+      }
+      _loginMode = "login";
+      if (setup) toast("管理员账号已创建", "success");
       hideLogin();
       init();   // 登录/设置成功 → 初始化主界面
     } catch (err) {
-      $("#loginError").textContent = err.message || "登录失败";
+      $("#loginError").textContent = err.message || "操作失败";
       $("#loginError").classList.remove("hidden");
     } finally {
       btn.disabled = false;
     }
   });
+  $("#linkRegister").addEventListener("click", (e) => {
+    e.preventDefault();
+    showLogin(_loginMode === "register" ? "login" : "register");
+  });
   $("#btnLogout").addEventListener("click", async () => {
     try { await fetch("/api/auth/logout", { method: "POST" }); } catch (e) { /* 忽略 */ }
-    showLogin(true);
+    const st = await fetchAuthStatus();
+    showLogin(st.initialized ? "login" : "setup");
   });
 }
 
@@ -2931,6 +2981,51 @@ async function renderGraphTab(el) {
   await render(false);
 }
 
+/* ---- 用户管理（仅管理员可见）---- */
+async function renderUsersTab(el) {
+  el.innerHTML = `<div class="tab-title">用户管理</div>
+    <div class="tab-note">注册用户需审批通过后才能登录；新注册账号初始为「待审批」。</div>
+    <div id="usersList" class="users-list">加载中…</div>`;
+
+  const reload = async () => {
+    const box = $("#usersList", el);
+    if (!box) return;
+    let data;
+    try { data = await apiGet("/api/admin/users"); }
+    catch (err) { box.textContent = "加载失败：" + err.message; return; }
+    const users = (data && data.users) || [];
+    if (!users.length) { box.textContent = "暂无用户"; return; }
+    const badge = { active: "✅", pending: "⏳", rejected: "⛔", disabled: "🚫" };
+    box.innerHTML = users.map((u) => {
+      const actions = u.status === "pending"
+        ? `<button class="btn-ghost" data-approve="${u.username}">通过</button>
+           <button class="btn-ghost" data-reject="${u.username}">拒绝</button>`
+        : "";
+      return `<div class="user-row">
+        <div class="user-main">
+          <span class="user-name">${badge[u.status] || "•"} ${u.username}</span>
+          <span class="user-meta">${u.role} · ${u.status}${u.note ? " · " + u.note : ""}</span>
+        </div>
+        <div class="user-actions">${actions}</div>
+      </div>`;
+    }).join("");
+
+    $$("[data-approve]", box).forEach((b) => b.addEventListener("click", async () => {
+      b.disabled = true;
+      try { await apiPost(`/api/admin/users/${encodeURIComponent(b.dataset.approve)}/approve`, {}); toast("已通过", "success"); reload(); }
+      catch (err) { toast("操作失败：" + err.message, "error"); b.disabled = false; }
+    }));
+    $$("[data-reject]", box).forEach((b) => b.addEventListener("click", async () => {
+      if (!confirm(`确定拒绝用户「${b.dataset.reject}」的注册申请？`)) return;
+      b.disabled = true;
+      try { await apiPost(`/api/admin/users/${encodeURIComponent(b.dataset.reject)}/reject`, {}); toast("已拒绝", "success"); reload(); }
+      catch (err) { toast("操作失败：" + err.message, "error"); b.disabled = false; }
+    }));
+  };
+
+  await reload();
+}
+
 /* ---- 抽屉 tab 注册表 ---- */
 const DRAWER_LOADERS = {
   state: renderStateTab,
@@ -2945,6 +3040,7 @@ const DRAWER_LOADERS = {
   sched: renderSchedTab,
   models: renderModelsTab,
   deliv: renderDelivTab,
+  users: renderUsersTab,
 };
 
 const DRAWER_TABS = [
@@ -2961,16 +3057,19 @@ const DRAWER_TABS = [
   { id: "skills", label: "技能", icon: "✨" },
   { id: "sched", label: "定时任务", icon: "🗓️" },
   { id: "models", label: "模型", icon: "⚙️" },
+  { id: "users", label: "用户管理", icon: "👥", admin: true },
   // 交付物 tab 已移到主页顶栏（#btnDeliverables），点击时仍通过 activateTab("deliv") 渲染
 ];
 
 function initDrawer() {
+  const isAdmin = State.auth && State.auth.role === "admin";
+  const tabs = DRAWER_TABS.filter((t) => !t.admin || isAdmin);
   drawerTabsEl.innerHTML = `
     <div class="drawer-tabs-header">
       <button class="drawer-tab drawer-close-tab" id="btnDrawerClose" title="关闭设置"><span class="drawer-tab-icon">✕</span></button>
       <div class="drawer-tabs-title">设置</div>
     </div>` +
-    DRAWER_TABS.map((t) =>
+    tabs.map((t) =>
       `<button class="drawer-tab" data-id="${t.id}"><span class="drawer-tab-icon">${t.icon}</span><span class="drawer-tab-label">${t.label}</span></button>`).join("") + `
     <div style="flex:1"></div>`;
   $$(".drawer-tab", drawerTabsEl).forEach((btn) => {
@@ -3103,9 +3202,10 @@ async function init() {
   // 登录校验：未登录先显示登录/首次设置界面，成功后再走主流程
   const auth_ = await fetchAuthStatus();
   if (!auth_.authenticated) {
-    showLogin(auth_.initialized);   // 未初始化 → 引导用户设置账号密码
+    showLogin(auth_.initialized ? "login" : "setup");   // 未初始化 → 引导用户创建管理员
     return;
   }
+  State.auth = { username: auth_.username, role: auth_.role };
 
   // 主题
   applyTheme();

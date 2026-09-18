@@ -160,9 +160,14 @@ app.include_router(_api_kb.router)
 app.include_router(_api_image.router)
 app.include_router(_api_video.router)
 
-# 登录校验：登录接口 + 全 API 保护中间件
-from app.server.auth import router as _auth_router, install_auth_middleware
+# 登录校验：登录/注册接口 + 管理员审批 + 全 API 保护中间件
+from app.server.auth import (
+    router as _auth_router,
+    admin_router as _admin_router,
+    install_auth_middleware,
+)
 app.include_router(_auth_router)
+app.include_router(_admin_router)
 install_auth_middleware(app)
 
 _SCHED_DB = DB_PATH  # 定时任务表复用 memory.db

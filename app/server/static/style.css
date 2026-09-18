@@ -1783,6 +1783,27 @@ input, textarea { font-family: inherit; }
   border: 1px solid rgba(255, 107, 107, 0.3);
   border-radius: 8px; padding: 7px 10px;
 }
+.login-pending {
+  font-size: 12.5px; color: #ffc069;
+  background: rgba(255, 192, 105, 0.1);
+  border: 1px solid rgba(255, 192, 105, 0.3);
+  border-radius: 8px; padding: 7px 10px;
+}
+.login-switch { font-size: 12.5px; margin-top: 2px; }
+.login-switch a { color: var(--accent); text-decoration: none; }
+.login-switch a:hover { text-decoration: underline; }
+.key-hint { font-size: 11px; color: var(--text-faint); text-align: left; margin: -4px 2px 2px; }
+.key-hint a { color: var(--accent); text-decoration: none; }
+.key-hint a:hover { text-decoration: underline; }
+.users-list { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.user-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-elev);
+}
+.user-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.user-name { font-size: 13px; color: var(--text); }
+.user-meta { font-size: 11px; color: var(--text-faint); }
+.user-actions { display: flex; gap: 6px; flex-shrink: 0; }
 
 /* ==================== 工具轮"思考过程"段 ==================== */
 /* 模型在调用工具前输出的过程性文本，由前端折叠为灰色小段（默认收起，点击展开） */
