@@ -482,5 +482,77 @@ class Neo4jWorkspaceTest(unittest.TestCase):
         self.assertNotIn("`", ws)
 
 
+class FileToolsPathScopeTest(unittest.TestCase):
+    """文件工具目录边界：普通用户锁自己的工作区；管理员不限制目录。"""
+
+    def setUp(self):
+        from app.server import accounts
+        import tempfile
+        self._tmp = tempfile.mkdtemp()
+        self._orig_acc = accounts.ACCOUNTS_DB_PATH
+        self._orig_legacy = accounts.LEGACY_AUTH_FILE
+        self._orig_users_dir = userctx.USERS_DIR
+        accounts.ACCOUNTS_DB_PATH = os.path.join(self._tmp, "accounts.db")
+        accounts.LEGACY_AUTH_FILE = os.path.join(self._tmp, "nonexistent_auth.json")
+        userctx.USERS_DIR = os.path.join(self._tmp, "users")
+        accounts.init_db()
+
+    def tearDown(self):
+        from app.server import accounts
+        accounts.ACCOUNTS_DB_PATH = self._orig_acc
+        accounts.LEGACY_AUTH_FILE = self._orig_legacy
+        userctx.USERS_DIR = self._orig_users_dir
+        userctx._ensured_users.clear()
+
+    def test_non_admin_confined_to_own_workspace(self):
+        from app.server import accounts
+        from app.tools import file_ops
+        accounts.create_user("u1", "pw123456", "a", "s", role="user", status="active")
+        tok = userctx.set_current_user("u1")
+        try:
+            ok = file_ops.write_file.func("deliverables/note.txt", "hi")
+            self.assertTrue(json_loads_ok(ok))
+            # 越界写被拒绝（ValueError 由工具调用层捕获为错误消息）
+            with self.assertRaises(ValueError):
+                file_ops.write_file.func("../escape.txt", "x")
+            self.assertFalse(os.path.isfile(os.path.join(self._tmp, "escape.txt")))
+        finally:
+            userctx.reset_current_user(tok)
+
+    def test_admin_unrestricted_paths(self):
+        from app.server import accounts
+        from app.tools import file_ops
+        import json as _json
+        accounts.create_user("Mirror", "pw123456", "a", "s", role="admin", status="active")
+        tok = userctx.set_current_user("Mirror")
+        outside = os.path.join(self._tmp, "outside_dir")
+        os.makedirs(outside, exist_ok=True)
+        try:
+            # 管理员基准 = 项目根；绝对路径不受限
+            self.assertEqual(file_ops._root(), os.path.abspath(file_ops.BASE_DIR))
+            target = os.path.join(outside, "x.txt")
+            res = file_ops.write_file.func(target, "admin")
+            self.assertEqual(_json.loads(res)["path"], target)
+            self.assertTrue(os.path.isfile(target))
+            # 越界路径不再抛错
+            p = file_ops._resolve_path(os.path.join(self._tmp, "anywhere"))
+            self.assertEqual(p, os.path.join(self._tmp, "anywhere"))
+            # 核心保护路径仍然拒绝（与 execute_command 一致）
+            with self.assertRaises(ValueError) as ctx:
+                file_ops._assert_writable(".env")
+            self.assertIn("受保护", str(ctx.exception))
+        finally:
+            userctx.reset_current_user(tok)
+
+
+def json_loads_ok(text: str) -> bool:
+    import json
+    try:
+        d = json.loads(text)
+    except Exception:
+        return False
+    return bool(d.get("ok"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2,7 +2,11 @@
 file_ops.py — Python 包装的文件/目录能力工具集。
 
 替代直接执行 shell 命令（system_command 在跨平台适配差）。
-所有工具默认限制在项目根目录（BASE_DIR）内，防止越权读写。
+目录边界（多用户）：
+  - 普通用户：限制在自己的用户工作区 data/users/<用户名>/ 内，越界读写一律拒绝；
+  - 管理员：不限制目录，可操作整台电脑（相对路径以项目根解析，绝对路径任意）。
+核心文件保护（path_guard）对所有人保留：app/server/static、data/、.env、.model_config、
+.git、memory.db、checkpoints.db、pyproject.toml、uv.lock 等不可经文件工具改写。
 """
 import os
 import glob as _glob
@@ -10,18 +14,35 @@ import json
 from typing import List, Optional
 from langchain_core.tools import tool
 
-from app.config import WORKSPACE_DIR
+from app.config import BASE_DIR, WORKSPACE_DIR
+
+
+def _is_admin_user() -> bool:
+    """当前上下文用户是否为管理员；无法查证时按管理员放行（与工具下发判定一致）。"""
+    try:
+        from app.userctx import current_user
+        from app.tools import _role_is_admin
+        return bool(_role_is_admin(current_user()))
+    except Exception:
+        return True
 
 
 def _root() -> str:
-    """当前用户工作区根目录（多用户隔离；管理员亦可限制在自己的工作区内）。"""
+    """路径解析基准目录：管理员=项目根；普通用户=自己的用户工作区。"""
+    if _is_admin_user():
+        return os.path.abspath(BASE_DIR)
     return os.path.abspath(str(WORKSPACE_DIR))
 
 
 def _resolve_path(path: str) -> str:
-    """把相对/绝对路径解析到当前用户工作区内；越界则抛错。"""
+    """把相对/绝对路径解析为可操作的绝对路径。
+
+    普通用户解析后必须仍处于自己的用户工作区内；管理员不限制目录。
+    """
     root = _root()
-    p = os.path.abspath(os.path.join(root, path))
+    p = os.path.abspath(os.path.join(root, path or ""))
+    if _is_admin_user():
+        return p
     if p != root and not p.startswith(root + os.sep):
         raise ValueError(f"路径越界（仅允许用户工作区内）: {path}")
     return p
@@ -36,9 +57,9 @@ def _assert_writable(path: str):
 
 @tool
 def ls(directory: str = ".", recursive: bool = False) -> str:
-    """列出目录中的文件与子目录（默认项目根目录）。
+    """列出目录中的文件与子目录（默认项目根；普通用户基准为其工作区）。
     参数:
-      directory: 相对项目根的目录，如 '.' 或 'app/graph'（越界会被拒绝）
+      directory: 相对基准的目录，如 '.' 或 'app/graph'（普通用户越界会被拒绝）
       recursive: 是否递归列出
     返回: JSON 数组 [{name, path, size, type}]"""
     d = _resolve_path(directory)
@@ -64,7 +85,7 @@ def ls(directory: str = ".", recursive: bool = False) -> str:
 def read_file(path: str, offset: int = 0, limit: int = 2000) -> str:
     """读取文本文件内容。
     参数:
-      path: 相对项目根的路径
+      path: 相对基准的路径（普通用户基准为其工作区）
       offset: 起始行号（0 起）
       limit: 最多返回行数
     返回: 文件内容（含行号），支持分页"""
@@ -86,7 +107,7 @@ def read_file(path: str, offset: int = 0, limit: int = 2000) -> str:
 def write_file(path: str, content: str) -> str:
     """创建新文件或覆盖已有文件。
     参数:
-      path: 相对项目根的路径（父目录不存在会自动创建；核心路径被保护）
+      path: 相对基准的路径（父目录不存在会自动创建；核心路径被保护）
       content: 文件内容（UTF-8）
     返回: 写入结果（文件路径 + 大小）"""
     _assert_writable(path)
@@ -104,7 +125,7 @@ def write_file(path: str, content: str) -> str:
 def edit_file(path: str, old_string: str, new_string: str) -> str:
     """在文件中执行精确的字符串替换（第一次出现处）。
     参数:
-      path: 相对项目根的路径
+      path: 相对基准的路径
       old_string: 要替换的原文（必须精确匹配，唯一）
       new_string: 替换后的内容
     返回: 替换结果"""
@@ -132,7 +153,7 @@ def edit_file(path: str, old_string: str, new_string: str) -> str:
 def delete_file(path: str) -> str:
     """递归删除文件或目录。
     参数:
-      path: 相对项目根的路径（文件或目录；核心路径被保护）
+      path: 相对基准的路径（文件或目录；核心路径被保护）
     返回: 删除结果"""
     _assert_writable(path)
     p = _resolve_path(path)
@@ -151,9 +172,9 @@ def delete_file(path: str) -> str:
 
 @tool
 def glob_files(pattern: str) -> str:
-    """按 glob 模式查找文件（如 '**/*.py'、'data/*.db'）。
+    """按 glob 模式查找文件（如 '**/*.py'、'/tmp/*.log'）。
     参数:
-      pattern: glob 模式，相对项目根
+      pattern: glob 模式，相对基准（管理员可为绝对路径）
     返回: 匹配的文件路径列表"""
     full = os.path.join(_root(), pattern)
     matches = [os.path.relpath(p, _root()).replace('\\', '/') for p in _glob.glob(full, recursive=True) if os.path.isfile(p)]
@@ -165,7 +186,7 @@ def grep_files(pattern: str, path: str = ".", max_results: int = 50) -> str:
     """在文件中搜索内容（正则）。
     参数:
       pattern: 正则表达式
-      path: 相对项目根的目录
+      path: 相对基准的目录
       max_results: 最大结果数
     返回: [{file, line_no, text}]"""
     import re
