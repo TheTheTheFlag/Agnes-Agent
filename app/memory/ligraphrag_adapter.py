@@ -22,6 +22,7 @@ import io
 import json
 import logging
 import os
+import re
 import threading
 import time
 from typing import Any, List, Optional
@@ -388,6 +389,23 @@ def _cache_key(ns: str) -> str:
     except Exception:
         return str(ns)
 
+
+def _neo4j_workspace(ns: str) -> str:
+    """Neo4j 专属 workspace 标签（并入用户名，实现图谱按用户隔离）。
+
+    Neo4j 是跨用户共享的外部图库（Community 版不支持多数据库），而 File 系存储
+    （JsonKV / Faiss / NanoVector）靠 per-user working_dir 已天然隔离。LightRAG 的
+    ``workspace`` 参数对 File 系存储只是 working_dir 下的子目录（保持纯命名空间
+    即可，不改动既有数据布局），但对 Neo4jGraphStorage 直接作为节点 label——
+    所有用户若都用 ``__global__`` 会读写同一张图。因此 Neo4j 侧并入用户名。
+    """
+    from app.userctx import current_user
+    ws = f"{current_user()}_{ns}"
+    # 仅用于 Neo4j 节点 label（不参与文件路径）：保留字母/数字/下划线/中文，
+    # 其余字符（空格、反引号、分隔符等）归一为下划线，避免同名不同用户碰撞。
+    ws = re.sub(r"[^\w\u4e00-\u9fff]+", "_", ws, flags=re.UNICODE) or "_"
+    return ws
+
 # 图谱命名空间：
 #   - 会话对话图谱默认全局共享一张图：所有会话 thread_id 归一化到 ``__global__``，
 #     每轮对话自动喂进同一张图，跨会话可共享知识。
@@ -701,7 +719,7 @@ def build_lightrag_instance(thread_id: str, ns: Optional[str] = None) -> Any:
     - ns 缺省：按 _graph_ns 归一化会话命名空间（默认全局共享 __global__，
       GRAPH_NAMESPACE=per_thread 时按会话隔离）。
     - ns 显式传入：直接用该命名空间建独立实例（用户创建的知识库用 kb_id）。
-    缓存键 / work_dir / Neo4j workspace 均以实际命名空间为准。
+    缓存键 / work_dir 均以实际命名空间为准；Neo4j workspace 额外并入用户名（图级隔离）。
     """
     ns = (ns or "").strip() or _graph_ns(thread_id)
     _ck = _cache_key(ns)
@@ -782,6 +800,7 @@ def build_lightrag_instance(thread_id: str, ns: Optional[str] = None) -> Any:
         kwargs["addon_params"] = {"entity_types_guidance": guidance}
         # 图谱存储后端：默认 NetworkX(本地 JSON/GraphML)；GRAPH_STORAGE=neo4j 时走项目内 Neo4j
         graph_backend = os.getenv("GRAPH_STORAGE", "networkx").strip().lower()
+        _saved_neo4j_workspace = os.environ.get("NEO4J_WORKSPACE")  # type: Optional[str]
         if graph_backend == "neo4j":
             missing = [k for k in ("NEO4J_URI", "NEO4J_USERNAME", "NEO4J_PASSWORD") if not os.getenv(k)]
             if missing:
@@ -790,6 +809,10 @@ def build_lightrag_instance(thread_id: str, ns: Optional[str] = None) -> Any:
                 )
             else:
                 kwargs["graph_storage"] = "Neo4JStorage"
+                # Neo4j 为共享外部图库：将 workspace 标签并入用户名做图级隔离。
+                # 构造全程在 _lock 临界区内，改环境变量无并发竞争；其余存储只用
+                # 纯命名空间（working_dir 已按用户隔离），故不改动 kwargs["workspace"]。
+                os.environ["NEO4J_WORKSPACE"] = _neo4j_workspace(ns)
         # 向量存储后端：默认 faiss（未安装则回退 nano）；VECTOR_STORAGE=faiss|nano 可显式控制。
         # 注意：切换后端后旧向量索引不迁移，需在知识库页对文档执行"重建"重新嵌入。
         vec_backend = os.getenv("VECTOR_STORAGE", "").strip().lower() or (
@@ -799,7 +822,14 @@ def build_lightrag_instance(thread_id: str, ns: Optional[str] = None) -> Any:
                 kwargs["vector_storage"] = "FaissVectorDBStorage"
             else:
                 logging.getLogger(__name__).warning("VECTOR_STORAGE=faiss 但未安装 faiss-cpu，回退 NanoVectorDB")
-        inst = _lh.LightRAG(**kwargs)
+        try:
+            inst = _lh.LightRAG(**kwargs)
+        finally:
+            # 构造完成后恢复 NEO4J_WORKSPACE，避免影响其他用户/其他线程的实例构造
+            if _saved_neo4j_workspace is None:
+                os.environ.pop("NEO4J_WORKSPACE", None)
+            else:
+                os.environ["NEO4J_WORKSPACE"] = _saved_neo4j_workspace
         _instances[_ck] = inst
         return inst
 

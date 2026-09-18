@@ -355,5 +355,93 @@ class PerUserStateTest(unittest.TestCase):
         self.assertNotEqual(data_bob["current_thread_id"], "alice-tid")
 
 
+class ToolsApiFilterTest(unittest.TestCase):
+    """/api/tools 按当前用户返回可见工具：非管理员不含 execute_command / tavily_search。"""
+
+    def setUp(self):
+        from app.server import accounts
+        import tempfile
+        self._tmp = tempfile.mkdtemp()
+        self._orig_acc = accounts.ACCOUNTS_DB_PATH
+        self._orig_legacy = accounts.LEGACY_AUTH_FILE
+        accounts.ACCOUNTS_DB_PATH = os.path.join(self._tmp, "accounts.db")
+        accounts.LEGACY_AUTH_FILE = os.path.join(self._tmp, "nonexistent_auth.json")
+        accounts.init_db()
+
+    def tearDown(self):
+        from app.server import accounts
+        accounts.ACCOUNTS_DB_PATH = self._orig_acc
+        accounts.LEGACY_AUTH_FILE = self._orig_legacy
+
+    def test_non_admin_tools_api_excludes_admin_tools(self):
+        import asyncio
+        from app.server import accounts
+        from app.server.api import tools as tools_api
+        accounts.create_user("t1", "pw123456", "agnes-1", "sf-1",
+                             role="user", status="active")
+        tok = userctx.set_current_user("t1")
+        try:
+            res = asyncio.run(tools_api.get_tools())
+        finally:
+            userctx.reset_current_user(tok)
+        names = {t["name"] for t in res["tools"]}
+        self.assertIn("read_file", names)
+        self.assertNotIn("execute_command", names)
+        self.assertNotIn("tavily_search", names)
+
+    def test_admin_tools_api_includes_all(self):
+        import asyncio
+        from app.server import accounts
+        from app.server.api import tools as tools_api
+        accounts.create_user("Mirror", "pw123456", "agnes-admin", "sf-admin",
+                             role="admin", status="active")
+        tok = userctx.set_current_user("Mirror")
+        try:
+            res = asyncio.run(tools_api.get_tools())
+        finally:
+            userctx.reset_current_user(tok)
+        names = {t["name"] for t in res["tools"]}
+        self.assertIn("execute_command", names)
+        self.assertIn("tavily_search", names)
+
+
+class Neo4jWorkspaceTest(unittest.TestCase):
+    """Neo4j 图谱按用户隔离：workspace 标签并入用户名，且净化后无非法字符。"""
+
+    def tearDown(self):
+        userctx._ensured_users.clear()
+
+    def test_workspace_includes_current_user(self):
+        from app.memory import ligraphrag_adapter as L
+        tok = userctx.set_current_user("Alice")
+        try:
+            self.assertEqual(L._neo4j_workspace("__global__"), "Alice___global__")
+        finally:
+            userctx.reset_current_user(tok)
+
+    def test_workspace_isolated_between_users(self):
+        from app.memory import ligraphrag_adapter as L
+        tok = userctx.set_current_user("Alice")
+        ws_alice = L._neo4j_workspace("__global__")
+        userctx.reset_current_user(tok)
+        tok = userctx.set_current_user("Bob")
+        try:
+            ws_bob = L._neo4j_workspace("__global__")
+        finally:
+            userctx.reset_current_user(tok)
+        self.assertNotEqual(ws_alice, ws_bob)
+
+    def test_workspace_sanitized_and_unique_for_cjk_user(self):
+        from app.memory import ligraphrag_adapter as L
+        tok = userctx.set_current_user("张三")
+        try:
+            ws = L._neo4j_workspace("kb-一二三")
+        finally:
+            userctx.reset_current_user(tok)
+        self.assertNotIn("/", ws)
+        self.assertNotIn("\\", ws)
+        self.assertNotIn("`", ws)
+
+
 if __name__ == "__main__":
     unittest.main()
