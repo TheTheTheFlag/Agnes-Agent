@@ -199,7 +199,9 @@ data/users/<username>/
 └── .approval_mode         # 审批模式：per_ask / session_allow / always_allow
 ```
 
-- **Key 策略**：普通用户仅使用自己提交的 Agnes / 硅基流动 Key（embedding、rerank、对话推理都走本人 Key，加密存储、不出现在前端）；管理员全局 Key + 所有 active 用户的 Key 组成轮询池。`/api/models` 对非管理员一律脱敏为 `****xxxx`。
+- **Key 策略**：普通用户仅使用自己提交的 Agnes / 硅基流动 Key（embedding、rerank、对话推理都走本人 Key）；Key 随 `data/accounts.db` 落盘——`users` 表 `agnes_key` / `siliconflow_key` 两个 TEXT 字段按注册/设置时写入原样存储（库文件已 `.gitignore`，接口对非本人/非管理员一律脱敏为 `****xxxx`，前端永不显示）；管理员（Mirror）使用全局配置 `data/.model_config` 中的 LLM / embedding / rerank Key，不与普通用户的 Key 混用。
+
+> Key 存储速查：**每用户** Key → `data/accounts.db`（`users` 表 `agnes_key`/`siliconflow_key`）；**全局** Key（LLM/embedding/rerank/tavily）→ `data/.model_config`（设置页管理，无 `.env` 文件）。
 - **权限边界**：工具层对非管理员隐藏 `execute_command`（命令执行）与 `tavily_search`（联网搜索）；`/api/git/*`、`/api/scheduler`、自动 git 快照仅管理员可用；非管理员每次对话写入自己 `data/users/` 下的工作区，不会产生仓库级 commit。
 - **审批模式**：每次询问 / 本次会话允许 / 永久允许，按用户单独记忆（`.approval_mode`），互不继承。
 - **迁移**：升级自旧版（单用户）时，服务启动会把仓库级 `data/`、`lightrag_storage/` 等旧数据自动迁移到 `data/users/Mirror/`，管理员即旧版用户，无缝衔接。
@@ -644,25 +646,25 @@ WECHAT_BOT_SECRET=你的长连接Secret
    → 自行复算的 `doc_id` 与 LightRAG 落盘键对不上：LightRAG 在 `compute_mdhash_id` 前会先 `sanitize_text_for_encoding`（strip / unescape / 去控制字符），而适配器直接用原文 `md5`，尾部换行差一点就全错。解决：`_doc_id_for_text` 改为对**同一份 sanitize 后文本**取 hash，续跑与状态判断才可靠。详见[实战案例](#-实战案例22-万条医疗问答全量入库本地嵌入--服务器替换)。
 
 10. **坑（最凶险）：替换大库后，首次检索直接把 8GB 服务器打 OOM。**
-   → 不是向量本身，而是 LightRAG 的 `FaissVectorDBStorage._load_faiss_index` 在加载时对**每一条**记录执行 `index.reconstruct(fid).tolist()` 塞进 `_id_to_meta["__vector__"]`：22 万条 × 1024 维 ≈ 7GB 常驻。解决：monkeypatch 掉预重建（`_patch_faiss_lazy_vectors`），改为完全不预载向量，峰值 6.3GB → **2.7GB**；主检索路径 `chunks_vdb.query` 只读 `content`，不受影响。
+      → 不是向量本身，而是 LightRAG 的 `FaissVectorDBStorage._load_faiss_index` 在加载时对**每一条**记录执行 `index.reconstruct(fid).tolist()` 塞进 `_id_to_meta["__vector__"]`：22 万条 × 1024 维 ≈ 7GB 常驻。解决：monkeypatch 掉预重建（`_patch_faiss_lazy_vectors`），改为完全不预载向量，峰值 6.3GB → **2.7GB**；主检索路径 `chunks_vdb.query` 只读 `content`，不受影响。
 
 11. **坑：纯向量库检索永远返回 `[no-context]`。**
-   → LightRAG 的 `local/global/hybrid` 只走图谱（实体/关系），对 `target=vector`（无实体）的库必然空命中。解决：`_auto_query_mode` 在检测到实体向量库为空时，把 `local/global/hybrid` 自动降级为 `naive`（含 `naive` 的 `mix` 不动）；有图谱的 `__global__` 对话图谱仍走 `hybrid`。
+      → LightRAG 的 `local/global/hybrid` 只走图谱（实体/关系），对 `target=vector`（无实体）的库必然空命中。解决：`_auto_query_mode` 在检测到实体向量库为空时，把 `local/global/hybrid` 自动降级为 `naive`（含 `naive` 的 `mix` 不动）；有图谱的 `__global__` 对话图谱仍走 `hybrid`。
 
 12. **坑：前端明明只勾了「医疗知识库」，检索却混进全局对话图谱的无关实体。**
-   → `graph_rag_tool._namespaces()` 原先**无条件**把会话图谱 `__global__` 放在第一位，勾选的知识库只是"追加"——所以取消勾选全局完全无效，L6 注入里会混入 `GraphRAG/RAG/Gemini` 等对话记忆实体。且旧前端 `kbCheckedSet/kbSelectionForSend` 把空列表也回退成 `["__global__"]`，导致"一个都不勾"根本做不到（旧 `kbCheckedSet` 里空 `[]` 会被判定为默认值，把全局又勾回去）。解决：**勾选即范围**——`_namespaces` 以勾选列表为唯一范围（为空则一个都不查），`__global__` 仅作别名解析为会话命名空间；前端默认一个都不勾，并用 `localStorage` 记住上次选择（`loadSelectedKbs/saveSelectedKbs`）。
+      → `graph_rag_tool._namespaces()` 原先**无条件**把会话图谱 `__global__` 放在第一位，勾选的知识库只是"追加"——所以取消勾选全局完全无效，L6 注入里会混入 `GraphRAG/RAG/Gemini` 等对话记忆实体。且旧前端 `kbCheckedSet/kbSelectionForSend` 把空列表也回退成 `["__global__"]`，导致"一个都不勾"根本做不到（旧 `kbCheckedSet` 里空 `[]` 会被判定为默认值，把全局又勾回去）。解决：**勾选即范围**——`_namespaces` 以勾选列表为唯一范围（为空则一个都不查），`__global__` 仅作别名解析为会话命名空间；前端默认一个都不勾，并用 `localStorage` 记住上次选择（`loadSelectedKbs/saveSelectedKbs`）。
 
 13. **坑：一个医疗问题仍会召回 `RAG/GraphRAG/XDR` 等完全不相关的实体。**
-   → 不是勾选的问题，是**相关性阈值**问题：LightRAG 的实体/关系/分块向量库默认 `cosine_better_than_threshold=0.2`，而 bge-m3 对**任意**中文文本的基线相似度就有 0.34+；对话图 `__global__` 又是跨领域大杂烩（agent 自述 RAG/KAG/XDR 的内容也被 `_feed_turn_async` 喂了进去），于是低相似度实体照样被召进 L6 注入与「知识检索」面板（实测：相关医学实体 0.45~0.57，无关的 XDR 0.36 / Privilege Escalation 0.34 / Gynecological 0.40）。解决：`_apply_graph_relevance_threshold` 把**实体/关系**向量库阈值单独调到 **0.5**（`GRAPH_COSINE_THRESHOLD` 可覆盖），**分块**向量库保持 0.2 以免伤害向量库召回。
+      → 不是勾选的问题，是**相关性阈值**问题：LightRAG 的实体/关系/分块向量库默认 `cosine_better_than_threshold=0.2`，而 bge-m3 对**任意**中文文本的基线相似度就有 0.34+；对话图 `__global__` 又是跨领域大杂烩（agent 自述 RAG/KAG/XDR 的内容也被 `_feed_turn_async` 喂了进去），于是低相似度实体照样被召进 L6 注入与「知识检索」面板（实测：相关医学实体 0.45~0.57，无关的 XDR 0.36 / Privilege Escalation 0.34 / Gynecological 0.40）。解决：`_apply_graph_relevance_threshold` 把**实体/关系**向量库阈值单独调到 **0.5**（`GRAPH_COSINE_THRESHOLD` 可覆盖），**分块**向量库保持 0.2 以免伤害向量库召回。
 
 14. **坑：flash 参考图参数一度被误判为「只能传公开 URL」。**
-   → 早期用**纯色小图**探测（256×192，base64 仅 792 字符），`first_frame` / `images` 的 Data URI 与裸 Base64 全部 400 `载体必须是公开 http(s) URL 或合法 Base64`，于是错判为"必须公网 URL"，甚至为此写了 `/pub/video-ref` 公开挂载。换成正常尺寸照片后再测：Data URI 与裸 Base64 **全部 200**。根因是上游对**过小/可疑载体**的校验，不是格式限制。解决：参考图统一内联 Data URI，公开挂载只留作兜底。
+      → 早期用**纯色小图**探测（256×192，base64 仅 792 字符），`first_frame` / `images` 的 Data URI 与裸 Base64 全部 400 `载体必须是公开 http(s) URL 或合法 Base64`，于是错判为"必须公网 URL"，甚至为此写了 `/pub/video-ref` 公开挂载。换成正常尺寸照片后再测：Data URI 与裸 Base64 **全部 200**。根因是上游对**过小/可疑载体**的校验，不是格式限制。解决：参考图统一内联 Data URI，公开挂载只留作兜底。
 
 15. **坑：把参考图挂到自家公网 `http://god.makeup:8081/pub/video-ref/...`，上游永远 400 `素材 URL 无法下载或不是支持的媒体格式`。**
-   → 本机与公网 curl 该地址都是 200 `image/png`，但 Agnes 服务端抓不到（端口不可达或被拦）。结论：**别依赖自家域名给上游取图**，内联 Data URI 才稳。
+      → 本机与公网 curl 该地址都是 200 `image/png`，但 Agnes 服务端抓不到（端口不可达或被拦）。结论：**别依赖自家域名给上游取图**，内联 Data URI 才稳。
 
 16. **坑：图片删除在服务器上 404（`DELETE /api/image`）。**
-   → 本地正常、服务器上被反向代理/中间件对 `DELETE` 的处理差异吞掉。解决：改为 `POST /api/image/delete`，语义不变但后端到后端一路畅通。
+      → 本地正常、服务器上被反向代理/中间件对 `DELETE` 的处理差异吞掉。解决：改为 `POST /api/image/delete`，语义不变但后端到后端一路畅通。
 
 ---
 
@@ -709,38 +711,98 @@ WECHAT_BOT_SECRET=你的长连接Secret
 ```
 Agnes-Agent/
 ├── app/
-│   ├── main.py                    # 入口 后台服务（端口自动顺延 + 启动兜底）
-│   ├── service.py                 # 入口 服务模式：HTTP 常驻 + 热重载
-│   ├── config.py                  # 路径配置中心（统一指向 data/）
-│   ├── llm/                       # LLM 层：多 key 轮换 + 退避重试（RotatingKeyChatOpenAI）
-│   ├── graph/                     # 上下文层：builder(节点/路由) + state + utils + _agent_prompt + 主模板
-│   ├── memory/                    # 记忆层：memory_manager(分层存储/注入) + memory_engine(固化/遗忘)
-│   │                              #   + compaction(历史压缩) + ligraphrag_adapter(LightRAG 桥)
-│   │                              #   + graph_rag_tool(L6 图谱工具/喂养) + entity_normalizer(术语归一化)
-│   ├── planning/                  # 规划层：dag_planner/dag_executor/dag_summarizer
-│   │                              #   + dag_core(DAG 计算) + dag_storage(三表+checkpoint) + react_loop
-│   ├── tools/                     # 工具层：文件/命令/记忆/搜索/图谱/技能/规划触发（集中注册）
-│   ├── skills/                    # 技能层：loader(内置+每用户目录扫描 SKILL.md) + hub(SkillHub)
-│   ├── skills_builtin/            # 历史技能归档；内置技能 = agent-browser / find-skills / create-skill，其余按需预置到管理员账号
-│   └── server/                    # 服务层：FastAPI + SSE 流式 + 调试面板前端
-│       ├── api/                   # chat(双通道流) / kb(知识库) / memory / tools / graph / system / skills / git / upload / image(图片) / video(视频)
-│       ├── store.py               # 日志 / 事件流 / State 快照 / 会话删除
-│       ├── config.py              # 模型目录管理（自定义来源，无内置厂商）
-│       ├── console_log.py         # 控制台彩色日志
-│       ├── git_ops.py             # 自动 git 快照
-│       ├── auth.py                # PBKDF2 认证
-│       └── static/                # 前端（index.html + app.js + style.css + image-studio.js + video-studio.js）
-├── data/                          # 运行时数据：accounts.db（账号）/ .model_config（全局模型配置）
-│   │                              # + users/<username>/  每用户：data/(memory.db+checkpoints.db)
-│   │                              #   uploads/ deliverables/ lightrag_storage/ skills/ .thread_id .approval_mode
-├── lightrag_storage/              # L6 知识图谱持久化（默认全局共享一张图：__global__ 子目录含 KV + 图谱 + 向量索引；GRAPH_NAMESPACE=per_thread 时每会话一个子目录）
+│   ├── main.py                    # 入口（后台服务）：端口被占自动顺延 8082+；启动失败打印 [startup error] 并落库兜底
+│   ├── service.py                 # 入口（服务模式）：HTTP 常驻 0.0.0.0:8081 + `--reload` 热重载（监控 app/ 与 .model_config）
+│   ├── config.py                  # 路径配置中心：DB_PATH / CHECKPOINT_DB_PATH / PROMPT 等统一指向 data/ 与用户目录
+│   ├── config_store.py            # `data/.model_config` 读写：模型目录（LLM/embedding/rerank/tavily）+ secret 脱敏（****xxxx）
+│   ├── userctx.py                 # 多用户上下文核心：用户路径解析、Key 解析与轮询池、旧数据迁移、后台线程继承用户上下文
+│   ├── trace.py                   # 会话级追踪：每次对话写 `traces/<thread_id>.jsonl`（调试面板追踪页读取）
+│   ├── llm/
+│   │   └── llm_factory.py         # 多 Key 轮换 + 指数退避重试（RotatingKeyChatOpenAI）：401/429/5xx/超时换 key，400 立即抛
+│   ├── graph/                     # 上下文层（LangGraph 编排）
+│   │   ├── builder.py             #   节点编排 + 条件路由（chatbot/planner/executor/summarizer），路由决策全部读 DB
+│   │   ├── state.py               #   极简 State：messages（add_messages）+ thread_id + pending_plan
+│   │   ├── utils.py               #   token 预算裁剪 / 消息上下文组装 / 回复防刷屏 / prompt 模板加载
+│   │   ├── _agent_prompt.py       #   跨节点共享 prompt 片段（安全规则 / 执行纪律 / 输出格式 / 记忆指引）
+│   │   └── prompt_template.txt    #   主 chatbot 系统提示模板（{{os}}/{{os_cmds}}/{{cwd}}/{{deliverables_dir}}/{{skills_section}} 占位符）
+│   ├── memory/                    # 记忆层
+│   │   ├── memory_manager.py      #   分层存储：messages(L1) / user_profile+user_preferences(L2) / dag_plans(L3) / memory_facts(长期记忆，向量直存本表)；build_memory_injection 拼注入块
+│   │   ├── memory_engine.py       #   记忆固化 consolidate（LLM 抽事实→冲突检测→写库→建向量）+ 语义检索 + 遗忘衰减 daemon
+│   │   ├── compaction.py          #   历史压缩：messages[:-30] → history_summaries（后台线程执行）
+│   │   ├── ligraphrag_adapter.py  #   LightRAG 桥接：专属 worker 事件循环 + Embedding/Rerank/主模型三件套 + 图谱命名空间 + KB 配置覆盖 + Neo4j 适配
+│   │   ├── graph_rag_tool.py      #   L6 图谱工具与注入：record_graph / lightgraph_query / _feed_turn_async（每轮全量喂养）/ get_l6_context
+│   │   └── entity_normalizer.py   #   术语归一化：RAG/GraphRAG 等大小写/缩写变体 → ASCII 词边界正则还原（CJK 兼容）
+│   ├── planning/                  # 规划层
+│   │   ├── react_loop.py          #   思考—行动—观察循环：安全拦截 / 审批 interrupt / 连续拒绝熔断 / max_iterations 防死循环
+│   │   ├── dag_core.py            #   DAG 纯计算：规范化、DFS 环检测、Kahn 拓扑分层、失败传播、验收契约解析
+│   │   ├── dag_planner.py         #   目标 → nodes+edges：成环回喂重规划一次，仍成环退化为单节点计划
+│   │   ├── dag_storage.py         #   dag_plans / dag_nodes / dag_edges 三表持久化 + 轻量 checkpoint（重启续跑）
+│   │   ├── dag_executor.py        #   按拓扑层 ThreadPoolExecutor 并行；complete_node 验收契约硬校验；窄重规划入口
+│   │   └── dag_summarizer.py      #   交付汇总：只列真实落盘产物；存在 failed 不调 LLM 直接如实汇报
+│   ├── tools/                     # 工具层（集中注册于 tools/__init__.py）
+│   │   ├── file_ops.py            #   ls / read_file / write_file / edit_file / delete_file / glob_files / grep_files；管理员(全机)与普通用户(工作区)路径边界
+│   │   ├── path_guard.py          #   核心路径保护：.git / .model_config / memory.db / checkpoints.db 等禁写（管理员同样受保护）
+│   │   ├── execute_command.py     #   命令执行：子进程 + 输出解码；需人工审批；非管理员不可见
+│   │   ├── system_command.py      #   系统命令封装
+│   │   ├── tavily_search.py       #   联网搜索：非管理员不可见；结果自动 `_try_ingest_lightrag` 被动入图
+│   │   ├── update_user_info.py / update_user_preference.py   # L2 用户画像/偏好写
+│   │   ├── search_my_memory.py / list_my_recent_tasks.py / get_command_history.py  # 记忆读取（facts+tasks / dag_plans / 命令历史）
+│   │   ├── request_planning.py    #   规划触发（元工具）：返回 Command 注入 pending_plan → 路由跳 planner
+│   │   ├── graph_rag_tools.py     #   L6 图谱工具（record_graph / lightgraph_query / kb_* 知识库管理）
+│   │   └── skill_tools.py         #   技能路由：list_skills / read_skill / search_skillhub / install_skill
+│   ├── skills/                    # 内置技能（对所有用户可见）：agent-browser / find-skills / create-skill
+│   │   ├── loader.py              #   扫描 app/skills/<name>/SKILL.md → 每轮注入 system prompt
+│   │   └── hub.py                 #   SkillHub 在线市场：搜索 → 确认 → 一键安装
+│   ├── skills_builtin/            # 历史技能归档（未打包为内置，按需预置到管理员账号目录）：agnes-media / ai-trends-reporter / amap-commute / amap-weather / Image-Understanding 等
+│   ├── wecom/
+│   │   └── bot.py                 # 企业微信长连接接入：消息解析、thread_id 映射（wx:single / wx:group）、分段回复
+│   └── server/                    # 服务层（FastAPI + 调试面板）
+│       ├── __init__.py            #   app 装配：静态面板 /api/* 挂载、/pub/video-ref 静态暴露
+│       ├── accounts.py            #   账号 CRUD + 旧 auth.json 迁移 + 每用户 Key 存取（set_keys/get_keys）
+│       ├── auth.py                #   PBKDF2-SHA256（12 万轮 + 随机 salt）+ token 会话（7 天）
+│       ├── keycheck.py            #   Key 可用性即时校验（注册/改 Key 时探测可达）
+│       ├── config.py              #   模型目录管理（写入 data/.model_config，无内置厂商）
+│       ├── store.py               #   全局 _GRAPH/_CONFIG、日志落库（app_logs/app_events）、State 快照、会话删除
+│       ├── console_log.py         #   控制台彩色一行日志（节点/模型/工具/规划/任务事件）
+│       ├── git_ops.py             #   自动 git 快照（每轮对话完自动 commit 代码/交付物改动）
+│       ├── static/                #   前端：index.html + app.js + style.css + rag-admin.js + image-studio.js + video-studio.js + vis-network.min.js + marked.min.js
+│       └── api/
+│           ├── chat.py            #   对话 SSE 双通道（updates 节点状态 + messages token 打字机）+ 审批 resume
+│           ├── kb.py              #   知识库：文档/分块/检索/反馈/数据看板
+│           ├── tools.py           #   工具清单接口（按用户角色过滤，非管理员隐藏 execute_command / tavily_search）
+│           ├── memory.py          #   记忆管理接口
+│           ├── settings.py        #   设置页：模型目录 / 用户管理 / 模型切换
+│           ├── system.py          #   /api/state /api/prompt /api/logs /api/events /api/trace /api/sse
+│           ├── graph.py           #   图谱快照（实体关系视图）
+│           ├── skills.py          #   技能浏览
+│           ├── git.py             #   git 操作 + 交付物列表（仅管理员）
+│           ├── upload.py          #   文件上传（按用户 uploads/ 归档）
+│           ├── image.py           #   图片生成（创作工作台）
+│           └── video.py           #   视频生成（异步任务轮询 + 完成自动下载 mp4 + 封面/时长）
+├── data/                          # 运行时数据（已被 .gitignore，不提交）
+│   ├── accounts.db                # 账号库 users(username, salt, hash, role, status, agnes_key, siliconflow_key, …) —— **每用户 Key 即存于此**
+│   ├── .model_config              # 全局模型配置：LLM / embedding / rerank / tavily 的 base_url + api_key（设置页管理）
+│   ├── video_ref/                 # 视频参考图公开挂载目录（/pub/video-ref）
+│   ├── traces/                    # 会话追踪 <thread_id>.jsonl（trace.py 写入）
+│   └── users/                     # 每用户独立工作区（互不可见）
+│       ├── .migrated_to_mirror    #   旧版单用户数据 → Mirror 迁移完成标记
+│       └── <username>/
+│           ├── data/              #   memory.db（记忆库）+ checkpoints.db（会话检查点）
+│           ├── uploads/           #   图片/文件上传
+│           ├── deliverables/      #   该用户 Agent 生成的交付物
+│           ├── lightrag_storage/  #   该用户知识图谱/KB 文件（GRAPH_STORAGE=neo4j 时此目录为空）
+│           ├── skills/            #   该用户专属技能（内置技能对所有用户可见）
+│           ├── .thread_id         #   当前会话 thread_id（缺省 "default"）
+│           └── .approval_mode     #   审批模式：per_ask / session_allow / always_allow
 ├── neo4j/                         # 本地 Neo4j 5.26 图数据库（GRAPH_STORAGE=neo4j 时使用；gitignored）
-├── .runtime/                      # 本地 JDK21（Neo4j 运行时依赖；gitignored）
-├── deliverables/                  # Agent 生成的交付物
-├── docs/                          # 设计文档（l6-graphrag.md 等）
-├── tests/                         # pytest 回归测试（对话/规划/记忆/图谱/归一化）
-├── deploy/                        # systemd 单元文件等部署脚本
-├── pyproject.toml                 # 项目元数据 + 依赖
+├── .runtime/                      # 本地 JDK21（neo4j 运行时依赖；gitignored）
+├── docs/
+│   └── l6-graphrag.md             # L6 知识图谱设计文档
+├── tests/                         # pytest 回归测试（test_userctx / test_config_store / test_kb / test_graph_rag / test_entity_normalizer / test_chat_* / test_auth / test_image / test_video 等 14 个）
+├── deploy/
+│   └── agnes-agent.service        # systemd 开机自启单元文件
+├── .env                           # 环境变量/非模型密钥（TAVILY_API_KEY、NEO4J_*、WECHAT_BOT_* 等；模型密钥统一走 .model_config）
+├── pyproject.toml / uv.lock       # 项目元数据与依赖锁定（uv 管理）
 └── README.md
 ```
 
@@ -751,7 +813,7 @@ Agnes-Agent/
 **Roadmap**
 
 - [ ] 接入更多工具（浏览器操作、数据库查询）
-- [x] 图片生成 / 视频生成（创作工作台：图片 + Agnes Video 2.5 Flash / V2.0）
+- [ ] 图片生成 / 视频生成（创作工作台：图片 + Agnes Video 2.5 Flash / V2.0）
 - [ ] 多模态输入（图片/语音进对话）
 - [ ] 记忆检索从"numpy 余弦"升级到专用向量库（已具备 embeddings，换后端即可）
 - [ ] 流式中间态可视化（思考过程实时图谱动画）

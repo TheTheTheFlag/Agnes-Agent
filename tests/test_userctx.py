@@ -89,16 +89,36 @@ class UserKeysTest(unittest.TestCase):
         self.assertEqual(keys["agnes"], ["agnes-1"])
         self.assertEqual(keys["siliconflow"], ["sf-1"])
 
-    def test_admin_pools_all_active_users(self):
+    def test_admin_uses_global_config_keys(self):
+        """管理员使用全局 .model_config 的 key，不聚合普通用户的 key。"""
         self.accounts.create_user("Mirror", "pw123456", "agnes-admin", "sf-admin",
                                   role="admin", status="active")
         self.accounts.create_user("u2", "pw123456", "agnes-2", "sf-2",
                                   role="user", status="active")
-        self.accounts.create_user("u3", "pw123456", "agnes-3", "sf-3",
-                                  role="user", status="pending")
-        keys = resolve_user_keys("Mirror")
-        self.assertIn("agnes-2", keys["agnes"])
-        self.assertNotIn("agnes-3", keys["agnes"])  # pending 不纳入
+        # 设置全局 config 中的 key
+        import app.config_store as cs
+        original_config = cs.get_config()
+        cs._write_file({
+            **original_config,
+            "custom": [{
+                "id": "custom-test",
+                "label": "test",
+                "base_url": "https://api.agnes-ai.cn/v1",
+                "api_key": "global-agnes-key",
+                "models": [],
+            }],
+            "embedding": {"base_url": "", "api_key": "global-sf-key", "model": ""},
+            "rerank": {"base_url": "", "api_key": "global-rerank-key", "model": ""},
+        })
+        try:
+            keys = resolve_user_keys("Mirror")
+            self.assertEqual(keys["agnes"], ["global-agnes-key"])
+            self.assertIn("global-sf-key", keys["siliconflow"])
+            self.assertIn("global-rerank-key", keys["siliconflow"])
+            self.assertNotIn("agnes-2", keys["agnes"])  # 不聚合用户 key
+            self.assertNotIn("sf-2", keys["siliconflow"])
+        finally:
+            cs._write_file(original_config)
 
     def test_multi_key_split(self):
         self.accounts.create_user("u4", "pw123456", "k1,k2", "s1, s2",

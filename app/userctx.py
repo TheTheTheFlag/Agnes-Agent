@@ -371,10 +371,9 @@ def resolve_user_keys(username: Optional[str] = None) -> Dict[str, List[str]]:
             is_admin = (user == DEFAULT_USER)
 
     if is_admin:
-        ua, usf = _all_active_user_keys()
         return {
-            "agnes": _dedup(global_agnes_keys() + ua),
-            "siliconflow": _dedup(global_sf_keys() + usf),
+            "agnes": global_agnes_keys(),
+            "siliconflow": global_sf_keys(),
         }
 
     full = {}
