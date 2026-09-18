@@ -10,7 +10,7 @@ import time
 import re
 import threading
 from datetime import datetime
-from typing import List, Dict, Set, Any
+from typing import List, Dict, Set, Any, Optional
 from langchain_core.messages import AIMessage, SystemMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import StateGraph, START, END
@@ -45,6 +45,21 @@ _LLM_MODEL = os.getenv("LLM_MODEL") or "deepseek-v4-pro"
 llm = create_llm(provider=_LLM_PROVIDER, model=_LLM_MODEL)
 llm_with_tools = llm.bind_tools(tools)
 print(f"LLM 类型: {type(llm)} | provider={_LLM_PROVIDER} model={_LLM_MODEL or '默认'}")
+
+
+def _is_admin_user(username: Optional[str]) -> bool:
+    """多用户门禁：按账号库判定是否为管理员。"""
+    if not username:
+        return False
+    try:
+        from app.server.auth import is_admin as _is_admin
+        return bool(_is_admin(username))
+    except Exception:
+        try:
+            from app.server import accounts
+            return bool(accounts.is_admin(username))
+        except Exception:
+            return username == "Mirror"
 
 # ============================================================
 # Chatbot 节点（统一入口）
@@ -220,11 +235,11 @@ def chatbot(state: State, config: RunnableConfig):
             elif name == "system_command" and params.get('command'):
                 cmd = params['command']
             # 审批模式来源（优先级）：
-            #   1) 用户实时点按钮：写到 _srv_cfg._CONFIG（跨进程生效）
+            #   1) 用户实时点按钮 / 审批卡回填：写入该用户自己的 .approval_mode（每用户隔离）
             #   2) 默认：session_allow（本次会话内不重复审批；每次启动 Agent 时重置为这个）
             try:
-                from app.server import config as _srv_cfg
-                mode = (_srv_cfg._CONFIG or {}).get("configurable", {}).get("approval_mode") or "session_allow"
+                from app.userctx import get_approval_mode, set_approval_mode
+                mode = get_approval_mode() or "session_allow"
             except Exception:
                 mode = "session_allow"
             if mode == "per_ask":
@@ -232,15 +247,13 @@ def chatbot(state: State, config: RunnableConfig):
                 allow = resp.get("allow", False)
                 new_mode = resp.get("mode")
                 if new_mode and new_mode in ["per_ask", "session_allow", "always_allow"]:
-                    # 写进程级配置（跨节点/跨轮持久化，无需 state 缓存）
+                    # 写入该用户自己的审批模式（不再写全局 _CONFIG，避免跨用户泄漏）
                     try:
-                        from app.server import config as _srv_cfg
-                        if _srv_cfg._CONFIG is None:
-                            _srv_cfg._CONFIG = {"configurable": {}}
-                        _srv_cfg._CONFIG.setdefault("configurable", {})["approval_mode"] = new_mode
+                        from app.userctx import set_approval_mode as _set_mode
+                        _set_mode(new_mode)
                     except Exception:
                         pass
-                    print(f"[审批模式] {new_mode}")
+                    print(f"[审批模式·用户] {new_mode}")
                 if not allow:
                     # 被拒的操作改记 L1 事件（tool_call_rejected），保留"模型想做什么但被拒绝了"的审计
                     try:
@@ -375,13 +388,15 @@ def chatbot(state: State, config: RunnableConfig):
     # 触发了规划 → 让 route_after_chatbot 跳到 planner（基于消息检测判断，与上面 content 替换同一来源）
     if triggered_goal:
         ret["pending_plan"] = triggered_goal
-    # approval_mode 存 _srv_cfg._CONFIG（不再写 state）
-    # 自动 git 版本快照：Agent 本轮改动（代码/交付物）提交入库
+    # 自动 git 版本快照：本轮改动（代码/交付物）提交入库。
+    # 多用户隔离：只有管理员触发全局仓库提交；普通用户的工作区在各自 data/users/ 目录
+    # （已 .gitignore），不允许其产生全局 commit。
     try:
-        from app.server.git_ops import auto_snapshot
-        _snap = auto_snapshot("auto snapshot")
-        if _snap.get("commit"):
-            add_log_entry("info", f"git 快照: {_snap['commit']}")
+        if _is_admin_user(_user):
+            from app.server.git_ops import auto_snapshot
+            _snap = auto_snapshot("auto snapshot")
+            if _snap.get("commit"):
+                add_log_entry("info", f"git 快照: {_snap['commit']}")
     except Exception:
         pass
     return ret

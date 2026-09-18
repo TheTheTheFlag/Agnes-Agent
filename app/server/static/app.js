@@ -3111,7 +3111,7 @@ const DRAWER_TABS = [
   { id: "rag", label: "RAG 管理", icon: "🗂️" },
   { id: "tools", label: "工具", icon: "🔧" },
   { id: "skills", label: "技能", icon: "✨" },
-  { id: "sched", label: "定时任务", icon: "🗓️" },
+  { id: "sched", label: "定时任务", icon: "🗓️", admin: true },
   { id: "models", label: "模型", icon: "⚙️", admin: true },
   { id: "settings", label: "设置", icon: "🧩", admin: true },
   { id: "users", label: "用户管理", icon: "👥", admin: true },
@@ -3263,6 +3263,12 @@ async function init() {
     return;
   }
   State.auth = { username: auth_.username, role: auth_.role };
+
+  // 每用户视图：审批模式条仅管理员可见（后端 /system 亦仅管理员）
+  {
+    const _bar = $("#approvalModeBar");
+    if (_bar) _bar.classList.toggle("hidden", auth_.role !== "admin");
+  }
 
   // 主题
   applyTheme();

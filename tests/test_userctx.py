@@ -304,5 +304,56 @@ class SkillInstallPerUserTest(unittest.TestCase):
         self.assertIn("agent-browser", names)
 
 
+class PerUserStateTest(unittest.TestCase):
+    """每用户会话状态隔离：thread_id / 审批模式都落在各自用户目录，互不串扰。"""
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.mkdtemp()
+        self._orig_users_dir = userctx.USERS_DIR
+        userctx.USERS_DIR = os.path.join(self._tmp, "users")
+        self._tok = userctx.set_current_user("alice")
+
+    def tearDown(self):
+        userctx.reset_current_user(self._tok)
+        userctx.USERS_DIR = self._orig_users_dir
+        userctx._ensured_users.clear()
+
+    def test_thread_id_per_user(self):
+        self.assertEqual(userctx.current_tid("alice"), "default")
+        userctx.set_current_tid("t-alice", "alice")
+        # bob 不受影响
+        self.assertEqual(userctx.current_tid("bob"), "default")
+        # 当前上下文（alice）读取一致
+        self.assertEqual(userctx.current_tid(), "t-alice")
+
+    def test_approval_mode_per_user(self):
+        self.assertEqual(userctx.get_approval_mode(), "session_allow")
+        userctx.set_approval_mode("per_ask")
+        self.assertEqual(userctx.get_approval_mode(), "per_ask")
+        self.assertEqual(userctx.get_approval_mode("bob"), "session_allow")
+
+    def test_threads_current_tid_scoped_to_user(self):
+        import asyncio
+        from app.server.api import memory as mem_api
+        userctx.ensure_user_dirs("alice")
+        userctx.ensure_user_dirs("bob")
+        userctx.set_current_tid("alice-tid", "alice")
+        # 预置一条 alice 消息，让该 thread 出现在列表
+        from app.memory.memory_manager import MemoryManager
+        mm = MemoryManager(db_path=userctx.user_paths("alice").db_path, thread_id="alice-tid")
+        mm.add_message("alice-tid", "user", "hello")
+        data = asyncio.run(mem_api.get_threads())
+        self.assertEqual(data["current_thread_id"], "alice-tid")
+        self.assertTrue(any(t["thread_id"] == "alice-tid" and t.get("current") for t in data["threads"]))
+        # bob 的 current 是 bob 自己的（不暴露 alice 的）
+        tok = userctx.set_current_user("bob")
+        try:
+            data_bob = asyncio.run(mem_api.get_threads())
+        finally:
+            userctx.reset_current_user(tok)
+        self.assertNotEqual(data_bob["current_thread_id"], "alice-tid")
+
+
 if __name__ == "__main__":
     unittest.main()

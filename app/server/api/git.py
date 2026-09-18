@@ -1,10 +1,25 @@
-﻿"""app.server.api.git — git 版本管理 API。"""
-from fastapi import APIRouter
+﻿"""app.server.api.git — git 版本管理 API。
+
+多用户门禁：/api/git/*（仓库级日志/状态/提交开关）仅管理员可访问；
+/api/deliverables* 走每用户目录（DELIVERABLES_DIR 路径代理），普通用户只能看到自己的工作区。
+"""
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from app.server.git_ops import git_log, git_status, git_diff, auto_snapshot, is_auto_git_enabled, set_auto_git
 
 router = APIRouter()
+
+
+def _require_admin(request: Request):
+    """非管理员访问仓库级 git 端点 → 403。"""
+    try:
+        from app.server.config import _is_request_admin
+        if not _is_request_admin(request):
+            return JSONResponse({"error": "仅管理员可访问此接口"}, status_code=403)
+    except Exception:
+        pass
+    return None
 
 
 @router.get("/api/deliverables")
@@ -57,28 +72,43 @@ async def api_deliverables_download(name: str = ""):
 
 
 @router.get("/api/git/log")
-async def api_git_log(limit: int = 20):
+async def api_git_log(limit: int = 20, request: Request = None):
+    denied = _require_admin(request)
+    if denied:
+        return denied
     return {"commits": git_log(limit), "auto_git": is_auto_git_enabled()}
 
 
 @router.get("/api/git/status")
-async def api_git_status():
+async def api_git_status(request: Request = None):
+    denied = _require_admin(request)
+    if denied:
+        return denied
     return git_status()
 
 
 @router.get("/api/git/diff")
-async def api_git_diff():
+async def api_git_diff(request: Request = None):
+    denied = _require_admin(request)
+    if denied:
+        return denied
     return {"diff": git_diff()}
 
 
 @router.post("/api/git/snapshot")
-async def api_git_snapshot(payload: dict = None):
+async def api_git_snapshot(payload: dict = None, request: Request = None):
+    denied = _require_admin(request)
+    if denied:
+        return denied
     reason = (payload or {}).get("reason", "手动快照")
     return auto_snapshot(reason)
 
 
 @router.post("/api/git/auto")
-async def api_git_auto(payload: dict):
+async def api_git_auto(payload: dict, request: Request = None):
+    denied = _require_admin(request)
+    if denied:
+        return denied
     enabled = bool((payload or {}).get("enabled"))
     set_auto_git(enabled)
     return {"ok": True, "auto_git": enabled}

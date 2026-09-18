@@ -93,7 +93,13 @@ async def chat_endpoint(payload: dict, request: Request = None):
             return JSONResponse({"error": "message 不能为空"}, status_code=400)
         inputs = {"messages": [("user", message)]}
 
-    thread_id = (payload or {}).get("thread_id") or (_srv_cfg._CONFIG or {}).get("configurable", {}).get("thread_id", "default")
+    # 每用户当前会话：普通数据一律落在该用户自己的 .thread_id，不读全局 _CONFIG
+    try:
+        from app.userctx import current_tid as _user_tid
+        _tid = _user_tid(getattr(getattr(request, "state", None), "username", None) or current_user())
+    except Exception:
+        _tid = "default"
+    thread_id = (payload or {}).get("thread_id") or _tid
     config = {"configurable": {"thread_id": thread_id}}
     # 本轮勾选参与检索的知识库（消息框多选，默认含 __global__）。
     # 空 list / 未传 → 仅全局对话图谱。
@@ -490,14 +496,17 @@ async def command_endpoint(payload: dict, request: Request = None):
     if name == "new":
         import uuid as _uuid
         new_tid = str(_uuid.uuid4())
-        # 只切换 thread_id，保留 approval_mode（审批模式是用户意图，切换会话不应重置——
-        # 否则前端按钮还高亮着 per_ask，后端却悄悄回到 session_allow，造成"不弹卡直接执行"）
-        # 非管理员只返回新 tid 供前端使用，不改全局默认会话
+        # 每用户会话记录：只切换该用户自己的 thread_id（审批模式保留）。
+        # 管理员额外写全局（兼容旧器 main.py CLI 行为），普通用户只写自己目录。
+        try:
+            from app.userctx import set_current_tid as _set_tid
+            _set_tid(new_tid, _u or None)
+        except Exception:
+            pass
         if _is_admin:
             _cfg = dict(_srv_cfg._CONFIG or {})
             _cfg.setdefault("configurable", {})["thread_id"] = new_tid
             _srv_cfg._CONFIG = _cfg
-            # 写入 .thread_id 文件以保持 main.py 行为一致
             try:
                 with open(_os.path.join(_BASE_DIR, ".thread_id"), "w", encoding="utf-8") as f:
                     f.write(new_tid)
@@ -509,7 +518,12 @@ async def command_endpoint(payload: dict, request: Request = None):
             # 列候选
             r = await get_threads()
             return {"result": "请用 /resume <thread_id> 选择：", "candidates": r["threads"][:10]}
-        # 同样只切换 thread_id，保留 approval_mode
+        # 同样只切换该用户自己的 thread_id
+        try:
+            from app.userctx import set_current_tid as _set_tid
+            _set_tid(arg, _u or None)
+        except Exception:
+            pass
         if _is_admin:
             _cfg = dict(_srv_cfg._CONFIG or {})
             _cfg.setdefault("configurable", {})["thread_id"] = arg
@@ -529,13 +543,19 @@ async def command_endpoint(payload: dict, request: Request = None):
     if name == "system":
         if not _is_admin:
             return {"error": "审批模式仅管理员可修改"}
+        try:
+            from app.userctx import get_approval_mode as _get_mode, set_approval_mode as _set_mode
+        except Exception:
+            _get_mode = None
+            _set_mode = None
         if not arg:
-            return {"result": f"当前审批模式: {(_srv_cfg._CONFIG or {}).get('configurable', {}).get('approval_mode', 'session_allow')}"}
+            cur = (_get_mode(_u or None) if _get_mode else "session_allow")
+            return {"result": f"当前审批模式(用户 {_u}): {cur}"}
         if arg not in ("per_ask", "session_allow", "always_allow"):
             return {"error": f"未知模式: {arg}"}
-        _srv_cfg._CONFIG = _srv_cfg._CONFIG or {"configurable": {}}
-        _srv_cfg._CONFIG["configurable"]["approval_mode"] = arg
-        return {"result": f"已切到 {arg}（注：CLI 主循环未感知，前端 session 可继续）"}
+        if _set_mode:
+            _set_mode(arg, _u or None)
+        return {"result": f"已切到 {arg}（仅当前用户生效）"}
     if name == "clear":
         _log_entries.clear()
         _events.clear()

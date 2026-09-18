@@ -95,6 +95,52 @@ def ensure_user_dirs(username: Optional[str] = None) -> UserPaths:
     return p
 
 
+# ==================== 每用户会话状态（thread / 审批模式） ====================
+def current_tid(username: Optional[str] = None) -> str:
+    """当前用户的当前会话 thread_id（存于 <user>/.thread_id，缺省 'default'）。"""
+    p = user_paths(username)
+    try:
+        with open(p.thread_file, "r", encoding="utf-8") as f:
+            tid = f.read().strip()
+        return tid or "default"
+    except Exception:
+        return "default"
+
+
+def set_current_tid(tid: str, username: Optional[str] = None) -> None:
+    """记录当前用户的当前会话 thread_id（多用户下不复用全局 .thread_id）。"""
+    p = user_paths(username)
+    os.makedirs(p.root, exist_ok=True)
+    with open(p.thread_file, "w", encoding="utf-8") as f:
+        f.write(tid or "default")
+
+
+_APPROVAL_MODES = ("per_ask", "session_allow", "always_allow")
+
+
+def get_approval_mode(username: Optional[str] = None) -> str:
+    """当前用户的审批模式（每用户 <user>/.approval_mode，缺省 session_allow）。"""
+    p = user_paths(username)
+    try:
+        with open(os.path.join(p.root, ".approval_mode"), "r", encoding="utf-8") as f:
+            m = f.read().strip()
+        if m in _APPROVAL_MODES:
+            return m
+    except Exception:
+        pass
+    return "session_allow"
+
+
+def set_approval_mode(mode: str, username: Optional[str] = None) -> None:
+    """写入当前用户的审批模式（只影响该用户，不碰全局配置）。"""
+    if mode not in _APPROVAL_MODES:
+        return
+    p = user_paths(username)
+    os.makedirs(p.root, exist_ok=True)
+    with open(os.path.join(p.root, ".approval_mode"), "w", encoding="utf-8") as f:
+        f.write(mode)
+
+
 _ensured_users: set = set()
 
 

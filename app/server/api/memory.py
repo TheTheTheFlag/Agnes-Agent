@@ -143,8 +143,14 @@ async def get_threads():
     db.close()
     for t in out:
         t["last_user_msg"] = last_user.get(t["thread_id"], "")
-    # 当前会话置顶（即使无消息也要显示）
-    current_tid = (_srv_cfg._CONFIG or {}).get("configurable", {}).get("thread_id")
+    # 当前会话置顶（即使无消息也要显示）——每用户：取该用户自己的 thread_id，
+    # 不再暴露管理员全局会话。
+    try:
+        from app.userctx import current_user as _cu, current_tid as _ct
+        _u = _cu()
+        current_tid = _ct(_u)
+    except Exception:
+        current_tid = (_srv_cfg._CONFIG or {}).get("configurable", {}).get("thread_id") or "default"
     if current_tid:
         cur_entry = next((t for t in out if t["thread_id"] == current_tid), None)
         if cur_entry:
