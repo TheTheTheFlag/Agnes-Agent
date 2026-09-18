@@ -218,5 +218,91 @@ class ModelsMaskTest(unittest.TestCase):
         self.assertTrue(srv_cfg._is_request_admin(None))
 
 
+class ToolsFilterTest(unittest.TestCase):
+    """非管理员工具的收窄：不提供 execute_command / tavily_search。"""
+
+    def setUp(self):
+        from app.server import accounts
+        import tempfile
+        self._tmp = tempfile.mkdtemp()
+        self._orig_acc = accounts.ACCOUNTS_DB_PATH
+        self._orig_legacy = accounts.LEGACY_AUTH_FILE
+        self._orig_users_dir = userctx.USERS_DIR
+        accounts.ACCOUNTS_DB_PATH = os.path.join(self._tmp, "accounts.db")
+        accounts.LEGACY_AUTH_FILE = os.path.join(self._tmp, "nonexistent_auth.json")
+        userctx.USERS_DIR = os.path.join(self._tmp, "users")
+        accounts.init_db()
+
+    def tearDown(self):
+        from app.server import accounts
+        accounts.ACCOUNTS_DB_PATH = self._orig_acc
+        accounts.LEGACY_AUTH_FILE = self._orig_legacy
+        userctx.USERS_DIR = self._orig_users_dir
+        userctx._ensured_users.clear()
+
+    def test_admin_gets_full_tools(self):
+        from app.server import accounts
+        from app.tools import get_tools_for_user, tools
+        accounts.create_user("Mirror", "pw123456", "agnes-admin", "sf-admin",
+                             role="admin", status="active")
+        mine = get_tools_for_user("Mirror")
+        names = {t.name for t in mine}
+        self.assertEqual(names, {t.name for t in tools})
+        self.assertIn("execute_command", names)
+        self.assertIn("tavily_search", names)
+
+    def test_non_admin_filtered(self):
+        from app.server import accounts
+        from app.tools import get_tools_for_user, tools
+        accounts.create_user("u1", "pw123456", "agnes-1", "sf-1",
+                             role="user", status="active")
+        mine = get_tools_for_user("u1")
+        names = {t.name for t in mine}
+        self.assertIn("read_file", names)
+        self.assertIn("ls", names)
+        self.assertNotIn("execute_command", names)
+        self.assertNotIn("tavily_search", names)
+        self.assertEqual(len(mine), len([t for t in tools if t.name not in ("execute_command", "tavily_search")]))
+
+
+class SkillInstallPerUserTest(unittest.TestCase):
+    """技能安装/读取按用户隔离：install_skill_md 写入当前用户 skills 目录。"""
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.mkdtemp()
+        self._orig_users_dir = userctx.USERS_DIR
+        userctx.USERS_DIR = os.path.join(self._tmp, "users")
+        self._tok = userctx.set_current_user("alice")
+
+    def tearDown(self):
+        userctx.reset_current_user(self._tok)
+        userctx.USERS_DIR = self._orig_users_dir
+        userctx._ensured_users.clear()
+
+    def test_install_goes_to_user_dir_and_isolated(self):
+        from app.skills import loader
+        raw = "---\nname: demo-skill\ndescription: 测试技能\n---\n步骤：无"
+        rel = loader.install_skill_md("demo-skill", raw)
+        # 必须写到 alice 自己的目录
+        expected = os.path.join(userctx.USERS_DIR, "alice", "skills", "demo-skill", "SKILL.md")
+        self.assertTrue(os.path.isfile(expected), rel)
+        names = {s["name"] for s in loader.load_all_skills()}
+        self.assertIn("demo-skill", names)
+
+        # 切到 bob：看不到 alice 安装的 demo-skill
+        tok = userctx.set_current_user("bob")
+        try:
+            bob_names = {s["name"] for s in loader.load_all_skills()}
+        finally:
+            userctx.reset_current_user(tok)
+        self.assertNotIn("demo-skill", bob_names)
+
+    def test_builtin_dir_still_scanned(self):
+        from app.skills import loader
+        names = {s["name"] for s in loader.load_all_skills()}
+        self.assertIn("agent-browser", names)
+
+
 if __name__ == "__main__":
     unittest.main()

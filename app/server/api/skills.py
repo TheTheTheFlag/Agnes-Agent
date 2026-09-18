@@ -19,8 +19,9 @@ _IMG_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
 
 @router.get("/skills")
 async def list_skills():
-    """列出 app/skills/ 下所有本地技能元数据。"""
-    return {"skills": loader.load_all_skills(), "dir": loader.SKILLS_DIR}
+    """列出当前用户可见的技能元数据（内置 + 该用户自己安装的）。"""
+    return {"skills": loader.load_all_skills(),
+            "dir": loader.user_skills_dir(), "builtin_dir": loader.BUILTIN_SKILLS_DIR}
 
 
 @router.get("/skills/{name}")
@@ -67,8 +68,9 @@ async def skillhub_install(payload: dict):
 async def skill_media(skill_name: str, rest: str):
     """提供技能产物文件（图片/视频/日志），供前端 <img> 渲染。
 
-    仅暴露 app/skills/<skill_name>/output/ 目录（生成产物），
-    技能的其他文件（SKILL.md、keys.json 等）不可通过此端点访问。
+    仅暴露 <技能所在目录>/output/ 目录（生成产物），技能的其他文件
+    （SKILL.md、keys.json 等）不可通过此端点访问。所在目录按当前用户解析：内置目录或
+    该用户自己安装技能的目录。
     """
     if not _SKILL_NAME_RE.match(skill_name or ""):
         return JSONResponse({"error": "非法技能名"}, status_code=400)
@@ -77,7 +79,11 @@ async def skill_media(skill_name: str, rest: str):
     ext = os.path.splitext(rest)[1].lower()
     if ext not in _IMG_EXT:
         return JSONResponse({"error": "仅支持图片文件"}, status_code=400)
-    fp = os.path.join(loader.SKILLS_DIR, skill_name, "output", rest)
+    s = loader.load_skill(skill_name)
+    if not s:
+        return JSONResponse({"error": "技能不存在"}, status_code=404)
+    skill_root = os.path.dirname(os.path.join(loader.PROJECT_ROOT, s["path"]))
+    fp = os.path.join(skill_root, "output", rest)
     if not os.path.isfile(fp):
         return JSONResponse({"error": "文件不存在"}, status_code=404)
     return FileResponse(fp)

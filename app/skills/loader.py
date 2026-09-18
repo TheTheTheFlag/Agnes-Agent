@@ -1,6 +1,6 @@
 """app/skills/loader.py — 本地技能加载器。
 
-技能 = app/skills/ 目录下的一个 SKILL.md（或任意 .md），结构：
+技能 = 一个 SKILL.md（或任意 .md），结构：
   ---            # YAML frontmatter（元数据）
   name: xxx
   description: ...
@@ -9,11 +9,12 @@
   ---
   正文...          # 可选，给模型的操作步骤指引
 
-扫描规则（两种放法都支持）：
-  - 目录式：app/skills/<name>/SKILL.md（推荐，可附带其他资源文件）
-  - 单文件：app/skills/<name>.md
+扫描范围（多用户）：
+  - 内置：app/skills/<name>/SKILL.md（仅随版本发布的 agent-browser 等极少数技能）
+  - 用户：data/users/<当前用户>/skills/<name>/SKILL.md（SkillHub 安装都落这里，按用户隔离）
+  用户技能同名时覆盖内置。安装（install_skill_md）一律写入**当前用户**目录。
 
-loader 每次调用实时扫描（无缓存），因此往 app/skills/ 新增/修改 SKILL.md 立即生效，
+loader 每次调用实时扫描（无缓存），因此新增/修改 SKILL.md 立即生效，
 不需要重启（热重载只监控 .py，不监控 .md，这里动态读正好补上）。
 """
 import os
@@ -21,11 +22,22 @@ import re
 
 import yaml
 
+from app.config import SKILLS_DIR as _USER_SKILLS_DIR  # 每用户已安装技能目录（路径代理）
+
 APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # .../app
 PROJECT_ROOT = os.path.dirname(APP_DIR)
 SKILLS_DIR = os.path.join(APP_DIR, "skills")
+BUILTIN_SKILLS_DIR = SKILLS_DIR
 
 _FM_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
+
+
+def user_skills_dir() -> str:
+    """当前用户的技能安装目录（首次访问自动建目录）。"""
+    try:
+        return str(_USER_SKILLS_DIR)
+    except Exception:
+        return os.path.join(PROJECT_ROOT, "data", "users", "Mirror", "skills")
 
 
 def _parse(raw: str) -> tuple[dict, str]:
@@ -44,27 +56,35 @@ def _parse(raw: str) -> tuple[dict, str]:
 
 
 def _skill_dir_files() -> list[tuple[str, str]]:
-    """返回 [(name, abs_path)]：name 取 frontmatter 的 name，否则用文件/目录名。"""
-    out = []
-    if not os.path.isdir(SKILLS_DIR):
-        return out
-    for entry in sorted(os.listdir(SKILLS_DIR)):
-        if entry.startswith("__") or entry.startswith("."):
+    """返回 [(name, abs_path)]：内置 + 当前用户技能；同名时用户覆盖内置。
+
+    name 取 frontmatter 的 name，否则用文件/目录名。
+    """
+    merged: dict[str, str] = {}
+    roots = [BUILTIN_SKILLS_DIR]
+    udir = user_skills_dir()
+    if udir and udir != BUILTIN_SKILLS_DIR:
+        roots.append(udir)
+    for root in roots:
+        if not os.path.isdir(root):
             continue
-        full = os.path.join(SKILLS_DIR, entry)
-        if os.path.isdir(full):
-            for fname in ("SKILL.md", "skill.md"):
-                fp = os.path.join(full, fname)
-                if os.path.isfile(fp):
-                    meta, _ = _parse(_read(fp))
-                    name = (meta.get("name") or entry).strip() or entry
-                    out.append((name, fp))
-                    break
-        elif entry.lower().endswith(".md"):
-            meta, _ = _parse(_read(full))
-            name = (meta.get("name") or os.path.splitext(entry)[0]).strip() or entry
-            out.append((name, full))
-    return out
+        for entry in sorted(os.listdir(root)):
+            if entry.startswith("__") or entry.startswith("."):
+                continue
+            full = os.path.join(root, entry)
+            if os.path.isdir(full):
+                for fname in ("SKILL.md", "skill.md"):
+                    fp = os.path.join(full, fname)
+                    if os.path.isfile(fp):
+                        meta, _ = _parse(_read(fp))
+                        name = (meta.get("name") or entry).strip() or entry
+                        merged[name] = fp
+                        break
+            elif entry.lower().endswith(".md"):
+                meta, _ = _parse(_read(full))
+                name = (meta.get("name") or os.path.splitext(entry)[0]).strip() or entry
+                merged[name] = full
+    return [(n, p) for n, p in merged.items()]
 
 
 def _read(path: str) -> str:
@@ -112,11 +132,16 @@ def skill_exists(name: str) -> bool:
 
 
 def install_skill_md(name: str, raw: str) -> str:
-    """把 SKILL.md 原文安装到 app/skills/<name>/SKILL.md。name 做安全清洗。"""
+    """把 SKILL.md 原文安装到当前用户技能目录 <user>/skills/<name>/SKILL.md。name 做安全清洗。
+
+    多用户下安装目标 = 当前上下文用户（HTTP 会话用户 / 工具调用用户），实现按用户隔离。
+    """
     safe = re.sub(r"[^A-Za-z0-9_.\-]", "_", name).strip("._")
     if not safe:
         raise ValueError("skill 名称非法")
-    d = os.path.join(SKILLS_DIR, safe)
+    base = user_skills_dir()
+    os.makedirs(base, exist_ok=True)
+    d = os.path.join(base, safe)
     os.makedirs(d, exist_ok=True)
     fp = os.path.join(d, "SKILL.md")
     with open(fp, "w", encoding="utf-8") as f:

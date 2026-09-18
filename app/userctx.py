@@ -364,7 +364,9 @@ def _default_provider_spec() -> dict:
 def _build_llm_pair(username: str) -> tuple:
     """构造该用户的 (llm, llm_with_tools)。"""
     from app.llm import create_llm
-    from app.tools import tools
+    from app.tools import get_tools_for_user
+
+    user_tools = get_tools_for_user(username)
 
     spec = _default_provider_spec()
     keys = resolve_user_keys(username)
@@ -392,7 +394,7 @@ def _build_llm_pair(username: str) -> tuple:
                             if "agnes-ai.cn" in str((c or {}).get("base_url") or "")), None)
         if not agnes_entry:
             from app.graph import builder as _b
-            return (_b.llm, _b.llm_with_tools)
+            return (_b.llm, _b.llm.bind_tools(user_tools))
         entry = agnes_entry
         base_url = agnes_entry.get("base_url") or base_url
         models = agnes_entry.get("models") or []
@@ -403,11 +405,11 @@ def _build_llm_pair(username: str) -> tuple:
     if not base_url or not api_key:
         # 缺凭据：回退到全局模块 LLM，避免整服务不可用
         from app.graph import builder as _b
-        return (_b.llm, _b.llm_with_tools)
+        return (_b.llm, _b.llm.bind_tools(user_tools))
 
     llm = create_llm(provider="openai_compatible", model=model,
                      base_url=base_url, api_key=api_key)
-    return (llm, llm.bind_tools(tools))
+    return (llm, llm.bind_tools(user_tools))
 
 
 def get_user_llm(username: Optional[str] = None) -> tuple:

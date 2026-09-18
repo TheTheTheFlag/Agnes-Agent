@@ -1,6 +1,8 @@
+from typing import List, Optional
+
 from .tavily_search import tavily_search
 from .update_user_info import update_user_info
-# from .system_command import system_command  # 已废弃：跨平台适配差，改用 Python 包装工具集
+# from .system_command import system_command  # 已废弃：跨平台适配差，改用 Python 包装工具�?
 from .update_user_preference import update_user_preference
 from .request_planning import request_planning
 from .search_my_memory import search_my_memory
@@ -42,3 +44,37 @@ tools = [
     record_graph,
     lightgraph_query,
 ]
+
+# 仅管理员可见的工具：命令执行（高风险）/ 联网搜索（透传外部请求）。
+# 普通用户在注册时只提交自己的模型 Key，因此工具面也收窄——两种工具都不下发给非管理员。
+_ADMIN_ONLY_TOOLS = ("execute_command", "tavily_search")
+
+
+def _role_is_admin(username: Optional[str]) -> bool:
+    """按当前账号库判定是否管理员；无法查证时放行（管理员不能因鉴权模块故障被误伤）。"""
+    if not username:
+        return True
+    try:
+        from app.server.auth import is_admin as _is_admin
+        return bool(_is_admin(username))
+    except Exception:
+        try:
+            from app.server import accounts
+            return bool(accounts.is_admin(username))
+        except Exception:
+            return True
+
+
+def get_tools_for_user(username: Optional[str] = None) -> List:
+    """某个用户可见的工具集：非管理员不提供 execute_command / tavily_search。
+
+    调用方需保证 username 语义正确（通常传 current_user()）；缺省时用当前上下文用户。
+    """
+    from app.userctx import current_user
+    u = username or current_user()
+    try:
+        if _role_is_admin(u):
+            return tools
+    except Exception:
+        pass
+    return [t for t in tools if t.name not in _ADMIN_ONLY_TOOLS]

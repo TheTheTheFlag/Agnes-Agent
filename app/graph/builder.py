@@ -23,7 +23,7 @@ from app.graph.utils import (count_tokens, retry_llm_call, parse_tool_calls_from
     ensure_tool_calls, ensure_token_limit, sync_state_to_db, load_prompt_template,
     MODEL_CONTEXT_LIMIT, TOKEN_LIMIT, KEEP_RECENT, MAX_TOOL_CALL_ROUNDS, _tool_params_summary,
     prepare_context_messages, apply_reply_guard)
-from app.tools import tools, request_planning
+from app.tools import tools, request_planning, get_tools_for_user
 from app.llm import create_llm
 from app.memory import MemoryManager
 from app.planning.dag_planner import create_dag_planner_node
@@ -262,11 +262,12 @@ def chatbot(state: State, config: RunnableConfig):
     initial_messages = prepare_context_messages(history_messages, system_text, keep_recent=KEEP_RECENT)
 
     print(f"[Chatbot] 自决模式（无 L1/L2/L3 硬切）")
+    user_tools = get_tools_for_user(_user)
     loop = ReActLoop(_llm_with_tools, max_iterations=MAX_TOOL_CALL_ROUNDS, node="chatbot")
     try:
         result = loop.run(
             messages=initial_messages,
-            tools=tools,
+            tools=user_tools,
             on_tool_before=on_tool_before,
             on_tool_after=on_tool_after,
             interrupt_handler=interrupt_handler,
@@ -490,6 +491,8 @@ def build_graph():
     # 每用户 LLM：上下文里若指定了用户 LLM 则用之（每用户 graph），否则用模块级全局
     _pair = current_llm()
     _llm = _pair[0] if _pair else llm
+    # 每用户工具集（非管理员收窄，见 app/tools.get_tools_for_user）
+    _user_tools = get_tools_for_user()
 
     # planner_node 需要做特殊包装：从 state["pending_plan"] 读 goal
     planner_inner = create_dag_planner_node(_llm)
@@ -505,7 +508,7 @@ def build_graph():
 
     builder.add_node("chatbot", chatbot)
     builder.add_node("planner", planner_node)
-    builder.add_node("executor", create_executor([_llm], tools))
+    builder.add_node("executor", create_executor([_llm], _user_tools))
     # DAG 全部终态后的「交付汇总」节点：把各子任务结果汇总成最终答复交给用户。
     # 注意：它与 build_memory_injection（历史对话压缩注入）是两件事，不能互相替代——
     # 少了它，任务跑完直接 END，用户只看到过程气泡、没有人"复命"。
