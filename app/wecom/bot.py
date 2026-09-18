@@ -29,8 +29,10 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import unquote
 
 try:
     from aibot import WSClient, WSClientOptions, generate_req_id
@@ -163,6 +165,39 @@ def _extract_images(body: dict) -> List[dict]:
     return []
 
 
+def _parse_filename(content_disposition: str) -> Optional[str]:
+    """从 Content-Disposition 里取文件名（兼容 RFC 5987 filename*=UTF-8''）。"""
+    if not content_disposition:
+        return None
+    m = re.search(r"filename\*=UTF-8''([^;\s]+)", content_disposition, re.IGNORECASE)
+    if m:
+        return unquote(m.group(1))
+    m = re.search(r'filename="?([^";\s]+)"?', content_disposition, re.IGNORECASE)
+    return unquote(m.group(1)) if m else None
+
+
+def _download_sync(url: str, attempts: int = 3) -> Tuple[bytes, Optional[str]]:
+    """同步下载图片（在线程里跑，避免阻塞事件循环）。
+
+    不用 SDK 内置的 aiohttp 下载：实测它对腾讯云 COS 图片会在 10s 超时（错误信息为空）。
+    requests（urllib3）与 curl 行为一致，稳定可靠；这里给 60s 读取超时 + 3 次重试。
+    """
+    import requests
+
+    last: Optional[Exception] = None
+    for i in range(attempts):
+        try:
+            resp = requests.get(url, timeout=(10, 60))
+            resp.raise_for_status()
+            return resp.content, _parse_filename(resp.headers.get("Content-Disposition", ""))
+        except Exception as e:
+            last = e
+            _log(f"图片下载第 {i + 1}/{attempts} 次失败：{type(e).__name__}: {e!r}", "warn")
+            if i < attempts - 1:
+                time.sleep(1.5 * (i + 1))
+    raise last  # type: ignore[misc]
+
+
 def _guess_ext(fname: Optional[str], data: bytes) -> str:
     """图片扩展名：优先用回调文件名，否则按魔数判断。"""
     if fname:
@@ -200,10 +235,25 @@ async def _save_images(client, images: List[dict], msgid: str) -> List[Tuple[str
         if not url:
             continue
         try:
-            data, fname = await client.download_file(url, aeskey)
+            raw, fname = await asyncio.to_thread(_download_sync, url)
         except Exception as e:
-            _log(f"图片下载/解密失败：{e}", "warn")
-            continue
+            _log(f"图片下载失败：{type(e).__name__}: {e!r}", "warn")
+            # 兜底：SDK 自带下载（aiohttp，可能超时）——仅在前者失败时尝试
+            try:
+                data, fname = await client.download_file(url, aeskey)
+            except Exception as e2:
+                _log(f"图片下载失败（SDK 兜底）：{type(e2).__name__}: {e2!r}", "warn")
+                continue
+        else:
+            try:
+                if aeskey:
+                    from aibot.crypto_utils import decrypt_file
+                    data = decrypt_file(raw, aeskey)
+                else:
+                    data = raw
+            except Exception as e:
+                _log(f"图片解密失败：{type(e).__name__}: {e!r}", "warn")
+                continue
         if not data:
             _log("图片下载结果为空，跳过", "warn")
             continue
@@ -344,7 +394,10 @@ async def _handle_message(frame: dict):
             )
             text = img_lines + "\n" + instr + (("\n\n" + text) if text else "")
             _log(f"收到图片 {len(refs)} 张，已保存：" + ", ".join(p for _, p, _ in refs))
-        elif text is None:
+        else:
+            # 图片没下下来：直接回失败，且不再跑 Agent ——
+            # 否则 Agent 会去翻 uploads/ 里的历史图片，拿旧图乱答（曾实际发生）。
+            _log("图片接收失败，未保存任何图片，直接回失败提示", "warn")
             try:
                 await client.reply_stream(
                     frame, generate_req_id("stream"),
