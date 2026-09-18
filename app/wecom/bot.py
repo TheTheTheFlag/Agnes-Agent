@@ -21,8 +21,9 @@ Agent 调用与 /api/chat 完全一致，因此企业微信里同样带多轮上
 
 会话映射：每个企微会话固定映射到一个 thread_id —— 单聊 wx:single:<userid>，群聊 wx:group:<chatid>。
 
-图片：图片/图文混排回调里的图片会下载并 AES 解密后落到项目 uploads/ 目录，再把 uploads/xxx 路径
-随用户文字一起交给 Agent（与 Web 面板上传图片的约定一致），由 Agent 调用图片理解技能识别。
+图片：图片/图文混排回调里的图片会下载并 AES 解密后落到**当前用户**（多用户下默认为 Mirror）
+的 `data/users/<user>/uploads/` 目录，再把 `uploads/xxx` 相对路径随用户文字一起交给 Agent
+（与 Web 面板上传图片的约定一致），由 Agent 识别图片。
 """
 from __future__ import annotations
 
@@ -218,14 +219,15 @@ def _guess_ext(fname: Optional[str], data: bytes) -> str:
 
 
 async def _save_images(client, images: List[dict], msgid: str) -> List[Tuple[str, str, int]]:
-    """下载并按企微 aeskey 解密图片，落到项目 uploads/。
-    返回 [(展示名, 相对路径 uploads/xxx, 字节数)]，失败的图片跳过并记日志。"""
+    """下载并按企微 aeskey 解密图片，落到**当前用户**的 uploads/ 目录（多用户：默认 Mirror）。
+    返回 [(展示名, 相对路径 uploads/xxx, 字节数)]，失败的图片跳过并记日志。
+    相对路径与 Web 上传约定一致，agent 侧按当前用户 uploads 目录解析。"""
     try:
         from app.server.api.upload import UPLOAD_DIR
     except Exception:
-        from app.config import BASE_DIR
-        UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
-    os.makedirs(UPLOAD_DIR, exist_ok=True)
+        from app.config import UPLOADS_DIR
+        UPLOAD_DIR = UPLOADS_DIR
+    os.makedirs(str(UPLOAD_DIR), exist_ok=True)
 
     refs: List[Tuple[str, str, int]] = []
     stem = (re.sub(r"[^A-Za-z0-9]", "", msgid or "")[:16]) or uuid.uuid4().hex[:12]
@@ -390,7 +392,7 @@ async def _handle_message(frame: dict):
         if refs:
             img_lines = "\n".join(f"![{name}]({path})" for name, path, _ in refs)
             instr = (
-                "（用户发来图片，已保存到项目目录下，请用图片理解技能识别图片内容后再回答）"
+                "（用户发来图片，已保存到当前用户工作区的 uploads 目录下，请识别图片内容后再回答）"
             )
             text = img_lines + "\n" + instr + (("\n\n" + text) if text else "")
             _log(f"收到图片 {len(refs)} 张，已保存：" + ", ".join(p for _, p, _ in refs))

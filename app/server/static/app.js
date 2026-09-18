@@ -161,8 +161,8 @@ function showLogin(mode) {
   $("#loginTitle").textContent = setup ? "首次使用" : (register ? "注册账号" : "Agnes Agent");
   $("#loginSub").textContent = setup
     ? "设置管理员账号密码（PBKDF2 哈希加密保存）"
-    : register ? "填写账号、密码与两个 API Key，提交后等待管理员审批"
-    : "设置面板 · 登录后使用";
+    : register ? "填写账号、密码与两个 API Key，提交后等待管理员审批通过即可登录"
+    : "多用户面板 · 登录后使用（新账号需管理员审批）";
   $("#loginPass2").classList.toggle("hidden", !(setup || register));
   $("#regKeys").classList.toggle("hidden", !register);
   $("#loginSwitch").classList.toggle("hidden", setup);

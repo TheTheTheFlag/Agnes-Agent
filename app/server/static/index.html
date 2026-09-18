@@ -193,7 +193,7 @@
       <svg viewBox="0 0 32 32" width="36" height="36"><rect width="32" height="32" rx="8" fill="url(#brandGrad)"/><path d="M10 21l6-10 6 10" stroke="white" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
     </div>
     <h2 class="login-title" id="loginTitle">Agnes Agent</h2>
-    <p class="login-sub" id="loginSub">设置面板 · 登录后使用</p>
+    <p class="login-sub" id="loginSub">多用户面板 · 登录后使用（新账号需管理员审批）</p>
     <form id="loginForm" autocomplete="off">
       <input id="loginUser" type="text" placeholder="账号" autocomplete="username" spellcheck="false">
       <input id="loginPass" type="password" placeholder="密码" autocomplete="current-password">
@@ -203,9 +203,10 @@
         <div class="key-hint">获取：<a href="https://platform.agnes-ai.cn/settings/apiKeys" target="_blank" rel="noopener">platform.agnes-ai.cn/settings/apiKeys</a></div>
         <input id="regSfKey" type="password" placeholder="硅基流动 API Key" autocomplete="off" spellcheck="false">
         <div class="key-hint">获取：<a href="https://cloud.siliconflow.cn/me/account/ak" target="_blank" rel="noopener">cloud.siliconflow.cn/me/account/ak</a></div>
+        <div class="key-hint">Key 仅用于你本人的对话推理与向量化，加密存储、不出现在前端。</div>
       </div>
       <div id="loginError" class="login-error hidden"></div>
-      <div id="loginPending" class="login-pending hidden">注册已提交，请等待管理员审批通过后再登录。</div>
+      <div id="loginPending" class="login-pending hidden">注册已提交，等待管理员审批通过后即可登录。</div>
       <button id="btnLogin" type="submit">登 录</button>
       <div id="loginSwitch" class="login-switch"><a href="#" id="linkRegister">注册新账号</a></div>
     </form>

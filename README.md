@@ -15,6 +15,7 @@
 - [项目背景](#-项目背景)
 - [核心特性](#-核心特性)
 - [快速上手](#-快速上手)
+- [多用户账号体系](#-多用户账号体系)
 - [业务流程（从一次对话到记忆落库）](#-业务流程从一次对话到记忆落库)
 - [模块架构（按 Agent 能力分类）](#-模块架构按-agent-能力分类)
 - [设计思路与实现过程](#-设计思路与实现过程)
@@ -65,7 +66,7 @@ Web 面板（默认 http://localhost:8081，被占自动顺延）：
 - ✅ **自定义 ReAct 循环**：亲手实现思考—行动—观察闭环（`ReActLoop`），支持工具安全拦截、人工审批、连续拒绝熔断、迭代上限防死循环
 - ✅ **分层记忆系统**：L1 对话消息（含工具调用事件） / L2 用户画像 / L3 任务历史（dag_plans） / L6 知识图谱 GraphRAG（实体关系图谱 + 混合检索，详见 [docs/l6-graphrag.md](docs/l6-graphrag.md)；原 L4 命令历史与 L5 语义缓存已并入 L1 事件与 L6 图谱）
 - ✅ **实体归一化双保险**：入库前 `normalize_terms` 术语还原 + 入库后 `merge_entities` 图谱合并，抑制 LightRAG 大小写/拼写变体导致的实体节点膨胀（`RAG/Rag`、`GraphRAG/GraphRag` 等只留一个规范节点）
-- ✅ **多 Key 自动轮换**：api_key 逗号分隔，限流/超时/鉴权自动换 key + 指数退避重试
+- ✅ **多 Key 自动轮换**：api_key 逗号分隔，限流/超时/鉴权自动换 key + 指数退避重试；**按用户隔离**——普通用户只用自己注册时提交的 Key，管理员（Mirror）使用全局 Key + 所有已激活用户的 Key 汇成轮询池
 - ✅ **知识库（KB）管理**：文档/分块/检索/问答反馈管理，每库可覆盖分块策略与抽取指引；对话图谱默认**全局共享一张图**（所有会话读写同一命名空间 `__global__`，跨会话可共享每轮对话知识）；用户经 `kb_create` 显式创建的知识库是**独立命名空间**（`lightrag_storage/<kb_id>/` 自含目录/图谱/向量索引），消息框可**多选勾选**确定本轮 L6 检索范围——**勾了什么查什么，什么都没勾就什么都不查**（`__global__` 只是列表里的一项；默认一个都不勾，勾选结果存在浏览器 localStorage 下次自动恢复）；`GRAPH_NAMESPACE=per_thread` 可退回按线程隔离
 - ✅ **技能系统（Skills）**：SKILL.md 即技能，命中本地装、不够用 SkillHub 在线搜装
 - ✅ **沉浸式 Web 面板**：流式对话、工具状态行、审批卡片、State/日志/记忆/定时任务调试抽屉、模型一键切换
@@ -112,7 +113,7 @@ LLM 类型: <class 'app.llm.llm_factory.RotatingKeyChatOpenAI'> | provider=opena
 
 > `python -m app.main` 现在是纯后台服务模式（无终端对话循环），与 `python -m app.service` 基本等价，但端口被占时会自动顺延到 8082+。遗留参数 `--new` 可开启新会话。
 
-打开 http://localhost:8000 即可使用。**首次打开调试面板时会引导你设置账号密码**——凭据以 PBKDF2-SHA256（12 万轮 + 随机 salt）存入 `data/auth.json`（已 `.gitignore`，不含明文密码）；想重置就删掉该文件再刷新页面。若设置了 `.env` 的 `AGENT_USERNAME` / `AGENT_PASSWORD`（两个都填才生效），则优先使用它，适合无人值守部署。首次使用先到右上角 **设置 → 模型** 页接入你的模型（填 Base URL + API Key，可自动拉取模型列表）。
+打开 http://localhost:8081 即可使用。**首次打开调试面板时会引导你设置首个管理员账号（admin）**——凭据以 PBKDF2-SHA256（12 万轮 + 随机 salt）存入 `data/accounts.db`（已 `.gitignore`，不含明文密码）。其余用户在登录页「注册新账号」提交后，由管理员在 **设置 → 用户管理** 中审批通过/拒绝。若设置了 `.env` 的 `AGENT_USERNAME` / `AGENT_PASSWORD`（两个都填才生效），则视为管理员凭据，适合无人值守部署。首次使用先到右上角 **设置 → 模型** 页接入你的模型（填 Base URL + API Key，可自动拉取模型列表）。
 
 > `.env` 只放非模型密钥（如 `TAVILY_API_KEY`）；模型凭据统一在 `data/.model_config` 由设置页管理。
 >
@@ -161,6 +162,47 @@ journalctl -u agnes-agent -f                          # 看日志
 ```
 
 > 服务默认**保留热重载**（改 `app/` 代码或 `data/.model_config` 自动重建）；生产环境想关闭可给启动命令追加 `--no-reload`。脚本/单元文件里的端口、路径按需修改。
+
+---
+
+## 👥 多用户账号体系
+
+从 2026 年起项目支持**多用户**：不只共享一个面板，而是每个用户拥有独立的数据、密钥、会话、记忆与知识库。账号数据在 `data/accounts.db`（PBKDF2-SHA256 哈希 + 随机 token 会话，登录态 7 天有效）。
+
+**角色与状态**
+
+| 角色 | 说明 |
+|---|---|
+| `admin` | 首个 `setup` 创建的管理员；可审批用户、管理全局模型配置、执行 `/api/git/*`、定时任务与自动快照 |
+| `user` | 普通用户：填 Key 注册 → 等待管理员审批 → 登录后独立使用面板 |
+
+用户状态：`pending`（注册待审批，无法登录）/ `active`（可用）/ `rejected`（被拒绝，登录返回 403 + 原因）。
+
+**注册 → 审批流程**
+
+1. 登录页点「注册新账号」：填写账号、密码、**Agnes API Key** 与**硅基流动 API Key**（会即时做一次可用性校验）。
+2. 提交后状态为 `pending`，页面提示「等待管理员审批」。
+3. 管理员在 **设置 → 用户管理** 中查看 / 通过 / 拒绝；通过后该用户即可登录。
+
+**每用户隔离**
+
+每个用户都落在 `data/users/<username>/` 下，内容互不可见：
+
+```
+data/users/<username>/
+├── data/                  # memory.db 记忆库、checkpoints.db 会话检查点
+├── uploads/               # 图片/文件上传（前端按 /api/uploads/<name> 渲染）
+├── deliverables/          # Agent 生成的交付物
+├── lightrag_storage/      # 该用户专属的知识图谱（L6 与 KB 命名空间）
+├── skills/                # 该用户安装的技能（内置技能对所有用户可见）
+├── .thread_id             # 当前会话 thread_id（缺省 "default"）
+└── .approval_mode         # 审批模式：per_ask / session_allow / always_allow
+```
+
+- **Key 策略**：普通用户仅使用自己提交的 Agnes / 硅基流动 Key（embedding、rerank、对话推理都走本人 Key，加密存储、不出现在前端）；管理员全局 Key + 所有 active 用户的 Key 组成轮询池。`/api/models` 对非管理员一律脱敏为 `****xxxx`。
+- **权限边界**：工具层对非管理员隐藏 `execute_command`（命令执行）与 `tavily_search`（联网搜索）；`/api/git/*`、`/api/scheduler`、自动 git 快照仅管理员可用；非管理员每次对话写入自己 `data/users/` 下的工作区，不会产生仓库级 commit。
+- **审批模式**：每次询问 / 本次会话允许 / 永久允许，按用户单独记忆（`.approval_mode`），互不继承。
+- **迁移**：升级自旧版（单用户）时，服务启动会把仓库级 `data/`、`lightrag_storage/` 等旧数据自动迁移到 `data/users/Mirror/`，管理员即旧版用户，无缝衔接。
 
 ---
 
@@ -678,7 +720,8 @@ Agnes-Agent/
 │   ├── planning/                  # 规划层：dag_planner/dag_executor/dag_summarizer
 │   │                              #   + dag_core(DAG 计算) + dag_storage(三表+checkpoint) + react_loop
 │   ├── tools/                     # 工具层：文件/命令/记忆/搜索/图谱/技能/规划触发（集中注册）
-│   ├── skills/                    # 技能层：loader(扫描 SKILL.md) + hub(SkillHub) + 用户技能
+│   ├── skills/                    # 技能层：loader(内置+每用户目录扫描 SKILL.md) + hub(SkillHub)
+│   ├── skills_builtin/            # 归档的历史内置技能（内置仅保留 agent-browser）
 │   └── server/                    # 服务层：FastAPI + SSE 流式 + 调试面板前端
 │       ├── api/                   # chat(双通道流) / kb(知识库) / memory / tools / graph / system / skills / git / upload / image(图片) / video(视频)
 │       ├── store.py               # 日志 / 事件流 / State 快照 / 会话删除
@@ -687,7 +730,9 @@ Agnes-Agent/
 │       ├── git_ops.py             # 自动 git 快照
 │       ├── auth.py                # PBKDF2 认证
 │       └── static/                # 前端（index.html + app.js + style.css + image-studio.js + video-studio.js）
-├── data/                          # 运行时数据（memory.db / checkpoints.db / app_logs.db / traces/ / auth.json）
+├── data/                          # 运行时数据：accounts.db（账号）/ .model_config（全局模型配置）
+│   │                              # + users/<username>/  每用户：data/(memory.db+checkpoints.db)
+│   │                              #   uploads/ deliverables/ lightrag_storage/ skills/ .thread_id .approval_mode
 ├── lightrag_storage/              # L6 知识图谱持久化（默认全局共享一张图：__global__ 子目录含 KV + 图谱 + 向量索引；GRAPH_NAMESPACE=per_thread 时每会话一个子目录）
 ├── neo4j/                         # 本地 Neo4j 5.26 图数据库（GRAPH_STORAGE=neo4j 时使用；gitignored）
 ├── .runtime/                      # 本地 JDK21（Neo4j 运行时依赖；gitignored）
