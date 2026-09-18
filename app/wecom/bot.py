@@ -20,13 +20,17 @@ Agent 调用与 /api/chat 完全一致，因此企业微信里同样带多轮上
     WECHAT_BOT_KBS           可选，逗号分隔的知识库，限定企业微信侧检索范围
 
 会话映射：每个企微会话固定映射到一个 thread_id —— 单聊 wx:single:<userid>，群聊 wx:group:<chatid>。
+
+图片：图片/图文混排回调里的图片会下载并 AES 解密后落到项目 uploads/ 目录，再把 uploads/xxx 路径
+随用户文字一起交给 Agent（与 Web 面板上传图片的约定一致），由 Agent 调用图片理解技能识别。
 """
 from __future__ import annotations
 
 import asyncio
 import os
 import re
-from typing import Any, Dict, List, Optional
+import uuid
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     from aibot import WSClient, WSClientOptions, generate_req_id
@@ -39,8 +43,8 @@ except Exception:  # 未安装 SDK 时不阻断服务启动
 _STREAM_MAX_BYTES = 20480
 # 群里消息形如 "@机器人 你好"，去掉开头的 @提及
 _MENTION_RE = re.compile(r"^\s*@\S+\s*")
-# 不支持的消息类型提示文案
-_MEDIA_HINT = {"image": "图片", "file": "文件", "video": "视频"}
+# 不支持的消息类型提示文案（图片已支持：下载解密后交给 Agent 用图片理解技能）
+_MEDIA_HINT = {"file": "文件", "video": "视频"}
 # SDK 会单独分发的事件类型（其余走 message 兜底）
 _SDK_MSGTYPES = {"text", "mixed", "voice", "image", "file"}
 
@@ -140,6 +144,78 @@ def _extract_text(body: dict) -> Optional[str]:
     if quote_text:
         text = f"（引用消息：{quote_text}）\n{text}"
     return text
+
+
+def _extract_images(body: dict) -> List[dict]:
+    """取回调里的图片：纯图片消息 或 图文混排中的 image 项。每项 {url, aeskey}。"""
+    msgtype = (body.get("msgtype") or "").strip().lower()
+    if msgtype == "image":
+        img = body.get("image") or {}
+        return [img] if img.get("url") else []
+    if msgtype == "mixed":
+        out = []
+        for item in ((body.get("mixed") or {}).get("msg_item") or []):
+            if (item.get("msgtype") or "").strip().lower() == "image":
+                img = item.get("image") or {}
+                if img.get("url"):
+                    out.append(img)
+        return out
+    return []
+
+
+def _guess_ext(fname: Optional[str], data: bytes) -> str:
+    """图片扩展名：优先用回调文件名，否则按魔数判断。"""
+    if fname:
+        ext = os.path.splitext(fname)[1].lower()
+        if re.fullmatch(r"\.[a-z0-9]{1,5}", ext or ""):
+            return ext
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if data.startswith(b"GIF8"):
+        return ".gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return ".webp"
+    if data.startswith(b"BM"):
+        return ".bmp"
+    return ".jpg"
+
+
+async def _save_images(client, images: List[dict], msgid: str) -> List[Tuple[str, str, int]]:
+    """下载并按企微 aeskey 解密图片，落到项目 uploads/。
+    返回 [(展示名, 相对路径 uploads/xxx, 字节数)]，失败的图片跳过并记日志。"""
+    try:
+        from app.server.api.upload import UPLOAD_DIR
+    except Exception:
+        from app.config import BASE_DIR
+        UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+    refs: List[Tuple[str, str, int]] = []
+    stem = (re.sub(r"[^A-Za-z0-9]", "", msgid or "")[:16]) or uuid.uuid4().hex[:12]
+    for i, img in enumerate(images):
+        url = (img or {}).get("url")
+        aeskey = (img or {}).get("aeskey")
+        if not url:
+            continue
+        try:
+            data, fname = await client.download_file(url, aeskey)
+        except Exception as e:
+            _log(f"图片下载/解密失败：{e}", "warn")
+            continue
+        if not data:
+            _log("图片下载结果为空，跳过", "warn")
+            continue
+        name = f"wecom_{stem}_{i}{_guess_ext(fname, data)}"
+        try:
+            with open(os.path.join(UPLOAD_DIR, name), "wb") as f:
+                f.write(data)
+        except Exception as e:
+            _log(f"图片落盘失败：{e}", "warn")
+            continue
+        refs.append((name, f"uploads/{name}", len(data)))
+    return refs
 
 
 def _hard_cut(s: str, limit: int) -> tuple:
@@ -256,6 +332,27 @@ async def _handle_message(frame: dict):
     thread_id = _thread_id(body, cfg["prefix"])
     userid = (body.get("from") or {}).get("userid") or ""
     text = _extract_text(body)
+    images = _extract_images(body)
+
+    # 图片：下载解密后落到 uploads/，把路径连同用户文字交给 Agent（由图片理解技能识别）
+    if images:
+        refs = await _save_images(client, images, msgid)
+        if refs:
+            img_lines = "\n".join(f"![{name}]({path})" for name, path, _ in refs)
+            instr = (
+                "（用户发来图片，已保存到项目目录下，请用图片理解技能识别图片内容后再回答）"
+            )
+            text = img_lines + "\n" + instr + (("\n\n" + text) if text else "")
+            _log(f"收到图片 {len(refs)} 张，已保存：" + ", ".join(p for _, p, _ in refs))
+        elif text is None:
+            try:
+                await client.reply_stream(
+                    frame, generate_req_id("stream"),
+                    "图片接收失败（下载或解密出错），请重发一次或改用文字描述。", finish=True,
+                )
+            except Exception as e:
+                _log(f"图片失败提示发送失败：{e}", "warn")
+            return
 
     if text is None:
         msgtype = (body.get("msgtype") or "").strip().lower()
