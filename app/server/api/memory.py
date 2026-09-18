@@ -17,6 +17,11 @@ async def get_messages(thread_id: str = Query("default"), limit: int = Query(200
     type：消息类型筛选（默认 all=全部；可选 chat / node_start / node_end / llm_call /
     tool_call / thought / approval；chat 覆盖 role=user/assistant/tool 的对话文本，
     事件类对应页面事件气泡；可用逗号分隔传多个，如 type=llm_call,tool_call）。"""
+    try:
+        from app.server.store import _ensure_persist
+        _ensure_persist()
+    except Exception:
+        pass
     import sqlite3 as _sqlite
     try:
         import tiktoken
@@ -109,6 +114,11 @@ async def get_threads():
     """列出所有有过活动的 thread（来自 messages），
     并把当前会话（main.py 注入的 thread_id）置顶、标记 current=true。
     每项携带 last_user_msg（该会话最后一条用户消息，供列表标题展示）。"""
+    try:
+        from app.server.store import _ensure_persist
+        _ensure_persist()
+    except Exception:
+        pass
     import sqlite3 as _sqlite
     db = _sqlite.connect(DB_PATH)
     out = []
@@ -171,12 +181,16 @@ async def inspect_checkpoint(thread_id: str = Query("default")):
         except ImportError:
             return {"found": True, "error": "msgpack / ormsgpack 未安装", "blob_size": len(blob)}
     db = _sqlite.connect(CHECKPOINT_DB_PATH)
-    cur = db.execute(
-        """SELECT checkpoint, metadata FROM checkpoints
-           WHERE thread_id = ? ORDER BY checkpoint_id DESC LIMIT 1""",
-        (thread_id,)
-    )
-    row = cur.fetchone()
+    try:
+        cur = db.execute(
+            """SELECT checkpoint, metadata FROM checkpoints
+               WHERE thread_id = ? ORDER BY checkpoint_id DESC LIMIT 1""",
+            (thread_id,)
+        )
+        row = cur.fetchone()
+    except _sqlite.OperationalError:
+        db.close()
+        return {"found": False, "thread_id": thread_id}
     db.close()
     if not row:
         return {"found": False, "thread_id": thread_id}
@@ -237,13 +251,18 @@ async def get_checkpoint_api(thread_id: str = Query("default")):
     """从 LangGraph SqliteSaver 读最新 checkpoint 的元信息。"""
     import sqlite3 as _sqlite
     db = _sqlite.connect(CHECKPOINT_DB_PATH)
-    cur = db.execute(
-        """SELECT thread_id, checkpoint_id, parent_checkpoint_id, type, checkpoint, metadata
-           FROM checkpoints WHERE thread_id = ?
-           ORDER BY checkpoint_id DESC LIMIT 1""",
-        (thread_id,)
-    )
-    row = cur.fetchone()
+    try:
+        cur = db.execute(
+            """SELECT thread_id, checkpoint_id, parent_checkpoint_id, type, checkpoint, metadata
+               FROM checkpoints WHERE thread_id = ?
+               ORDER BY checkpoint_id DESC LIMIT 1""",
+            (thread_id,)
+        )
+        row = cur.fetchone()
+    except _sqlite.OperationalError:
+        # 新用户尚无 checkpoints 表（首次对话前）
+        db.close()
+        return {"found": False, "thread_id": thread_id}
     db.close()
     if not row:
         return {"found": False, "thread_id": thread_id}
@@ -264,11 +283,14 @@ async def diff_checkpoints_api(thread_id: str = Query("default"), from_id: str =
     import sqlite3 as _sqlite
     db = _sqlite.connect(CHECKPOINT_DB_PATH)
     def fetch(cid):
-        cur = db.execute(
-            "SELECT checkpoint, metadata FROM checkpoints WHERE thread_id=? AND checkpoint_id=?",
-            (thread_id, cid)
-        )
-        row = cur.fetchone()
+        try:
+            cur = db.execute(
+                "SELECT checkpoint, metadata FROM checkpoints WHERE thread_id=? AND checkpoint_id=?",
+                (thread_id, cid)
+            )
+            row = cur.fetchone()
+        except _sqlite.OperationalError:
+            return None
         if not row:
             return None
         return {

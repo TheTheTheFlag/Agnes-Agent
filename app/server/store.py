@@ -89,7 +89,7 @@ _inited_users = set()
 
 
 def _ensure_persist():
-    """按当前用户确保 app_logs/app_events 表存在（首次访问某用户时建表）。"""
+    """按当前用户确保 app_logs/app_events 与 messages 等记忆表存在（首次访问某用户时建表）。"""
     try:
         from app.userctx import current_user
         u = current_user()
@@ -98,6 +98,13 @@ def _ensure_persist():
     if u in _inited_users:
         return
     _init_persist()
+    # 新用户首次访问：memory.db 只有我们刚建的 app_logs/app_events，messages 等表
+    # 须由 MemoryManager 建好，否则 /api/threads、/api/messages 会 500。
+    try:
+        from app.memory import MemoryManager
+        MemoryManager(db_path=DB_PATH)._init_db()
+    except Exception:
+        pass
     _inited_users.add(u)
 
 
@@ -114,6 +121,8 @@ def delete_thread_records(thread_id: str) -> dict:
         cur = db.execute("DELETE FROM history_summaries WHERE thread_id = ?", (thread_id,))
         counts["summaries"] += cur.rowcount
         db.commit()
+    except _sqlite.OperationalError:
+        pass  # 新用户空库尚无 messages 表
     finally:
         db.close()
 
