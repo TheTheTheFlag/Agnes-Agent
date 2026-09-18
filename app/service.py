@@ -15,6 +15,7 @@
 from dotenv import load_dotenv
 load_dotenv()
 
+import asyncio
 import os
 import sys
 import uuid
@@ -86,8 +87,18 @@ async def lifespan(_app):
     tid = config["configurable"]["thread_id"]
     add_log_entry("info", f"Service 启动 (thread_id={tid}, hot_reload={_HOT_RELOAD})")
     print(f"[service] graph 已注入 · thread_id={tid} · 热重载={'开' if _HOT_RELOAD else '关'}")
-    yield
-    add_log_entry("info", "Service 关闭")
+
+    # 企业微信「智能机器人」长连接：配置了 WECHAT_BOT_ID/SECRET 才真正启动，
+    # 失败只记日志（不影响 HTTP 服务）。用任务方式启动，避免建连阻塞服务就绪。
+    from app.wecom.bot import start_wecom_bot, stop_wecom_bot
+    _wecom_task = asyncio.create_task(start_wecom_bot())
+
+    try:
+        yield
+    finally:
+        _wecom_task.cancel()
+        stop_wecom_bot()
+        add_log_entry("info", "Service 关闭")
 
 
 # FastAPI 在 app.server 创建 app 时未传 lifespan，这里覆盖 router 的默认 lifespan，
