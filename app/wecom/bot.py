@@ -308,6 +308,16 @@ async def _handle_event(client, frame: dict):
         _log(f"未处理事件：{eventtype}", "debug")
 
 
+async def _handle_disconnected_event(client, frame: dict):
+    """被新连接踢出：企微同一 BotID 只允许一条长连接。
+    官方 SDK 收到此事件不会自动重连，这里明确报错，避免消息静默丢失。"""
+    _log(
+        "长连接被新连接接管并断开（同一 BotID 只允许一条长连接）："
+        "请确认没有第二个实例或其他机器人在使用同一个 BotID",
+        "error",
+    )
+
+
 async def _handle_any_message(client, frame: dict):
     """兜底：SDK 未单独分发的高类型（如 video）也给出提示，避免用户消息石沉大海。"""
     body = frame.get("body") or {}
@@ -322,6 +332,7 @@ def _register(client):
         client.on(name, _handle_message)
     client.on("message", _handle_any_message)
     client.on("event.enter_chat", _handle_event)
+    client.on("event.disconnected_event", _handle_disconnected_event)
     client.on("authenticated", lambda: _log("长连接认证成功，已开始接收消息"))
     client.on("disconnected", lambda reason: _log(f"长连接断开：{reason}", "warn"))
     client.on("reconnecting", lambda attempt: _log(f"长连接重连中（第 {attempt} 次）", "warn"))
