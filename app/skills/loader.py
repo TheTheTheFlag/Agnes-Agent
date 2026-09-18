@@ -10,8 +10,8 @@
   正文...          # 可选，给模型的操作步骤指引
 
 扫描范围（多用户）：
-  - 内置：app/skills/<name>/SKILL.md（仅随版本发布的 agent-browser 等极少数技能）
-  - 用户：data/users/<当前用户>/skills/<name>/SKILL.md（SkillHub 安装都落这里，按用户隔离）
+  - 内置：app/skills/<name>/SKILL.md（随版本发布、人人可见：agent-browser / find-skills / create-skill）
+  - 用户：data/users/<当前用户>/skills/<name>/SKILL.md（按用户隔离；管理员等可预置更多技能）
   用户技能同名时覆盖内置。安装（install_skill_md）一律写入**当前用户**目录。
 
 loader 每次调用实时扫描（无缓存），因此新增/修改 SKILL.md 立即生效，

@@ -194,7 +194,7 @@ data/users/<username>/
 ├── uploads/               # 图片/文件上传（前端按 /api/uploads/<name> 渲染）
 ├── deliverables/          # Agent 生成的交付物
 ├── lightrag_storage/      # 该用户专属的知识图谱（L6 与 KB 命名空间）
-├── skills/                # 该用户安装的技能（内置技能对所有用户可见）
+├── skills/                # 该用户安装/预置的技能（内置技能 agent-browser / find-skills / create-skill 对所有用户可见）
 ├── .thread_id             # 当前会话 thread_id（缺省 "default"）
 └── .approval_mode         # 审批模式：per_ask / session_allow / always_allow
 ```
@@ -721,7 +721,7 @@ Agnes-Agent/
 │   │                              #   + dag_core(DAG 计算) + dag_storage(三表+checkpoint) + react_loop
 │   ├── tools/                     # 工具层：文件/命令/记忆/搜索/图谱/技能/规划触发（集中注册）
 │   ├── skills/                    # 技能层：loader(内置+每用户目录扫描 SKILL.md) + hub(SkillHub)
-│   ├── skills_builtin/            # 归档的历史内置技能（内置仅保留 agent-browser）
+│   ├── skills_builtin/            # 历史技能归档；内置技能 = agent-browser / find-skills / create-skill，其余按需预置到管理员账号
 │   └── server/                    # 服务层：FastAPI + SSE 流式 + 调试面板前端
 │       ├── api/                   # chat(双通道流) / kb(知识库) / memory / tools / graph / system / skills / git / upload / image(图片) / video(视频)
 │       ├── store.py               # 日志 / 事件流 / State 快照 / 会话删除

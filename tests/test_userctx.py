@@ -298,10 +298,49 @@ class SkillInstallPerUserTest(unittest.TestCase):
             userctx.reset_current_user(tok)
         self.assertNotIn("demo-skill", bob_names)
 
-    def test_builtin_dir_still_scanned(self):
+    def test_builtin_skills_available_to_everyone(self):
         from app.skills import loader
         names = {s["name"] for s in loader.load_all_skills()}
+        # 人人可见的内置技能
         self.assertIn("agent-browser", names)
+        self.assertIn("find-skills", names)
+        self.assertIn("create-skill", names)
+
+    def test_mirror_legacy_skills_only_in_mirror_dir(self):
+        """预置给 Mirror 的历史技能只存在于 Mirror 自己的技能目录，其他用户不可见。"""
+        from app.skills import loader
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        mirrorskills = os.path.join(tmp, "Mirror", "skills")
+        os.makedirs(mirrorskills, exist_ok=True)
+        for s in ("agnes-media", "ai-trends-reporter", "amap-commute", "amap-weather", "Image-Understanding"):
+            os.makedirs(os.path.join(mirrorskills, s), exist_ok=True)
+            with open(os.path.join(mirrorskills, s, "SKILL.md"), "w", encoding="utf-8") as f:
+                f.write(f"---\nname: {s}\ndescription: legacy skill {s}\n---\n")
+        # Mirror 看到内置 + 自己的历史技能
+        old_udir = userctx.USERS_DIR
+        userctx.USERS_DIR = tmp
+        self._tok = userctx.set_current_user("Mirror")
+        try:
+            mirror_names = {x["name"] for x in loader.load_all_skills()}
+        finally:
+            userctx.reset_current_user(self._tok)
+            userctx.USERS_DIR = old_udir
+            userctx._ensured_users.clear()
+        self.assertIn("agnes-media", mirror_names)
+        self.assertIn("amap-weather", mirror_names)
+        # 普通用户看不到历史技能
+        userctx.USERS_DIR = tmp
+        self._tok = userctx.set_current_user("Test")
+        try:
+            test_names = {x["name"] for x in loader.load_all_skills()}
+        finally:
+            userctx.reset_current_user(self._tok)
+            userctx.USERS_DIR = old_udir
+            userctx._ensured_users.clear()
+        self.assertNotIn("agnes-media", test_names)
+        self.assertNotIn("amap-commute", test_names)
+        self.assertIn("agent-browser", test_names)
 
 
 class PerUserStateTest(unittest.TestCase):
