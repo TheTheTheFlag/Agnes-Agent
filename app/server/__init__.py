@@ -155,6 +155,7 @@ from app.server.api import graph as _api_graph
 from app.server.api import kb as _api_kb
 from app.server.api import image as _api_image
 from app.server.api import video as _api_video
+from app.server.api import debug as _api_debug
 from app.server.api import settings as _api_settings
 app.include_router(_api_system.router)
 app.include_router(_api_memory.router)
@@ -167,6 +168,7 @@ app.include_router(_api_graph.router)
 app.include_router(_api_kb.router)
 app.include_router(_api_image.router)
 app.include_router(_api_video.router)
+app.include_router(_api_debug.router)
 app.include_router(_api_settings.router)
 
 # 登录校验：登录/注册接口 + 管理员审批 + 全 API 保护中间件
@@ -647,14 +649,8 @@ async def mdb_clear(payload: dict):
 
 
 def _sched_admin_guard(request: Request):
-    """定时任务以管理员（Mirror）身份执行，仅管理员可管理，避免越权。"""
-    try:
-        from app.server.accounts import is_admin
-        u = getattr(getattr(request, "state", None), "username", None)
-        if u and not is_admin(u):
-            return JSONResponse({"error": "定时任务仅管理员可用"}, status_code=403)
-    except Exception:
-        pass
+    """定时任务对所有已登录用户开放，移除管理员限制。"""
+    # 已移除权限检查，所有登录用户可访问
     return None
 
 

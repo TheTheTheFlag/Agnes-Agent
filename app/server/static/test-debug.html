@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html>
+<head><title>Debug测试</title></head>
+<body>
+<h2>Debug测试页面</h2>
+<button onclick="testLog()">测试日志API</button>
+<button onclick="testUpload()">测试上传</button>
+<div id="result"></div>
+<script>
+async function testLog() {
+  const resp = await fetch('/api/debug/log?msg=test_message_from_page');
+  const data = await resp.json();
+  document.getElementById('result').textContent = '日志API: ' + JSON.stringify(data);
+}
+
+async function testUpload() {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'image/*';
+  input.onchange = async (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    
+    const fd = new FormData();
+    fd.append('file', f);
+    
+    const resp = await fetch('/api/upload', {
+      method: 'POST',
+      body: fd,
+      credentials: 'include'
+    });
+    
+    const data = await resp.json();
+    document.getElementById('result').textContent = '上传: ' + JSON.stringify(data);
+  };
+  input.click();
+}
+
+// 页面加载时检查登录
+fetch('/api/auth/status', { credentials: 'include' })
+  .then(r => r.json())
+  .then(d => {
+    console.log('登录状态:', d);
+    document.getElementById('result').innerHTML = '用户: ' + (d.username || '未登录');
+  });
+</script>
+</body>
+</html>

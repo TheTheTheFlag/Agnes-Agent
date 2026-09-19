@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>最小化测试</title>
+</head>
+<body>
+<h2>最小化测试 - 视频参考图上传</h2>
+
+<div id="modeSeg">
+  <button onclick="setMode('text')">文生视频</button>
+  <button onclick="setMode('reference')">图片参考</button>
+</div>
+
+<div id="refBlock" style="display:none; margin:20px 0; padding:20px; border:1px solid #ccc;">
+  <h3>参考图区域</h3>
+  <div id="refs"></div>
+  <button onclick="addRef()">＋ 添加参考图</button>
+  <input type="file" id="fileInput" accept="image/*" multiple style="display:none">
+</div>
+
+<div id="status">等待操作...</div>
+
+<script>
+let currentMode = 'text';
+let refs = [];
+
+function log(msg) {
+  document.getElementById('status').textContent = msg;
+  console.log(msg);
+}
+
+function setMode(mode) {
+  currentMode = mode;
+  const block = document.getElementById('refBlock');
+  if (mode === 'reference' || mode === 'keyframe') {
+    block.style.display = 'block';
+    log(`✅ 切换到${mode === 'reference' ? '图片参考' : '首尾帧'}模式，参考图区域已显示`);
+  } else {
+    block.style.display = 'none';
+    log(`切换到${mode}模式，参考图区域已隐藏`);
+  }
+}
+
+function addRef() {
+  log('点击了"添加参考图"按钮');
+  document.getElementById('fileInput').click();
+}
+
+document.getElementById('fileInput').addEventListener('change', async (e) => {
+  const files = e.target.files;
+  log(`选择了 ${files.length} 个文件`);
+  
+  for (const f of files) {
+    log(`上传: ${f.name}`);
+    
+    const fd = new FormData();
+    fd.append('file', f);
+    
+    try {
+      const resp = await fetch('/api/upload', {
+        method: 'POST',
+        body: fd,
+        credentials: 'include'
+      });
+      
+      log(`响应: ${resp.status}`);
+      
+      if (resp.status === 401) {
+        log('❌ 未登录');
+        return;
+      }
+      
+      const data = await resp.json();
+      log(`上传成功: ${data.path}`);
+      
+      refs.push({ path: data.path, name: data.name });
+      renderRefs();
+      
+    } catch (err) {
+      log(`❌ 错误: ${err.message}`);
+    }
+  }
+  
+  // 重置input
+  e.target.value = '';
+});
+
+function renderRefs() {
+  const container = document.getElementById('refs');
+  if (refs.length === 0) {
+    container.innerHTML = '<p>暂无参考图</p>';
+    return;
+  }
+  
+  container.innerHTML = refs.map((r, i) => `
+    <div style="border:1px solid #ccc; padding:10px; margin:10px 0;">
+      <img src="/api/uploads/${encodeURIComponent(r.name)}" style="max-width:200px; max-height:200px;">
+      <p>${r.name}</p>
+      <p>路径: ${r.path}</p>
+    </div>
+  `).join('');
+  
+  log(`✅ 已渲染 ${refs.length} 张参考图`);
+}
+
+// 页面加载时检查登录状态
+log('页面加载完成');
+fetch('/api/auth/status', { credentials: 'include' })
+  .then(r => r.json())
+  .then(data => {
+    if (data.username) {
+      log(`✅ 已登录: ${data.username}`);
+    } else {
+      log('❌ 未登录，请先登录');
+    }
+  })
+  .catch(err => log(`❌ 检查登录失败: ${err.message}`));
+</script>
+</body>
+</html>

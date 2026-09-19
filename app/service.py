@@ -97,6 +97,19 @@ async def lifespan(_app):
     from app.wecom.bot import start_wecom_bot, stop_wecom_bot
     _wecom_task = asyncio.create_task(start_wecom_bot())
 
+    # 初始化用户作品库：热重载后 _user_items 会清空，需重新加载 manifest
+    try:
+        from app.server.api.image import _load_user_manifest as _load_image_manifest
+        from app.server.api.video import _load_user_manifest as _load_video_manifest
+        import app.server.accounts as _accounts
+        for _user_info in _accounts.list_users():
+            _u = _user_info.get("username") or _user_info
+            _load_image_manifest(_u)
+            _load_video_manifest(_u)
+        add_log_entry("info", f"用户作品库已初始化（{_accounts.count_users()} 个用户）")
+    except Exception as _e:
+        add_log_entry("warn", f"作品库初始化失败: {_e}")
+
     try:
         yield
     finally:
@@ -130,16 +143,15 @@ def main():
 
     # 用 import string 而非 app 实例：uvicorn 的 reload 模式要求 app 能以字符串形式
     # 重新加载，子进程重启时会重新 import 本模块（lifespan 重新注入 graph）→ 改代码即自动重启。
-    # 监控范围：app/ 下的 .py（代码）+ data/.model_config（模型配置）——模型配置改动
-    # 同样触发重建（lifespan 会重新 load_model_config 并注入新 graph）。
-    # 其余 data/*.db、data/traces/ 等运行期写入不在 reload_includes 内，不会误触发重启。
+    # 监控范围：仅 app/ 下的 .py（代码）；data/ 不在 reload_dirs 内，避免作品库文件变更触发误重启。
+    # （热重载后 lifespan 会重新初始化用户作品库，见上方代码）
     uvicorn.run(
         "app.service:app",
         host=args.host,
         port=args.port,
         reload=not args.no_reload,
-        reload_dirs=["app", "data"],          # 只监控这两处
-        reload_includes=[".model_config"],    # 默认已含 *.py，这里补充模型配置文件
+        reload_dirs=["app"],              # 仅监控代码目录
+        reload_includes=["*.py"],         # 默认已含，显式声明更清晰
         log_level="info",
     )
 

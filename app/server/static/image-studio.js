@@ -1,13 +1,8 @@
 /* ============================================================================
    图片创作工作台（Agnes Image 2.5 / 2.1 / 2.0 Flash）
-   ----------------------------------------------------------------------------
-   三模式创作：文生图 / 图生图 / 多图合成。
-   左侧创作台：模式切换 · 参考图（含角色标注）· 提示词（样式速选）· 参数（模型/档位/比例/张数）
-   右侧作品库：画廊网格 + 大图灯箱，支持下载 / 用图继续 / 复用提示词 / 同参重绘 / 删除。
-   所有数据走 /api/image/*（受登录保护），密钥在服务端解析，前端见不到明文。
-   依赖 app.js 全局工具：$ / $$ / apiGet / apiPost / escapeHtml / truncate / fmtAgo /
-   toast / drawerSection / drawerErr / State。
    ============================================================================ */
+window.__imageStudioLoading = true;
+console.log("[image-studio.js] 开始执行...");
 
 const IMAGE_MODE_META = {
   txt2img: { i: "✦", t: "文生图", d: "一句话描述 → 生成全新图像", hint: "[主体] + [场景 / 环境] + [风格] + [光照] + [构图] + [质量]",
@@ -38,12 +33,14 @@ const Studio = {
   refs: [],           // [{path, name, role}]
   busy: false,
   status: null,
-  gallery: [],        // manifest items
+  gallery: [],        // all manifest items (full list)
+  page: 1,            // current page
+  perPage: 50,        // items per page
   activeTab: false,
 };
 
 /* ---------- 主渲染 ---------- */
-async function renderStudioTab(el) {
+window.renderStudioTab = async function renderStudioTab(el) {
   el.innerHTML = `
     <div class="st">
       <div class="st-head">
@@ -104,6 +101,7 @@ async function renderStudioTab(el) {
             <button class="d-btn sm" id="stRefresh">⟳ 刷新</button>
           </div>
           <div id="stGrid" class="st-grid"><div class="d-empty">加载中…</div></div>
+          <div id="stPagination" class="st-pagination" style="display:none"></div>
         </section>
       </div>
     </div>`;
@@ -115,6 +113,7 @@ async function renderStudioTab(el) {
     ratio: $("#stRatio", el), px: $("#stPx", el), count: $("#stCount", el),
     gen: $("#stGen", el), busy: $("#stBusy", el), grid: $("#stGrid", el),
     countLbl: $("#stCountLbl", el), banner: $("#stKeyBanner", el), refBlock: $("#stRefBlock", el),
+    pagination: $("#stPagination", el),
   };
 
   // —— 状态 ——
@@ -198,7 +197,7 @@ function paintRefs() {
   }
   box.innerHTML = Studio.refs.map((r, i) => `
     <div class="st-ref">
-      <img src="/api/uploads/${encodeURIComponent(r.name)}" alt="">
+      <img src="${r.isLibrary ? '/api/image/file/' : '/api/uploads/'}${encodeURIComponent(r.name)}" alt="">
       <div class="st-ref-body">
         <span class="st-ref-tag">图 ${i + 1}</span>
         <input class="d-input st-role" data-i="${i}" placeholder="角色说明（可选，写进提示词用）" value="${escapeHtml(r.role || "")}">
@@ -232,7 +231,7 @@ async function onRefFiles(files) {
     if (f.size > 20 * 1024 * 1024) { toast("图片超过 20MB: " + f.name, "error"); continue; }
     try {
       const fd = new FormData(); fd.append("file", f);
-      const up = await fetch("/api/upload", { method: "POST", body: fd });
+      const up = await fetch("/api/upload", { method: "POST", body: fd, credentials: "include" });
       if (up.status === 401) return onUnauthorized();
       const ud = await up.json().catch(() => ({}));
       if (!up.ok) throw new Error(ud.error || "上传失败");
@@ -278,8 +277,9 @@ async function generate() {
 
 /* ---------- 作品库 ---------- */
 async function loadGallery() {
+  Studio.page = 1;
   try {
-    const r = await apiGet("/api/image/history?limit=120");
+    const r = await apiGet("/api/image/history?limit=2000");
     Studio.gallery = r.items || [];
   } catch (e) { /* 网络失败时保留现有视图 */ }
   paintGallery();
@@ -287,13 +287,24 @@ async function loadGallery() {
 
 const IMAGE_MODE_LBL = { txt2img: "文生图", img2img: "图生图", multi: "多图合成" };
 
+function getPaginatedItems() {
+  const total = Studio.gallery.length;
+  if (total <= Studio.perPage) return { items: Studio.gallery, page: 1, totalPages: 1, total };
+  const start = (Studio.page - 1) * Studio.perPage;
+  const items = Studio.gallery.slice(start, start + Studio.perPage);
+  const totalPages = Math.ceil(total / Studio.perPage);
+  return { items, page: Studio.page, totalPages, total };
+}
+
 function paintGallery() {
-  Studio.el.countLbl.textContent = Studio.gallery.length ? `共 ${Studio.gallery.length} 件` : "";
-  if (!Studio.gallery.length) {
+  const { items, page, totalPages, total } = getPaginatedItems();
+  Studio.el.countLbl.textContent = total ? `共 ${total} 件 · 第 ${page}/${totalPages} 页` : "";
+  if (!total) {
     Studio.el.grid.innerHTML = `<div class="d-empty" style="padding:36px 0;text-align:center">作品库为空 —— 从左侧创作台生成第一张图吧。</div>`;
+    Studio.el.pagination.style.display = "none";
     return;
   }
-  Studio.el.grid.innerHTML = Studio.gallery.map((it) => {
+  Studio.el.grid.innerHTML = items.map((it) => {
     const src = "/api/image/file/" + it.id + (it.thumb ? "?thumb=1" : "");
     return `
     <figure class="st-card" data-id="${escapeHtml(it.id)}">
@@ -315,17 +326,24 @@ function paintGallery() {
   }).join("");
 
   $$(".st-card", Studio.el.grid).forEach((card) => {
-    const item = Studio.gallery.find((g) => g.id === card.dataset.id);
+    const item = items.find((g) => g.id === card.dataset.id);
     if (!item) return;
-    $$("button[data-act]", card).forEach((b) => b.addEventListener("click", async () => {
+    // 点击图片区域也能打开灯箱
+    const cardImg = $$(".st-card-img", card)[0];
+    if (cardImg) {
+      cardImg.style.cursor = "zoom-in";
+      cardImg.addEventListener("click", () => openLightbox(item));
+    }
+    $$("[data-act]", card).forEach((b) => b.addEventListener("click", async () => {
       try {
         if (b.dataset.act === "open") openLightbox(item);
         else if (b.dataset.act === "copy") {
-          await navigator.clipboard.writeText(item.prompt || "");
+          await copyText(item.prompt || "");
           toast("提示词已复制", "success");
         } else if (b.dataset.act === "reuse") {
           Studio.mode = Studio.mode === "multi" ? "multi" : "img2img";
-          Studio.refs.push({ path: "image_library/" + item.file, name: item.file, role: "" });
+          // 使用 item.id（不带扩展名）作为图片ID
+          Studio.refs.push({ path: "image_library/" + item.file, name: item.id, role: "", isLibrary: true });
           paintMode(); paintRefs(); paintPromptPlaceholder();
           toast("已作为参考图加入创作台", "success");
         } else if (b.dataset.act === "redo") {
@@ -344,6 +362,41 @@ function paintGallery() {
         }
       } catch (e) { toast("操作失败: " + e.message, "error"); }
     }));
+  });
+
+  // 渲染分页控件
+  paintPagination(totalPages, page);
+}
+
+function paintPagination(totalPages, currentPage) {
+  if (totalPages <= 1) {
+    Studio.el.pagination.style.display = "none";
+    return;
+  }
+  Studio.el.pagination.style.display = "flex";
+  Studio.el.pagination.innerHTML = `
+    <button class="d-btn sm ${currentPage === 1 ? 'disabled' : ''}" data-page="prev" ${currentPage === 1 ? 'disabled' : ''}>‹ 上一页</button>
+    <span class="st-page-info">第 ${currentPage} / ${totalPages} 页</span>
+    <input type="number" class="st-page-input" min="1" max="${totalPages}" value="${currentPage}" placeholder="页码">
+    <button class="d-btn sm" data-page="go">跳转</button>
+    <button class="d-btn sm ${currentPage === totalPages ? 'disabled' : ''}" data-page="next" ${currentPage === totalPages ? 'disabled' : ''}>下一页 ›</button>
+  `;
+  $("[data-page='prev']", Studio.el.pagination).addEventListener("click", () => {
+    if (currentPage > 1) { Studio.page--; paintGallery(); }
+  });
+  $("[data-page='next']", Studio.el.pagination).addEventListener("click", () => {
+    if (currentPage < totalPages) { Studio.page++; paintGallery(); }
+  });
+  $("[data-page='go']", Studio.el.pagination).addEventListener("click", () => {
+    const input = $(".st-page-input", Studio.el.pagination);
+    const p = parseInt(input.value);
+    if (!isNaN(p) && p >= 1 && p <= totalPages && p !== currentPage) {
+      Studio.page = p; paintGallery();
+    }
+  });
+  // 回车跳转
+  $(".st-page-input", Studio.el.pagination).addEventListener("keydown", (e) => {
+    if (e.key === "Enter") $("[data-page='go']", Studio.el.pagination).click();
   });
 }
 
@@ -372,3 +425,6 @@ function openLightbox(item) {
   wrap.querySelector(".rg-modal-x").addEventListener("click", close);
   wrap.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", close));
 }
+window.__imageStudioLoading = false;
+window.__imageStudioReady = typeof renderStudioTab === "function";
+console.log("[image-studio.js] 执行完成，renderStudioTab:", typeof renderStudioTab, "ready:", window.__imageStudioReady);

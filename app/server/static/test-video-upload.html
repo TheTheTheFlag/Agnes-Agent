@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>测试视频参考图上传</title>
+<style>
+body { font-family: Arial, sans-serif; padding: 20px; }
+.test-section { margin: 20px 0; padding: 20px; border: 1px solid #ccc; }
+.log { background: #f0f0f0; padding: 10px; margin: 10px 0; pre { white-space: pre-wrap; } }
+button { padding: 10px 20px; margin: 5px; cursor: pointer; }
+input[type="file"] { margin: 10px 0; }
+</style>
+</head>
+<body>
+<h2>视频参考图上传测试</h2>
+
+<div class="test-section">
+<h3>测试1: 基本上传</h3>
+<input type="file" id="testFile" accept="image/*" multiple>
+<button onclick="testUpload1()">上传（无credentials）</button>
+<button onclick="testUpload2()">上传（credentials:include）</button>
+<div id="log1" class="log"></div>
+</div>
+
+<div class="test-section">
+<h3>测试2: 模拟video-studio流程</h3>
+<button onclick="testSimulate()">点击选择文件</button>
+<input type="file" id="simFile" accept="image/*" multiple style="display:none" onchange="onSimChange(event)">
+<div id="log2" class="log"></div>
+</div>
+
+<div class="test-section">
+<h3>测试3: 检查Cookie</h3>
+<button onclick="checkCookies()">查看Cookie</button>
+<div id="log3" class="log"></div>
+</div>
+
+<script>
+function log(id, msg) {
+  const el = document.getElementById(id);
+  const time = new Date().toISOString().substr(11, 12);
+  el.innerHTML += `<div>[${time}] ${msg}</div>`;
+  console.log(`[${time}]`, msg);
+}
+
+async function testUpload1() {
+  const file = document.getElementById('testFile').files[0];
+  if (!file) { alert('请先选择文件'); return; }
+  
+  log('log1', `选择文件: ${file.name} (${file.size} bytes)`);
+  
+  const fd = new FormData();
+  fd.append('file', file);
+  
+  log('log1', '发送请求（无credentials）...');
+  try {
+    const startTime = performance.now();
+    const resp = await fetch('/api/upload', { method: 'POST', body: fd });
+    const endTime = performance.now();
+    const duration = (endTime - startTime).toFixed(0);
+    
+    log('log1', `响应状态: ${resp.status} (${duration}ms)`);
+    const text = await resp.text();
+    log('log1', `响应内容: ${text.substring(0, 200)}`);
+  } catch (err) {
+    log('log1', `错误: ${err.message}`);
+  }
+}
+
+async function testUpload2() {
+  const file = document.getElementById('testFile').files[0];
+  if (!file) { alert('请先选择文件'); return; }
+  
+  log('log1', `选择文件: ${file.name} (${file.size} bytes)`);
+  
+  const fd = new FormData();
+  fd.append('file', file);
+  
+  log('log1', '发送请求（credentials: include）...');
+  try {
+    const startTime = performance.now();
+    const resp = await fetch('/api/upload', { 
+      method: 'POST', 
+      body: fd,
+      credentials: 'include'
+    });
+    const endTime = performance.now();
+    const duration = (endTime - startTime).toFixed(0);
+    
+    log('log1', `响应状态: ${resp.status} (${duration}ms)`);
+    const text = await resp.text();
+    log('log1', `响应内容: ${text.substring(0, 200)}`);
+  } catch (err) {
+    log('log1', `错误: ${err.message}`);
+  }
+}
+
+function testSimulate() {
+  log('log2', '触发文件选择...');
+  document.getElementById('simFile').click();
+}
+
+function onSimChange(event) {
+  const files = event.target.files;
+  log('log2', `选择了 ${files.length} 个文件:`);
+  for (const f of files) {
+    log('log2', `  - ${f.name} (${f.size} bytes, ${f.type})`);
+  }
+  
+  // 模拟video-studio的onVideoRefFiles函数
+  simulateUpload(files);
+}
+
+async function simulateUpload(files) {
+  log('log2', '开始上传流程...');
+  
+  for (const f of Array.from(files || [])) {
+    if (!f.type.startsWith('image/') && !/\.(png|jpe?g|gif|webp|bmp)$/i.test(f.name)) {
+      log('log2', `跳过非图片: ${f.name}`);
+      continue;
+    }
+    if (f.size > 20 * 1024 * 1024) {
+      log('log2', `跳过过大文件: ${f.name}`);
+      continue;
+    }
+    
+    log('log2', `上传: ${f.name}`);
+    
+    try {
+      const fd = new FormData();
+      fd.append('file', f);
+      
+      const startTime = performance.now();
+      const up = await fetch('/api/upload', { 
+        method: 'POST', 
+        body: fd,
+        credentials: 'include'
+      });
+      const endTime = performance.now();
+      
+      log('log2', `响应: ${up.status} (${(endTime - startTime).toFixed(0)}ms)`);
+      
+      const ud = await up.json().catch(() => ({}));
+      log('log2', `数据: ${JSON.stringify(ud).substring(0, 200)}`);
+      
+      if (up.status === 401) {
+        log('log2', '❌ 未登录！');
+        return;
+      }
+      
+      if (!up.ok) {
+        log('log2', `❌ 上传失败: ${ud.error || '未知错误'}`);
+        continue;
+      }
+      
+      log('log2', `✅ 成功: ${ud.path}`);
+      
+    } catch (e) {
+      log('log2', `❌ 错误: ${e.message}`);
+    }
+  }
+}
+
+function checkCookies() {
+  const cookies = document.cookie;
+  log('log3', `Cookie字符串: ${cookies || '(空)'}`);
+  
+  if (cookies.includes('agnes_auth')) {
+    log('log3', '✅ 找到 agnes_auth cookie');
+  } else {
+    log('log3', '❌ 未找到 agnes_auth cookie');
+  }
+}
+</script>
+</body>
+</html>

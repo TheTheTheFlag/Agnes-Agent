@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>测试上传</title></head>
+<body>
+<h3>测试参考图上传</h3>
+<button id="testBtn">选择并上传测试图片</button>
+<p id="result"></p>
+<img id="preview" style="max-width:200px;display:none">
+<script>
+document.getElementById('testBtn').onclick = async () => {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'image/*';
+  input.onchange = async (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    document.getElementById('result').textContent = '上传中...';
+    const fd = new FormData();
+    fd.append('file', f);
+    try {
+      const up = await fetch('/api/upload', { method: 'POST', body: fd, credentials: 'include' });
+      console.log('[TEST] upload status:', up.status);
+      const ud = await up.json().catch(() => ({}));
+      console.log('[TEST] upload response:', ud);
+      if (!up.ok) {
+        document.getElementById('result').textContent = '上传失败: ' + JSON.stringify(ud);
+        return;
+      }
+      // 模拟video-studio.js的存储和渲染
+      const ref = { path: ud.path, name: ud.path.split('/').pop() };
+      console.log('[TEST] stored ref:', ref);
+      const imgUrl = '/api/uploads/' + encodeURIComponent(ref.name);
+      console.log('[TEST] image url:', imgUrl);
+      // 测试图片是否能加载
+      const img = document.getElementById('preview');
+      img.src = imgUrl;
+      img.onload = () => {
+        document.getElementById('result').textContent = '✅ 上传成功！预览加载成功。';
+      };
+      img.onerror = () => {
+        document.getElementById('result').textContent = '❌ 图片加载失败，URL: ' + imgUrl;
+      };
+    } catch (err) {
+      console.error('[TEST] error:', err);
+      document.getElementById('result').textContent = '错误: ' + err.message;
+    }
+  };
+  input.click();
+};
+</script>
+</body>
+</html>

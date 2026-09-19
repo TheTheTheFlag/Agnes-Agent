@@ -1,6 +1,6 @@
-"""app.server.api.settings — 全局配置读写（仅管理员）。
+"""app.server.api.settings — 全局配置读写（所有已登录用户）。
 
-路径前缀 `/api/admin/settings`，由认证中间件统一要求管理员权限。
+路径前缀 `/api/admin/settings`，已移除管理员权限限制。
 数据来源/落盘均为 `data/.model_config`（见 app.config_store）。
 """
 import os

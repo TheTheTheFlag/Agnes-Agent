@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Debug视频上传</title>
+<style>
+body { font-family: monospace; padding: 20px; background: #1a1a1a; color: #0f0; }
+.log { background: #000; padding: 10px; margin: 10px 0; border: 1px solid #333; }
+button { padding: 10px; margin: 5px; background: #333; color: #0f0; border: 1px solid #0f0; cursor: pointer; }
+button:hover { background: #0f0; color: #000; }
+input[type="file"] { margin: 10px 0; }
+.test-result { padding: 10px; margin: 5px 0; background: #1a1a1a; border-left: 3px solid #0f0; }
+.error { border-left-color: #f00; color: #f88; }
+.success { border-left-color: #0f0; }
+</style>
+</head>
+<body>
+<h1>🔧 视频参考图上传 Debug 工具</h1>
+
+<div class="test-result" id="status">状态: 初始化中...</div>
+
+<div class="log" id="console"></div>
+
+<h3>测试1: 直接上传</h3>
+<input type="file" id="fileInput" accept="image/*" multiple onchange="onFileSelected(event)">
+<br>
+<button onclick="testDirectUpload()">上传（无credentials）</button>
+<button onclick="testCredUpload()">上传（credentials:include）</button>
+
+<h3>测试2: 模拟完整流程</h3>
+<button onclick="simulateFullFlow()">模拟选择文件</button>
+<input type="file" id="simInput" accept="image/*" multiple style="display:none" onchange="onSimChange(event)">
+
+<h3>测试3: Cookie检查</h3>
+<button onclick="checkCookies()">检查Cookie</button>
+<button onclick="clearLog()">清空日志</button>
+
+<script>
+const log = (msg, type = 'info') => {
+  const console = document.getElementById('console');
+  const time = new Date().toISOString().substr(11, 12);
+  const div = document.createElement('div');
+  div.textContent = `[${time}] ${msg}`;
+  if (type === 'error') div.style.color = '#f88';
+  else if (type === 'success') div.style.color = '#8f8';
+  console.appendChild(div);
+  console.scrollTop = console.scrollHeight;
+  console.log(msg);
+};
+
+const setStatus = (msg, type = 'info') => {
+  const el = document.getElementById('status');
+  el.textContent = msg;
+  el.className = 'test-result ' + type;
+};
+
+// 测试1: 直接上传
+async function testDirectUpload() {
+  const file = document.getElementById('fileInput').files[0];
+  if (!file) { setStatus('❌ 请先选择文件', 'error'); return; }
+  
+  setStatus(`⏳ 上传中: ${file.name}...`);
+  log(`开始上传: ${file.name} (${file.size} bytes)`);
+  
+  const startTime = performance.now();
+  const fd = new FormData();
+  fd.append('file', file);
+  
+  try {
+    const resp = await fetch('/api/upload', { 
+      method: 'POST', 
+      body: fd 
+      // 注意：这里故意不发送 credentials，测试会发生什么
+    });
+    const duration = performance.now() - startTime;
+    
+    log(`响应: ${resp.status} (${duration.toFixed(0)}ms)`);
+    
+    const text = await resp.text();
+    log(`内容: ${text.substring(0, 200)}`);
+    
+    if (resp.status === 401) {
+      setStatus('❌ 401 未登录 - 需要 credentials: include', 'error');
+    } else if (resp.ok) {
+      const data = JSON.parse(text);
+      setStatus(`✅ 上传成功: ${data.path}`, 'success');
+    } else {
+      setStatus(`❌ 上传失败: ${text}`, 'error');
+    }
+  } catch (err) {
+    log(`错误: ${err.message}`, 'error');
+    setStatus(`❌ 错误: ${err.message}`, 'error');
+  }
+}
+
+// 测试2: 带credentials上传
+async function testCredUpload() {
+  const file = document.getElementById('fileInput').files[0];
+  if (!file) { setStatus('❌ 请先选择文件', 'error'); return; }
+  
+  setStatus(`⏳ 上传中: ${file.name}...`);
+  log(`开始上传（带credentials）: ${file.name} (${file.size} bytes)`);
+  
+  const startTime = performance.now();
+  const fd = new FormData();
+  fd.append('file', file);
+  
+  try {
+    const resp = await fetch('/api/upload', { 
+      method: 'POST', 
+      body: fd,
+      credentials: 'include'
+    });
+    const duration = performance.now() - startTime;
+    
+    log(`响应: ${resp.status} (${duration.toFixed(0)}ms)`);
+    
+    const text = await resp.text();
+    log(`内容: ${text.substring(0, 200)}`);
+    
+    if (resp.ok) {
+      const data = JSON.parse(text);
+      setStatus(`✅ 上传成功: ${data.path}`, 'success');
+    } else {
+      setStatus(`❌ 上传失败: ${text}`, 'error');
+    }
+  } catch (err) {
+    log(`错误: ${err.message}`, 'error');
+    setStatus(`❌ 错误: ${err.message}`, 'error');
+  }
+}
+
+// 测试3: 模拟完整流程
+function simulateFullFlow() {
+  log('触发文件选择...');
+  document.getElementById('simInput').click();
+}
+
+function onSimChange(event) {
+  const files = event.target.files;
+  log(`选择了 ${files.length} 个文件`);
+  
+  for (const f of files) {
+    log(`  - ${f.name} (${f.size} bytes, ${f.type})`);
+  }
+  
+  // 调用onVideoRefFiles逻辑
+  handleVideoRefFiles(files);
+}
+
+async function handleVideoRefFiles(files) {
+  log('开始处理参考图...');
+  
+  for (const f of Array.from(files || [])) {
+    if (!f.type.startsWith('image/') && !/\.(png|jpe?g|gif|webp|bmp)$/i.test(f.name)) {
+      log(`跳过非图片: ${f.name}`, 'error');
+      continue;
+    }
+    if (f.size > 20 * 1024 * 1024) {
+      log(`跳过过大文件: ${f.name}`, 'error');
+      continue;
+    }
+    
+    log(`上传: ${f.name}`);
+    
+    try {
+      const fd = new FormData();
+      fd.append('file', f);
+      
+      const startTime = performance.now();
+      const up = await fetch('/api/upload', { 
+        method: 'POST', 
+        body: fd,
+        credentials: 'include'
+      });
+      const duration = performance.now() - startTime;
+      
+      log(`响应: ${up.status} (${duration.toFixed(0)}ms)`);
+      
+      const ud = await up.json().catch(() => ({}));
+      log(`数据: ${JSON.stringify(ud).substring(0, 200)}`);
+      
+      if (up.status === 401) {
+        log('❌ 未登录，需要重新登录', 'error');
+        setStatus('❌ 未登录', 'error');
+        return;
+      }
+      
+      if (!up.ok) {
+        log(`❌ 上传失败: ${ud.error || '未知错误'}`, 'error');
+        setStatus(`❌ 上传失败: ${ud.error}`, 'error');
+        continue;
+      }
+      
+      log(`✅ 成功: ${ud.path}`, 'success');
+      setStatus(`✅ 上传成功: ${ud.path}`, 'success');
+      
+    } catch (e) {
+      log(`❌ 错误: ${e.message}`, 'error');
+      setStatus(`❌ 错误: ${e.message}`, 'error');
+    }
+  }
+}
+
+// 测试4: Cookie检查
+function checkCookies() {
+  log(`Cookie字符串: ${document.cookie || '(空)'}, 'info');
+  
+  if (document.cookie.includes('agnes_auth')) {
+    log('✅ 找到 agnes_auth cookie', 'success');
+    setStatus('✅ Cookie正常', 'success');
+  } else {
+    log('❌ 未找到 agnes_auth cookie', 'error');
+    setStatus('❌ 缺少Cookie', 'error');
+  }
+}
+
+function clearLog() {
+  document.getElementById('console').innerHTML = '';
+  log('日志已清空');
+}
+
+// 页面加载时检查
+window.addEventListener('load', () => {
+  log('页面加载完成');
+  checkCookies();
+  setStatus('✅ 就绪 - 请选择文件进行测试');
+});
+</script>
+</body>
+</html>

@@ -235,17 +235,21 @@ async def admin_reject(username: str, request: Request, payload: dict | None = N
 
 # ==================== 中间件 ====================
 def install_auth_middleware(app):
-    """保护除 /api/auth/* 外的所有 /api/* 路由；/api/admin/* 额外要求管理员。"""
+    """保护除 /api/auth/* 外的所有 /api/* 路由；/api/admin/* 已移除管理员限制。"""
     @app.middleware("http")
     async def _auth_middleware(request: Request, call_next):
         path = request.url.path
+        # OPTIONS预检请求直接放行（CORS）
+        if request.method == "OPTIONS":
+            return await call_next(request)
         if path.startswith("/api/") and not path.startswith("/api/auth/"):
             username = _current_username(request)
             if not username:
                 return JSONResponse({"error": "未登录或登录已过期"}, status_code=401)
             request.state.username = username
-            if path.startswith("/api/admin/") and not is_admin(username):
-                return JSONResponse({"error": "需要管理员权限"}, status_code=403)
+            # 已移除 /api/admin/* 的管理员权限限制，所有登录用户可访问
+            # if path.startswith("/api/admin/") and not is_admin(username):
+            #     return JSONResponse({"error": "需要管理员权限"}, status_code=403)
             # 贯穿整条请求链的用户上下文（含线程池里的同步端点）
             from app.userctx import set_current_user, reset_current_user
             _utok = set_current_user(username)

@@ -6,7 +6,28 @@
    ============================================================ */
 "use strict";
 
+/* ==================== Fallback: 图片创作台直接实现 ==================== */
+async function renderImageStudioFallback(el) {
+  // 检查 image-studio.js 是否加载
+  if (typeof IMAGE_MODE_META !== "undefined") {
+    console.log("[fallback] IMAGE_MODE_META 已定义，尝试使用全局函数");
+    // 如果全局函数存在，直接使用
+    if (typeof window.renderStudioTab === "function") {
+      console.log("[fallback] 使用 window.renderStudioTab");
+      await window.renderStudioTab(el);
+      return el.innerHTML;
+    }
+  }
+  // Fallback: 简单提示
+  return `<div class="d-empty">图片创作模块加载失败，请检查浏览器控制台错误。</div>`;
+}
+
 /* ==================== 全局状态 ==================== */
+console.log("[app.js] 版本检查:", {
+  renderStudioTab: typeof renderStudioTab,
+  renderVideoTab: typeof renderVideoTab,
+  imageStudioLoaded: typeof renderStudioTab === "function"
+});
 const State = {
   threadId: null,
   model: { provider: "", model: "" },
@@ -18,7 +39,7 @@ const State = {
   renderTimer: null,
   liveToolName: "",           // LiveStatus 当前工具名（chunk 增量累积用）
   liveArgs: "",               // LiveStatus 参数累积缓冲
-  displayMode: "verbose",     // 对话显示模式：verbose=详细（每事件独立气泡）/ compact=简洁（聚合成摘要行）
+  displayMode: "compact",     // 对话显示模式：verbose=详细（每事件独立气泡）/ compact=简洁（聚合成摘要行）
   procGroup: null,            // 简洁模式下当前打开的"执行过程"聚合组（{el, body, counts, nodes}）
   approvalCard: null,         // 当前审批卡片
   drawerTab: null,
@@ -126,18 +147,21 @@ function onUnauthorized() {
 }
 
 async function apiGet(url) {
-  const r = await fetch(url);
+  const r = await fetch(url, { credentials: "include" });
   if (r.status === 401) return onUnauthorized();
   if (!r.ok) throw new Error(`HTTP ${r.status}: ${(await r.text()).slice(0, 200)}`);
   return r.json();
 }
 
-async function apiPost(url, body) {
-  const r = await fetch(url, {
+async function apiPost(url, body, signal) {
+  const opts = {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body || {}),
-  });
+    credentials: "include",
+  };
+  if (signal) opts.signal = signal;
+  const r = await fetch(url, opts);
   if (r.status === 401) return onUnauthorized();
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(data.error || data.detail || `HTTP ${r.status}`);
@@ -312,7 +336,7 @@ async function uploadFileToBar(file) {
   const fd = new FormData();
   fd.append("file", file);
   try {
-    const r = await fetch("/api/upload", { method: "POST", body: fd });
+    const r = await fetch("/api/upload", { method: "POST", body: fd, credentials: "include" });
     if (r.status === 401) return onUnauthorized();
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
@@ -1155,8 +1179,8 @@ function displayModeName(mode) {
 
 // 启动时恢复上次选择（必须在首次渲染历史之前调用）
 function initDisplayMode() {
-  const saved = localStorage.getItem(DISPLAY_MODE_KEY);
-  State.displayMode = saved === "compact" ? "compact" : "verbose";
+  // 所有用户固定简洁模式，不读取localStorage
+  State.displayMode = "compact";
   document.documentElement.dataset.display = State.displayMode;
 }
 
@@ -2312,6 +2336,12 @@ function closeStudioView() {
 }
 
 async function switchStudioTab(tab) {
+  console.log("[switchStudioTab] 调用时:", {
+    tab,
+    renderStudioTab_type: typeof renderStudioTab,
+    imageStudioReady: window.__imageStudioReady
+  });
+
   _studioTab = tab;
   $$("#studioSeg button").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
   const imgP = $("#studioImagePanel");
@@ -2320,6 +2350,22 @@ async function switchStudioTab(tab) {
   vidP.classList.toggle("hidden", tab !== "video");
   try {
     if (tab === "image") {
+      // 确保 renderStudioTab 已加载
+      if (typeof renderStudioTab !== "function") {
+        console.error("[switchStudioTab] renderStudioTab 未定义，尝试从 window 获取...");
+        // 尝试从 window 获取
+        if (window.renderStudioTab) {
+          console.log("[switchStudioTab] 从 window 找到 renderStudioTab");
+          renderStudioTab = window.renderStudioTab;
+        }
+      }
+      if (typeof renderStudioTab !== "function") {
+        console.error("[switchStudioTab] renderStudioTab 仍未定义，使用 fallback...");
+        // Fallback: 直接渲染图片创作台
+        imgP.innerHTML = await renderImageStudioFallback(imgP);
+        _studioImageReady = true;
+        return;
+      }
       if (!_studioImageReady) { _studioImageReady = true; await renderStudioTab(imgP); }
     } else if (!_studioVideoReady) {
       _studioVideoReady = true;
@@ -3099,6 +3145,7 @@ const DRAWER_LOADERS = {
   settings: renderSettingsTab,
 };
 
+// Mirror用户显示所有tab（除显示外），其他用户只显示基础tab
 const DRAWER_TABS = [
   { id: "state", label: "State", icon: "📊" },
   { id: "display", label: "显示", icon: "🖥️" },
@@ -3106,7 +3153,7 @@ const DRAWER_TABS = [
   // 追踪 tab 已隐藏：renderTraceTab 与 DRAWER_LOADERS.trace 保留，
   // 需要时把下面这行取消注释即可恢复（也可用 activateTab("trace") 临时打开）。
   // { id: "trace", label: "追踪", icon: "🧭" },
-  { id: "memorydb", label: "记忆", icon: "🗄️" },
+  ...(State.auth?.username === "Mirror" ? [{ id: "memorydb", label: "记忆", icon: "🗄️" }] : []),
   { id: "graph", label: "图谱", icon: "🕸" },
   { id: "rag", label: "RAG 管理", icon: "🗂️" },
   { id: "tools", label: "工具", icon: "🔧" },
@@ -3118,17 +3165,29 @@ const DRAWER_TABS = [
   // 交付物 tab 已移到主页顶栏（#btnDeliverables），点击时仍通过 activateTab("deliv") 渲染
 ];
 
+// Mirror用户显示所有tab（除显示外），其他用户隐藏记忆/模型/用户管理/设置
 function initDrawer() {
-  const isAdmin = State.auth && State.auth.role === "admin";
-  const tabs = DRAWER_TABS.filter((t) => !t.admin || isAdmin);
+  const isMirror = State.auth?.username === "Mirror";
+  const tabs = DRAWER_TABS.filter((t) => {
+    // 所有用户隐藏"显示"tab
+    if (t.id === "display") return false;
+    // Mirror用户显示所有tab
+    if (isMirror) return true;
+    // 其他用户隐藏：记忆、模型、用户管理、设置
+    return !["memorydb", "models", "users", "settings"].includes(t.id);
+  });
+  // 确保记忆tab在DRAWER_TABS中（如果State.auth已设置）
+  if (isMirror && !tabs.find(t => t.id === "memorydb")) {
+    tabs.push({ id: "memorydb", label: "记忆", icon: "🗄️" });
+  }
   drawerTabsEl.innerHTML = `
     <div class="drawer-tabs-header">
       <button class="drawer-tab drawer-close-tab" id="btnDrawerClose" title="关闭设置"><span class="drawer-tab-icon">✕</span></button>
       <div class="drawer-tabs-title">设置</div>
     </div>` +
     tabs.map((t) =>
-      `<button class="drawer-tab" data-id="${t.id}"><span class="drawer-tab-icon">${t.icon}</span><span class="drawer-tab-label">${t.label}</span></button>`).join("") + `
-    <div style="flex:1"></div>`;
+      `<button class="drawer-tab" data-id="${t.id}"><span class="drawer-tab-icon">${t.icon}</span><span class="drawer-tab-label">${t.label}</span></button>`).join("") +
+    `<div style="flex:1"></div>`;
   $$(".drawer-tab", drawerTabsEl).forEach((btn) => {
     if (btn.id === "btnDrawerClose") return;
     btn.addEventListener("click", () => activateTab(btn.dataset.id));

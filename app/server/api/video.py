@@ -29,6 +29,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from app.config import BASE_DIR, MODEL_CONFIG_PATH, user_subdir
 from app.server.api.image import _agnes_keys, _mask_key
+from app.userctx import current_user, set_current_user
 
 router = APIRouter(prefix="/api/video", tags=["video"])
 
@@ -108,32 +109,61 @@ def _dimensions(ratio: str, resolution: str) -> tuple:
 
 
 # ---------------- 作品库 manifest ----------------
-_items: list = []
-_lock = threading.Lock()
+# 改为每用户独立的内存列表 + 锁
+_user_items: dict = {}   # {username: [...]}
+_user_locks: dict = {}   # {username: threading.RLock()}
 
 
-def _load_manifest():
-    global _items
-    _items = []
+def _user_items_lock(username: str) -> threading.RLock:
+    if username not in _user_locks:
+        _user_locks[username] = threading.RLock()
+    return _user_locks[username]
+
+
+def _get_user_items(username: str) -> list:
+    if username not in _user_items:
+        _load_user_manifest(username)
+    return _user_items[username]
+
+
+def _load_user_manifest(username: str):
+    """按用户加载作品列表（模块级 _LIB 是路径代理，会自动按当前用户解析）"""
+    old_user = current_user()
     try:
-        with open(_MANIFEST, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-        _items = raw.get("items", []) if isinstance(raw, dict) else []
-    except Exception:
-        pass
+        set_current_user(username)
+        items = []
+        try:
+            with open(_MANIFEST, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            items = raw.get("items", []) if isinstance(raw, dict) else []
+        except Exception as e:
+            pass
+        with _user_items_lock(username):
+            _user_items[username] = items
+    finally:
+        set_current_user(old_user)
 
 
-def _save_manifest():
-    os.makedirs(_LIB, exist_ok=True)
-    with open(_MANIFEST, "w", encoding="utf-8") as f:
-        json.dump({"items": _items[: _MAX_GALLERY]}, f, ensure_ascii=False, indent=1)
+def _save_user_manifest(username: str):
+    """保存当前用户的作品列表到磁盘"""
+    old_user = current_user()
+    try:
+        set_current_user(username)
+        os.makedirs(_LIB, exist_ok=True)
+        with _user_items_lock(username):
+            items = _user_items.get(username, [])
+        with open(_MANIFEST, "w", encoding="utf-8") as f:
+            json.dump({"items": items[:_MAX_GALLERY]}, f, ensure_ascii=False, indent=1)
+    finally:
+        set_current_user(old_user)
 
 
-def _find(item_id: str):
-    return next((it for it in _items if it.get("id") == item_id), None)
+def _find(item_id: str, username: str):
+    items = _get_user_items(username)
+    return next((it for it in items if it.get("id") == item_id), None)
 
 
-_id_re = re.compile(r"^[A-Za-z0-9]{1,40}$")
+_id_re = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
 _ext_re = re.compile(r"^[A-Za-z0-9]{1,8}$")
 
 
@@ -362,7 +392,7 @@ def _build_payload(model: str, mode: str, payload: dict, request, use_public: bo
     return out
 
 
-def _persist_new(model: str, mode: str, prompt: str, payload: dict, key_idx: int, created: dict) -> dict:
+def _persist_new(model: str, mode: str, prompt: str, payload: dict, key_idx: int, created: dict, username: str) -> dict:
     item = {
         "id": uuid.uuid4().hex[:12],
         "model": model,
@@ -387,14 +417,14 @@ def _persist_new(model: str, mode: str, prompt: str, payload: dict, key_idx: int
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "completed_at": "",
     }
-    with _lock:
-        _items.insert(0, item)
-        _items[:] = _items[: _MAX_GALLERY]
-        _save_manifest()
+    with _user_items_lock(username):
+        items = _get_user_items(username)
+        items.insert(0, item)
+        items[:] = items[: _MAX_GALLERY]
+    _save_user_manifest(username)
     return item
 
 
-_load_manifest()
 
 
 # ---------------- 端点 ----------------
@@ -469,15 +499,17 @@ def generate(payload: dict, request: Request):
         else:
             return JSONResponse({"error": msg}, status_code=502)
 
-    item = _persist_new(model, mode, prompt, upstream_payload, key_idx, created)
+    username = getattr(getattr(request, "state", None), "username", None) or current_user()
+    item = _persist_new(model, mode, prompt, upstream_payload, key_idx, created, username)
     return {"ok": True, "count": 1, "items": [item]}
 
 
 @router.get("/task/{item_id}")
-def task(item_id: str):
+def task(item_id: str, request: Request = None):
     if not _id_re.match(item_id):
         return JSONResponse({"error": "非法 id"}, status_code=400)
-    item = _find(item_id)
+    username = getattr(getattr(request, "state", None), "username", None) or current_user()
+    item = _find(item_id, username)
     if not item:
         return JSONResponse({"error": "任务不存在"}, status_code=404)
     if item.get("status") in ("completed", "failed") and item.get("file"):
@@ -526,23 +558,27 @@ def task(item_id: str):
             item["error"] = "上游未返回视频地址"
         item["completed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
 
-    with _lock:
-        _save_manifest()
+    with _user_items_lock(username):
+        _save_user_manifest(username)
     return {"ok": True, "item": item}
 
 
 @router.get("/history")
-def history(limit: int = 60, offset: int = 0):
+def history(limit: int = 60, offset: int = 0, request: Request = None):
+    username = getattr(getattr(request, "state", None), "username", None) or current_user()
     limit = max(1, min(limit, _MAX_GALLERY))
     offset = max(0, offset)
-    return {"ok": True, "total": len(_items), "items": _items[offset: offset + limit]}
+    with _user_items_lock(username):
+        items = _get_user_items(username)
+    return {"ok": True, "total": len(items), "items": items[offset: offset + limit]}
 
 
 @router.get("/file/{item_id}")
-def file(item_id: str, thumb: int = 0):
+def file(item_id: str, thumb: int = 0, request: Request = None):
     if not _id_re.match(item_id):
         return JSONResponse({"error": "非法 id"}, status_code=400)
-    item = _find(item_id)
+    username = getattr(getattr(request, "state", None), "username", None) or current_user()
+    item = _find(item_id, username)
     if not item:
         return JSONResponse({"error": "作品不存在"}, status_code=404)
     name = (item.get("thumb") if thumb else item.get("file")) or item.get("file")
@@ -557,20 +593,22 @@ def file(item_id: str, thumb: int = 0):
 
 
 @router.post("/delete")
-def delete(payload: dict):
+def delete(payload: dict, request: Request = None):
+    username = getattr(getattr(request, "state", None), "username", None) or current_user()
     ids = set(str(x) for x in ((payload or {}).get("ids") or []) if str(x).strip())
     if not ids:
         return JSONResponse({"error": "ids 必填"}, status_code=400)
     removed = []
-    with _lock:
+    with _user_items_lock(username):
+        items = _get_user_items(username)
         keep = []
-        for it in _items:
+        for it in items:
             if it.get("id") in ids:
                 removed.append(it)
             else:
                 keep.append(it)
-        _items[:] = keep
-        _save_manifest()
+        items[:] = keep
+    _save_user_manifest(username)
     for it in removed:
         for key in ("file", "thumb"):
             name = it.get(key)

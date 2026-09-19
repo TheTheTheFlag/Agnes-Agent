@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html>
+<head><title>简单测试</title></head>
+<body>
+<h2>视频参考图上传测试</h2>
+<button onclick="testUpload()">选择并上传图片</button>
+<div id="result"></div>
+<script>
+async function testUpload() {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'image/*';
+  input.onchange = async (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    
+    document.getElementById('result').textContent = '上传中...';
+    console.log('[TEST] 开始上传:', f.name);
+    
+    const fd = new FormData();
+    fd.append('file', f);
+    
+    try {
+      const resp = await fetch('/api/upload', {
+        method: 'POST',
+        body: fd,
+        credentials: 'include'
+      });
+      
+      console.log('[TEST] 响应状态:', resp.status);
+      
+      if (resp.status === 401) {
+        document.getElementById('result').textContent = '❌ 401 未登录';
+        return;
+      }
+      
+      const data = await resp.json();
+      console.log('[TEST] 响应数据:', data);
+      
+      if (resp.ok) {
+        document.getElementById('result').textContent = '✅ 成功: ' + data.path;
+      } else {
+        document.getElementById('result').textContent = '❌ 失败: ' + (data.error || '未知错误');
+      }
+    } catch (err) {
+      console.error('[TEST] 错误:', err);
+      document.getElementById('result').textContent = '❌ 错误: ' + err.message;
+    }
+  };
+  input.click();
+}
+</script>
+</body>
+</html>

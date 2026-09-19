@@ -18,10 +18,11 @@ import time
 import uuid
 
 import requests
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, JSONResponse
 
 from app.config import BASE_DIR, MODEL_CONFIG_PATH, user_subdir
+from app.userctx import current_user, set_current_user
 
 router = APIRouter(prefix="/api/image", tags=["image"])
 
@@ -45,7 +46,7 @@ _TIMEOUT = 360          # 官方建议 60-360s
 _LIB = user_subdir("data_dir", "image_library")          # 按当前用户解析
 _MANIFEST = user_subdir("data_dir", "image_library", "manifest.json")
 _THUMB_MAX = 520
-_MAX_GALLERY = 300      # 作品库保留上限（旧作品仅从列表移除，文件仍在磁盘）
+_MAX_GALLERY = None    # 不限制作品数量，显示全部历史作品
 
 
 def _agnes_keys() -> list:
@@ -86,13 +87,13 @@ def _mask_key(k: str, tail: int = 4) -> str:
 
 
 # ---------------- 作品库 manifest ----------------
-# 改为每用户独立的内存列表 + 锁
+# 改为每用户独立的内存列表 + 可重入锁（避免嵌套调用死锁）
 _user_items: dict = {}   # {username: [...]}
-_user_locks: dict = {}   # {username: threading.Lock()}
+_user_locks: dict = {}   # {username: threading.RLock()}
 
-def _user_items_lock(username: str) -> threading.Lock:
+def _user_items_lock(username: str) -> threading.RLock:
     if username not in _user_locks:
-        _user_locks[username] = threading.Lock()
+        _user_locks[username] = threading.RLock()
     return _user_locks[username]
 
 def _get_user_items(username: str) -> list:
@@ -102,9 +103,11 @@ def _get_user_items(username: str) -> list:
 
 def _load_user_manifest(username: str):
     """按用户加载作品列表（模块级 _LIB 是路径代理，会自动按当前用户解析）"""
-    old_user = current_user()
+    # 直接使用 set_current_user 切换上下文，不需要调用 current_user()
+    import app.userctx
+    _old_token = app.userctx._cur_user.get(None)
     try:
-        set_current_user(username)
+        app.userctx.set_current_user(username)
         items = []
         try:
             with open(_MANIFEST, "r", encoding="utf-8") as f:
@@ -115,20 +118,21 @@ def _load_user_manifest(username: str):
         with _user_items_lock(username):
             _user_items[username] = items
     finally:
-        set_current_user(old_user)
+        app.userctx.set_current_user(_old_token)
 
 def _save_user_manifest(username: str):
     """保存当前用户的作品列表到磁盘"""
-    old_user = current_user()
+    import app.userctx
+    _old_token = app.userctx._cur_user.get(None)
     try:
-        set_current_user(username)
+        app.userctx.set_current_user(username)
         os.makedirs(_LIB, exist_ok=True)
         with _user_items_lock(username):
             items = _user_items.get(username, [])
         with open(_MANIFEST, "w", encoding="utf-8") as f:
-            json.dump({"items": items[:_MAX_GALLERY]}, f, ensure_ascii=False, indent=1)
+            json.dump({"items": items}, f, ensure_ascii=False, indent=1)
     finally:
-        set_current_user(old_user)
+        app.userctx.set_current_user(_old_token)
 
 
 def _make_thumb(src: str, dst: str) -> bool:
@@ -143,7 +147,7 @@ def _make_thumb(src: str, dst: str) -> bool:
         return False
 
 
-_EXT_RE = re.compile(r"^[A-Za-z0-9]{1,32}$")
+_EXT_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
 
 
 def _path_to_data_uri(relpath: str) -> str:
@@ -251,7 +255,7 @@ def _persist_item(mode: str, model: str, prompt: str, size: str, ratio: str,
         with _user_items_lock(username):
             items = _user_items.setdefault(username, [])
             items.insert(0, item)
-            items[:] = items[:_MAX_GALLERY]
+            items[:] = items  # 不截断，保留全部
         _save_user_manifest(username)
         return item
     finally:
@@ -358,7 +362,7 @@ async def generate(payload: dict, request: Request):
 async def history(limit: int = 60, offset: int = 0, request: Request = None):
     """返回当前用户的作品列表"""
     username = getattr(getattr(request, "state", None), "username", None) or current_user()
-    limit = max(1, min(limit, _MAX_GALLERY))
+    limit = max(1, limit) if _MAX_GALLERY is None else max(1, min(limit, _MAX_GALLERY))
     offset = max(0, offset)
     with _user_items_lock(username):
         items = _get_user_items(username)

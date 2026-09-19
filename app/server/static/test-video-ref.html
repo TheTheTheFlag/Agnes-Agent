@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>测试视频参考图</title>
+<style>
+body { font-family: Arial, sans-serif; padding: 20px; }
+.log { background: #f0f0f0; padding: 10px; margin: 10px 0; }
+.result { padding: 10px; margin: 10px 0; border: 1px solid #ccc; }
+.success { border-color: green; background: #e8ffe8; }
+.error { border-color: red; background: #ffe8e8; }
+</style>
+</head>
+<body>
+<h2>视频参考图上传测试</h2>
+
+<div>
+<button onclick="testUpload()">测试上传</button>
+<input type="file" id="fileInput" accept="image/*" multiple style="display:none" onchange="onFileChange(event)">
+</div>
+
+<div class="result" id="status">等待测试...</div>
+<div class="log" id="log"></div>
+
+<script>
+function log(msg) {
+  const el = document.getElementById('log');
+  const time = new Date().toLocaleTimeString();
+  el.innerHTML += `<div>[${time}] ${msg}</div>`;
+  el.scrollTop = el.scrollHeight;
+}
+
+function setStatus(msg, type = 'info') {
+  const el = document.getElementById('status');
+  el.textContent = msg;
+  el.className = 'result ' + type;
+}
+
+async function testUpload() {
+  log('触发文件选择...');
+  document.getElementById('fileInput').click();
+}
+
+function onFileChange(event) {
+  const files = event.target.files;
+  log(`选择了 ${files.length} 个文件`);
+  
+  for (const f of files) {
+    log(`处理: ${f.name} (${f.type}, ${f.size} bytes)`);
+    uploadFile(f);
+  }
+  
+  // 重置input，允许重复选择同一文件
+  event.target.value = '';
+}
+
+async function uploadFile(f) {
+  log(`开始上传: ${f.name}`);
+  
+  const fd = new FormData();
+  fd.append('file', f);
+  
+  try {
+    const startTime = performance.now();
+    const resp = await fetch('/api/upload', {
+      method: 'POST',
+      body: fd,
+      credentials: 'include'
+    });
+    const duration = (performance.now() - startTime).toFixed(0);
+    
+    log(`响应: ${resp.status} (${duration}ms)`);
+    
+    if (resp.status === 401) {
+      setStatus('❌ 401 未登录', 'error');
+      log('请检查是否已登录');
+      return;
+    }
+    
+    const data = await resp.json();
+    log(`数据: ${JSON.stringify(data)}`);
+    
+    if (resp.ok) {
+      setStatus(`✅ 上传成功: ${data.path}`, 'success');
+      log(`路径: ${data.path}`);
+    } else {
+      setStatus(`❌ 上传失败: ${data.error || '未知错误'}`, 'error');
+    }
+  } catch (err) {
+    setStatus(`❌ 错误: ${err.message}`, 'error');
+    log(`异常: ${err.message}`);
+  }
+}
+
+// 页面加载时检查登录状态
+log('页面加载完成，检查登录状态...');
+fetch('/api/auth/status', { credentials: 'include' })
+  .then(r => r.json())
+  .then(data => {
+    if (data.username) {
+      log(`✅ 已登录: ${data.username} (${data.role})`);
+      setStatus(`✅ 已登录: ${data.username}`, 'success');
+    } else {
+      log('❌ 未登录');
+      setStatus('❌ 未登录，请先登录', 'error');
+    }
+  })
+  .catch(err => {
+    log(`❌ 检查登录状态失败: ${err.message}`);
+  });
+</script>
+</body>
+</html>
