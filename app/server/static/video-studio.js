@@ -11,7 +11,7 @@
    依赖 image-studio.js 的上传约定：/api/upload 返回 {path}，参考图用 uploads/<name> 路径。
    ============================================================================ */
 
-const IMAGE_MODE_LBL = { txt2img: "文生图", img2img: "图生图", multi: "多图合成" };
+const VIDEO_MODE_LBL = { txt2img: "文生图", img2img: "图生图", multi: "多图合成" };
 
 const VIDEO_STYLE_CHIPS = [
   ["电影运镜", "，电影级运镜，平稳推进，浅景深，柔和自然光"],
@@ -412,7 +412,7 @@ async function openVideoRefPicker() {
     bd.innerHTML = `<div class="vs-pick-grid">${allItems.map((it) => `
       <button class="vs-pick-item${picked.has(it.id) ? ' sel' : ''}" data-id="${escapeHtml(it.id)}">
         <img loading="lazy" src="/api/image/file/${encodeURIComponent(it.id)}?thumb=1" alt="">
-        <span>${escapeHtml(IMAGE_MODE_LBL[it.mode] || it.mode || "")} · ${escapeHtml(fmtAgo(it.created_at))}</span>
+        <span>${escapeHtml(VIDEO_MODE_LBL[it.mode] || it.mode || "")} · ${escapeHtml(fmtAgo(it.created_at))}</span>
       </button>`).join("")}</div>`;
     bd.querySelectorAll(".vs-pick-item").forEach((btn) => btn.addEventListener("click", () => {
       const id = btn.dataset.id;

@@ -2362,31 +2362,28 @@ async function switchStudioTab(tab) {
   vidP.classList.toggle("hidden", tab !== "video");
   try {
     if (tab === "image") {
-      // 确保 renderStudioTab 已加载
-      if (typeof renderStudioTab !== "function" && typeof window.renderStudioTab !== "function") {
-        console.error("[switchStudioTab] renderStudioTab 未定义，重新加载 image-studio.js...");
-        // 强制重新加载
-        const ts = Date.now();
-        const script = document.createElement("script");
-        script.src = "/static/image-studio.js?" + ts;
-        script.onload = () => {
-          console.log("[switchStudioTab] 重新加载完成，renderStudioTab:", typeof renderStudioTab, "window:", typeof window.renderStudioTab);
-          const fn = window.renderStudioTab || renderStudioTab;
-          if (typeof fn === "function") {
-            _studioImageReady = true;
-            fn(imgP);
-          } else {
-            imgP.innerHTML = drawerErr(new Error("图片创作模块加载失败"));
+      // 确保 renderStudioTab 已加载（添加重试机制）
+      const waitForRenderStudioTab = async (retries = 5, delay = 100) => {
+        for (let i = 0; i < retries; i++) {
+          if (typeof renderStudioTab === "function" || typeof window.renderStudioTab === "function") {
+            return true;
           }
-        };
-        script.onerror = () => {
-          console.error("[switchStudioTab] 重新加载失败");
-          imgP.innerHTML = drawerErr(new Error("图片创作模块加载失败 - 请检查网络连接"));
-        };
-        document.head.appendChild(script);
+          console.log(`[switchStudioTab] renderStudioTab 未加载，等待 ${delay}ms... (第${i + 1}次)`);
+          await new Promise(r => setTimeout(r, delay));
+        }
+        return false;
+      };
+
+      const loaded = await waitForRenderStudioTab();
+      if (!loaded) {
+        console.error("[switchStudioTab] renderStudioTab 加载超时");
+        imgP.innerHTML = drawerErr(new Error("图片创作模块加载超时，请刷新页面重试"));
         return;
       }
-      if (!_studioImageReady) { _studioImageReady = true; await renderStudioTab(imgP); }
+
+      // 确保使用正确的函数引用
+      const fn = window.renderStudioTab || renderStudioTab;
+      if (!_studioImageReady) { _studioImageReady = true; await fn(imgP); }
     } else if (!_studioVideoReady) {
       _studioVideoReady = true;
       await renderVideoTab(vidP);
