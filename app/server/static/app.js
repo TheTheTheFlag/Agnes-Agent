@@ -15,38 +15,7 @@ console.log("[app.js] 立即检查:", {
   imageStudioReady_before: window.__imageStudioReady
 });
 
-/* ==================== 内联 renderStudioTab (避免外部脚本问题) ==================== */
-// 从 image-studio.js 提取的关键常量和函数
-const IMAGE_MODE_META = {
-  txt2img: { i: "✦", t: "文生图", d: "一句话描述 → 生成全新图像" },
-  img2img: { i: "✎", t: "图生图", d: "参考 1 张图，按指令编辑/重绘/换风格" },
-  multi: { i: "⊕", t: "多图合成", d: "用 ≥2 张参考图组合出全新画面" }
-};
-
-const IMAGE_RATIO_PX = {
-  "1:1": "1024×1024", "3:4": "864×1152", "4:3": "1152×864", "16:9": "1312×736",
-  "9:16": "736×1312", "2:3": "832×1248", "3:2": "1248×832"
-};
-
-const IMAGE_STYLE_CHIPS = [
-  ["电影写实", "，电影级写实风格，广角构图，柔和自然光，高视觉密度"],
-  ["赛博朋克", "，赛博朋克夜景，霓虹招牌，湿滑路面反光，冷青色与品红主调"],
-  ["产品摄影", "，商业产品摄影，纯色摄影棚背景，柔和阴影，清晰细节"],
-  ["奇幻插画", "，奇幻插画风格，丰富细节，浓郁色彩，梦幻氛围"],
-  ["水墨国风", "，传统水墨画风格，留白构图，轻柔晕染，诗意意境"],
-];
-
-// 内联 renderStudioTab
-window.renderStudioTab = async function renderStudioTab(el) {
-  console.log("[renderStudioTab] 开始渲染...");
-  el.innerHTML = `<div class="st"><div class="st-head"><div class="st-head-title">🎨 图片创作工作台</div><div class="st-head-hint">加载中...</div></div><div id="stContent">初始化中...</div></div>`;
-  // TODO: 完整实现需要更多代码，先显示占位
-  setTimeout(() => {
-    el.innerHTML = `<div class="d-empty">图片创作功能开发中，请稍候...</div>`;
-  }, 100);
-};
-
-console.log("[app.js] renderStudioTab 已定义:", typeof window.renderStudioTab);
+/* ==================== renderStudioTab 由 image-studio.js 提供 ==================== */
 
 /* ==================== Fallback: 图片创作台直接实现 ==================== */
 async function renderImageStudioFallback(el) {
