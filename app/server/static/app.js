@@ -6,6 +6,48 @@
    ============================================================ */
 "use strict";
 
+/* ==================== 立即检查全局变量 ==================== */
+console.log("[app.js] 立即检查:", {
+  renderStudioTab_before: typeof renderStudioTab,
+  renderVideoTab_before: typeof renderVideoTab,
+  window_renderStudioTab_before: typeof window.renderStudioTab,
+  window_renderVideoTab_before: typeof window.renderVideoTab,
+  imageStudioReady_before: window.__imageStudioReady
+});
+
+/* ==================== 内联 renderStudioTab (避免外部脚本问题) ==================== */
+// 从 image-studio.js 提取的关键常量和函数
+const IMAGE_MODE_META = {
+  txt2img: { i: "✦", t: "文生图", d: "一句话描述 → 生成全新图像" },
+  img2img: { i: "✎", t: "图生图", d: "参考 1 张图，按指令编辑/重绘/换风格" },
+  multi: { i: "⊕", t: "多图合成", d: "用 ≥2 张参考图组合出全新画面" }
+};
+
+const IMAGE_RATIO_PX = {
+  "1:1": "1024×1024", "3:4": "864×1152", "4:3": "1152×864", "16:9": "1312×736",
+  "9:16": "736×1312", "2:3": "832×1248", "3:2": "1248×832"
+};
+
+const IMAGE_STYLE_CHIPS = [
+  ["电影写实", "，电影级写实风格，广角构图，柔和自然光，高视觉密度"],
+  ["赛博朋克", "，赛博朋克夜景，霓虹招牌，湿滑路面反光，冷青色与品红主调"],
+  ["产品摄影", "，商业产品摄影，纯色摄影棚背景，柔和阴影，清晰细节"],
+  ["奇幻插画", "，奇幻插画风格，丰富细节，浓郁色彩，梦幻氛围"],
+  ["水墨国风", "，传统水墨画风格，留白构图，轻柔晕染，诗意意境"],
+];
+
+// 内联 renderStudioTab
+window.renderStudioTab = async function renderStudioTab(el) {
+  console.log("[renderStudioTab] 开始渲染...");
+  el.innerHTML = `<div class="st"><div class="st-head"><div class="st-head-title">🎨 图片创作工作台</div><div class="st-head-hint">加载中...</div></div><div id="stContent">初始化中...</div></div>`;
+  // TODO: 完整实现需要更多代码，先显示占位
+  setTimeout(() => {
+    el.innerHTML = `<div class="d-empty">图片创作功能开发中，请稍候...</div>`;
+  }, 100);
+};
+
+console.log("[app.js] renderStudioTab 已定义:", typeof window.renderStudioTab);
+
 /* ==================== Fallback: 图片创作台直接实现 ==================== */
 async function renderImageStudioFallback(el) {
   // 检查 image-studio.js 是否加载
@@ -2339,6 +2381,7 @@ async function switchStudioTab(tab) {
   console.log("[switchStudioTab] 调用时:", {
     tab,
     renderStudioTab_type: typeof renderStudioTab,
+    window_renderStudioTab: typeof window.renderStudioTab,
     imageStudioReady: window.__imageStudioReady
   });
 
@@ -2351,19 +2394,27 @@ async function switchStudioTab(tab) {
   try {
     if (tab === "image") {
       // 确保 renderStudioTab 已加载
-      if (typeof renderStudioTab !== "function") {
-        console.error("[switchStudioTab] renderStudioTab 未定义，尝试从 window 获取...");
-        // 尝试从 window 获取
-        if (window.renderStudioTab) {
-          console.log("[switchStudioTab] 从 window 找到 renderStudioTab");
-          renderStudioTab = window.renderStudioTab;
-        }
-      }
-      if (typeof renderStudioTab !== "function") {
-        console.error("[switchStudioTab] renderStudioTab 仍未定义，使用 fallback...");
-        // Fallback: 直接渲染图片创作台
-        imgP.innerHTML = await renderImageStudioFallback(imgP);
-        _studioImageReady = true;
+      if (typeof renderStudioTab !== "function" && typeof window.renderStudioTab !== "function") {
+        console.error("[switchStudioTab] renderStudioTab 未定义，重新加载 image-studio.js...");
+        // 强制重新加载
+        const ts = Date.now();
+        const script = document.createElement("script");
+        script.src = "/static/image-studio.js?" + ts;
+        script.onload = () => {
+          console.log("[switchStudioTab] 重新加载完成，renderStudioTab:", typeof renderStudioTab, "window:", typeof window.renderStudioTab);
+          const fn = window.renderStudioTab || renderStudioTab;
+          if (typeof fn === "function") {
+            _studioImageReady = true;
+            fn(imgP);
+          } else {
+            imgP.innerHTML = drawerErr(new Error("图片创作模块加载失败"));
+          }
+        };
+        script.onerror = () => {
+          console.error("[switchStudioTab] 重新加载失败");
+          imgP.innerHTML = drawerErr(new Error("图片创作模块加载失败 - 请检查网络连接"));
+        };
+        document.head.appendChild(script);
         return;
       }
       if (!_studioImageReady) { _studioImageReady = true; await renderStudioTab(imgP); }
