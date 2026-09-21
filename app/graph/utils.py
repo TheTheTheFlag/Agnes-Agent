@@ -1,4 +1,5 @@
 """app.graph.utils — 工具函数（token 计数/压缩、工具调用解析、提示词加载）。"""
+import copy
 import os
 import re
 import time
@@ -52,7 +53,14 @@ def count_tokens(messages: List) -> int:
         #   · history 压缩的 token 触发条件永不成立
         # 估算系数取 1/2：英文/代码约 1 token/4 字符，中文约 1 token/字，混合场景折中。
         return max(1, len(text) // 2)
-    return len(tokenizer.encode(text))
+    # 分块编码：tiktoken 对长文本是病态 O(n²) 退化（实测 12 万字符 >17s，且与内容是否
+    # 单一重复字节几乎无关）。分块把单次 encode 长度限在 8K 字符内（实测 ~0.1s，随总长
+    # 近似线性），总 token ≈ 分块求和（BPE 跨块合并误差可忽略）。8K 以下单块 = 原行为。
+    step = 8192
+    total = 0
+    for i in range(0, len(text), step):
+        total += len(tokenizer.encode(text[i:i + step]))
+    return total
 
 
 # ==================== 消息结构安全（业界做法：回合原子性 / 清洗 / 退化尾巴 / 熔断） ====================
@@ -174,7 +182,10 @@ def sanitize_messages(messages):
 
 def trim_history_by_turns(messages, max_tokens, keep_recent=KEEP_RECENT):
     """回合安全的上下文裁剪：从头部整块丢弃，直到 块数 <= keep_recent 且 token <= max_tokens。
-    与旧实现（硬切最近 N 条 / 逐条删头）不同：不拆散 assistant↔ToolMessage 配对。"""
+    与旧实现（硬切最近 N 条 / 逐条删头）不同：不拆散 assistant↔ToolMessage 配对。
+    整块裁剪已到极限（只剩最近一个回合）仍超预算时，再对单条超重文本消息截断兜底
+    （见 truncate_oversized_messages），防止整条巨型消息（如 read_file 返回的大文件）
+    原样发给 LLM 导致 ContextWindowExceededError。"""
     blocks = split_turn_blocks(messages)
     if len(blocks) > keep_recent:
         blocks = blocks[-keep_recent:]
@@ -182,7 +193,37 @@ def trim_history_by_turns(messages, max_tokens, keep_recent=KEEP_RECENT):
         if count_tokens([m for b in blocks for m in b]) <= max_tokens:
             break
         blocks = blocks[1:]
-    return sanitize_messages([m for b in blocks for m in b])
+    result = [m for b in blocks for m in b]
+    if count_tokens(result) > max_tokens:
+        result = truncate_oversized_messages(result, max_tokens)
+    return sanitize_messages(result)
+
+
+_TRUNCAT_OVER_NOTE = "\n...[内容过大，已截断；如需完整内容，请用 read_file 的 offset/limit 分页读取或改用针对性工具]"
+
+
+def truncate_oversized_messages(messages: List, max_tokens: int, min_keep_chars: int = 4000) -> List:
+    """兜底：整块回合裁剪仍超预算时，从最大的单条文本消息开始减半并加截断标记，
+    直到总量 ≤ 预算。只对纯文本 content（str）下手，绝不拆散 tool 配对；对截断对象
+    先深拷贝，避免污染会话历史里原始消息。"""
+    messages = list(messages)
+    guard = 0
+    while count_tokens(messages) > max_tokens and guard < 40:
+        guard += 1
+        pick_i, pick_len = -1, 0
+        for i, m in enumerate(messages):
+            if not isinstance(getattr(m, "content", None), str):
+                continue
+            t = len(m.content)
+            if t > pick_len:
+                pick_i, pick_len = i, t
+        if pick_i < 0 or pick_len <= min_keep_chars:
+            break
+        target = copy.deepcopy(messages[pick_i])
+        keep = max(pick_len // 2, min_keep_chars)
+        target.content = target.content[:keep] + _TRUNCAT_OVER_NOTE
+        messages[pick_i] = target
+    return sanitize_messages(messages)
 
 
 def strip_degenerate_replies(messages):

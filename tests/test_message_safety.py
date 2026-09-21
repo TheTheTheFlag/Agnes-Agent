@@ -21,6 +21,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, System
 from app.graph.utils import (
     split_turn_blocks, sanitize_messages, trim_history_by_turns,
     strip_degenerate_replies, apply_reply_guard, prepare_context_messages,
+    truncate_oversized_messages, count_tokens,
     STUCK_REPLY_HINT, is_degenerate_text,
 )
 
@@ -194,6 +195,45 @@ class PrepareContextTest(unittest.TestCase):
         # 无退化尾巴
         last_ai = [m for m in out if isinstance(m, AIMessage)]
         self.assertFalse(any(is_degenerate_text(m.content or "") for m in last_ai))
+
+
+class TruncateOversizedTest(unittest.TestCase):
+    """整块回合裁剪仍超预算时，单条超重文本消息必须被截断（防 ContextWindowExceededError）。"""
+
+    def test_single_giant_tool_message_brought_under_budget(self):
+        """实战形态：一个用户回合内 read_file 返回的巨型 ToolMessage（无换行文件整读），
+        整块裁剪无法缩小（只有一个回合块），截断后总量收敛到预算内且带截断标记。"""
+        huge = ToolMessage(content="a" * 300000, tool_call_id="c1")
+        msgs = [H("用户发来图片"), AIMessage(content="", tool_calls=[{"name": "tool_x", "args": {}, "id": "c1"}]), huge]
+        out = truncate_oversized_messages(msgs, max_tokens=20000)
+        self.assertLessEqual(count_tokens(out), 20000)
+        self.assertIn("已截断", out[-1].content)
+        self.assertLess(len(out[-1].content), 300000)
+        self.assertGreater(len(out[-1].content), 0)
+
+    def test_original_history_not_mutated(self):
+        """截断作用于深拷贝，不污染会话历史里的原始消息。"""
+        huge = ToolMessage(content="b" * 300000, tool_call_id="c1")
+        original = huge.content
+        msgs = [AT("c1"), huge]
+        out = truncate_oversized_messages(msgs, max_tokens=10000)
+        self.assertLess(len(out[-1].content), len(huge.content))
+        self.assertEqual(huge.content, original, "原始 ToolMessage 内容不应被修改")
+
+    def test_under_budget_untouched(self):
+        msgs = [H("q1"), A("ok")]
+        out = truncate_oversized_messages(msgs, max_tokens=10 ** 9)
+        self.assertEqual([m.content for m in out], ["q1", "ok"])
+
+    def test_trim_history_brings_giant_turn_under_budget(self):
+        """trim_history_by_turns 全链路兜底：单回合超重也会被收敛（当年 9/18 场景回归）。"""
+        huge = ToolMessage(content="c" * 300000, tool_call_id="c1")
+        msgs = [H("q1"), AT("c1"), huge]
+        out = trim_history_by_turns(msgs, max_tokens=20000)
+        self.assertLessEqual(count_tokens(out), 20000)
+        self.assertIn("已截断", out[-1].content)
+        # 工具配对仍完整，序列结构合法
+        self.assertTrue(any(getattr(m, "tool_call_id", None) == "c1" for m in out))
 
 
 if __name__ == "__main__":

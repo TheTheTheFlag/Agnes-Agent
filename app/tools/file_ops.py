@@ -18,6 +18,23 @@ from langchain_core.tools import tool
 
 from app.config import BASE_DIR, WORKSPACE_DIR
 
+# read_file 防护：图片/二进制文件拒绝读取内容；文本读取设置单次字符上限，避免
+# agent 把大文件（尤其无换行的二进制）整读进 LLM 上下文导致 ContextWindowExceededError。
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico"}
+_READ_FILE_MAX_CHARS = 16000
+_READ_TRUNC_NOTE = "[已截断：达到单次读取上限，剩余内容请用 offset 参数分页继续读取]"
+
+
+def _looks_binary(data: bytes) -> bool:
+    """探针判定二进制：前 8192 字节含 NUL 或非文本控制字节比例偏高。"""
+    sample = data[:8192]
+    if not sample:
+        return False
+    if b"\x00" in sample:
+        return True
+    bad = sum(1 for b in sample if (b < 32 and b not in (9, 10, 13)) or b == 127)
+    return bad / len(sample) > 0.30
+
 
 def _is_admin_user() -> bool:
     """当前上下文用户是否为管理员；无法查证时按管理员放行（与工具下发判定一致）。"""
@@ -87,24 +104,60 @@ def ls(directory: str = ".", recursive: bool = False) -> str:
 
 @tool
 def read_file(path: str, offset: int = 0, limit: int = 2000) -> str:
-    """读取文本文件内容。
+    """读取文本文件内容（自动防护：图片/二进制文件拒绝读取本体，仅返回元数据并提示正确用法）。
     参数:
       path: 相对基准的路径（普通用户基准为其工作区）
       offset: 起始行号（0 起）
       limit: 最多返回行数
-    返回: 文件内容（含行号），支持分页"""
+    返回: 文件内容（含行号）。单次最多返回约 16000 字符，超出自动截断并提示用 offset 续读；
+    图片请使用 Image-Understanding 技能识别，不要用 read_file 读取。"""
     p = _resolve_path(path)
     if not os.path.isfile(p):
         return json.dumps({"error": f"文件不存在: {path}"}, ensure_ascii=False)
     try:
-        with open(p, 'r', encoding='utf-8', errors='replace') as f:
-            lines = f.readlines()
-        total = len(lines)
-        chunk = lines[offset:offset + limit]
-        body = ''.join(f"{offset + i + 1:6d} | {ln.rstrip()}" for i, ln in enumerate(chunk))
-        return json.dumps({"path": path, "total_lines": total, "content": body}, ensure_ascii=False)
+        size = os.path.getsize(p)
+    except Exception:
+        size = 0
+    ext = os.path.splitext(p)[1].lower()
+    try:
+        with open(p, "rb") as f:
+            head = f.read(8192)
     except Exception as e:
         return json.dumps({"error": str(e)}, ensure_ascii=False)
+    if ext in _IMAGE_EXTS or _looks_binary(head):
+        hint = (
+            "这是图片文件，read_file 无法读取图片内容，请改用 Image-Understanding 技能识别图片；"
+            if ext in _IMAGE_EXTS
+            else "该文件是二进制/非文本文件，read_file 只支持文本文件，已拒绝把二进制内容读入上下文。"
+        )
+        return json.dumps({"error": hint, "path": path, "size": size, "binary": True}, ensure_ascii=False)
+    try:
+        with open(p, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+    except Exception as e:
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+    total = len(lines)
+    chunk = lines[offset:offset + limit]
+    parts = []
+    used = 0
+    truncated = False
+    for i, ln in enumerate(chunk):
+        piece = f"{offset + i + 1:6d} | {ln.rstrip()}"
+        if used + len(piece) > _READ_FILE_MAX_CHARS:
+            room = _READ_FILE_MAX_CHARS - used
+            if room > 0:
+                parts.append(piece[:room])
+            truncated = True
+            break
+        parts.append(piece)
+        used += len(piece)
+    body = "".join(parts)
+    if truncated:
+        body += _READ_TRUNC_NOTE
+    out = {"path": path, "total_lines": total, "content": body, "size": size}
+    if truncated:
+        out["truncated"] = True
+    return json.dumps(out, ensure_ascii=False)
 
 
 @tool
