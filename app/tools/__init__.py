@@ -12,6 +12,9 @@ from .file_ops import ls, read_file, write_file, edit_file, delete_file, glob_fi
 from .execute_command import execute_command
 from .skill_tools import list_skills, read_skill, search_skillhub, install_skill
 from .graph_rag_tools import record_graph, lightgraph_query
+from .scheduler_tools import (list_scheduled_tasks, create_scheduled_task,
+                              update_scheduled_task, delete_scheduled_task,
+                              run_scheduled_task_now)
 
 # 工具列表：
 #   - 文件操作（Python 包装，无需审批，限项目目录内）：ls / read_file / write_file / edit_file / delete_file / glob_files / grep_files
@@ -43,6 +46,12 @@ tools = [
     # L6 知识图谱：record_graph（显式建图）/ lightgraph_query（图谱检索）
     record_graph,
     lightgraph_query,
+    # 定时任务（人人可用，按当前用户自己的表）：增删改查 + 立即执行
+    list_scheduled_tasks,
+    create_scheduled_task,
+    update_scheduled_task,
+    delete_scheduled_task,
+    run_scheduled_task_now,
 ]
 
 # 仅管理员可见的工具：命令执行（高风险）。

@@ -1,9 +1,7 @@
 import os
 import json
-import asyncio
 import os as _os
 from langgraph.types import Command
-from datetime import datetime
 from typing import Dict, Any, List, Optional
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
@@ -11,7 +9,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 import threading
-import time as _time
 
 from app.config import DB_PATH, CHECKPOINT_DB_PATH, STATIC_DIR as _STATIC_DIR, DATA_DIR as _DATA_DIR
 from app.server.store import (update_state, update_prompt, add_log_entry, add_event, _state_snapshot, _state_snapshots, _prompt_snapshot, _log_entries, _events, _event_listeners)
@@ -181,229 +178,36 @@ app.include_router(_auth_router)
 app.include_router(_admin_router)
 install_auth_middleware(app)
 
-_SCHED_DB = DB_PATH  # 定时任务表复用 memory.db
-
-_SCHED_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS scheduled_tasks (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    schedule_type TEXT NOT NULL,      -- 'cron' | 'interval'(旧) | 'daily'(旧)
-    cron_expr TEXT,                   -- schedule_type=cron 时，标准 5 段 cron（分 时 日 月 周）
-    interval_seconds INTEGER,          -- 旧：schedule_type=interval 时
-    daily_time TEXT,                   -- 旧：schedule_type=daily 时 "HH:MM"
-    prompt TEXT NOT NULL,
-    thread_id TEXT,
-    enabled INTEGER DEFAULT 1,
-    last_run_at TEXT,
-    last_result TEXT,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
-);
-"""
-
-def _sched_init():
-    import sqlite3 as _sqlite
-    with _sqlite.connect(_SCHED_DB) as conn:
-        conn.execute(_SCHED_TABLE_SQL)
-        # 旧库迁移：补充 cron_expr 列
-        try:
-            conn.execute("ALTER TABLE scheduled_tasks ADD COLUMN cron_expr TEXT")
-        except Exception:
-            pass
-        try:
-            conn.execute("ALTER TABLE scheduled_tasks ADD COLUMN thread_id TEXT")
-        except Exception:
-            pass
-
-_sched_init()
-
-
+# ==================== 定时任务（多用户，实现见 app.scheduler） ====================
+# 表存放在**每个用户自己的** memory.db，读取/执行都按当前用户定位 → 天然隔离。
+# 后台调度线程在 app.scheduler 内，遍历所有账号、按任务归属用户执行。
 def _sched_all():
-    import sqlite3 as _sqlite
-    with _sqlite.connect(_SCHED_DB) as conn:
-        conn.row_factory = _sqlite.Row
-        rows = conn.execute("SELECT * FROM scheduled_tasks ORDER BY created_at DESC").fetchall()
-        return [dict(r) for r in rows]
+    from app.scheduler import list_tasks
+    return list_tasks()
 
 
 def _sched_get(task_id):
-    import sqlite3 as _sqlite
-    with _sqlite.connect(_SCHED_DB) as conn:
-        conn.row_factory = _sqlite.Row
-        r = conn.execute("SELECT * FROM scheduled_tasks WHERE id = ?", (task_id,)).fetchone()
-        return dict(r) if r else None
+    from app.scheduler import get_task
+    return get_task(task_id)
 
 
-def _sched_insert(task: dict):
-    import sqlite3 as _sqlite
-    with _sqlite.connect(_SCHED_DB) as conn:
-        conn.execute(
-            """INSERT INTO scheduled_tasks (id, name, schedule_type, cron_expr, interval_seconds, daily_time, prompt, thread_id, enabled)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (task["id"], task["name"], task["schedule_type"], task.get("cron_expr"),
-             task.get("interval_seconds"), task.get("daily_time"), task["prompt"],
-             task.get("thread_id"), 1 if task.get("enabled", True) else 0)
-        )
+def _sched_insert(task):
+    from app.scheduler import insert_task
+    return insert_task(task)
 
 
 def _sched_update(task_id, **fields):
-    import sqlite3 as _sqlite
-    sets = ", ".join(f"{k} = ?" for k in fields)
-    vals = list(fields.values()) + [task_id]
-    with _sqlite.connect(_SCHED_DB) as conn:
-        conn.execute(f"UPDATE scheduled_tasks SET {sets} WHERE id = ?", vals)
+    from app.scheduler import update_task
+    return update_task(task_id, **fields)
 
 
 def _sched_delete(task_id):
-    import sqlite3 as _sqlite
-    with _sqlite.connect(_SCHED_DB) as conn:
-        conn.execute("DELETE FROM scheduled_tasks WHERE id = ?", (task_id,))
+    from app.scheduler import delete_task
+    return delete_task(task_id)
 
 
-def _cron_field(field, val, lo, hi):
-    """判断单个 cron 字段是否匹配值 val。支持 * 、*/n 、a-b 、a-b/n 、a,b,c 。"""
-    field = str(field).strip()
-    if field == "*":
-        return True
-    if "," in field:
-        return any(_cron_field(x, val, lo, hi) for x in field.split(","))
-    if "-" in field:
-        rng, _, step_part = field.partition("/")
-        a, b = rng.split("-")
-        a, b = int(a), int(b)
-        step = int(step_part) if step_part else 1
-        return a <= val <= b and (val - a) % step == 0
-    if "/" in field:
-        base, step = field.split("/")
-        return _cron_field(base, val, lo, hi) and int(step) > 0 and val % int(step) == 0
-    return int(field) == val
-
-
-def _cron_match(expr, dt):
-    """标准 5 段 cron 匹配：分 时 日 月 周。
-    dt 为 datetime；周字段 cron 约定 0/7=周日、1=周一…6=周六，与 Python weekday() 对齐。"""
-    try:
-        parts = str(expr).split()
-        if len(parts) != 5:
-            return False
-        minute, hour, dom, month, dow = parts
-        cron_dow = (dt.weekday() + 1) % 7  # 0=周日 … 6=周六
-        fields = [
-            (minute, dt.minute, 0, 59),
-            (hour, dt.hour, 0, 23),
-            (dom, dt.day, 1, 31),
-            (month, dt.month, 1, 12),
-            (dow, cron_dow, 0, 6),
-        ]
-        return all(_cron_field(f, v, lo, hi) for (f, v, lo, hi) in fields)
-    except Exception:
-        return False
-
-
-def _sched_due(task: dict, now: float, now_str: str) -> bool:
-    """判断任务是否到点执行。"""
-    if not task.get("enabled"):
-        return False
-    if task["schedule_type"] == "cron":
-        # 常规 cron：匹配当前时间，且本分钟尚未执行过（last_run_at 不落在当前分钟）
-        from datetime import datetime as _dt
-        try:
-            now_dt = _dt.fromisoformat(now_str)
-        except Exception:
-            return False
-        if not _cron_match(task.get("cron_expr") or "", now_dt):
-            return False
-        last = task.get("last_run_at") or ""
-        return not last.startswith(now_str[:16])
-    if task["schedule_type"] == "interval":
-        secs = task.get("interval_seconds") or 0
-        if secs <= 0:
-            return False
-        last = task.get("last_run_at")
-        if not last:
-            return True  # 首次立即执行
-        try:
-            from datetime import datetime as _dt
-            last_ts = _dt.fromisoformat(last).timestamp()
-            return (now - last_ts) >= secs
-        except Exception:
-            return False
-    else:  # daily
-        hm = (task.get("daily_time") or "00:00").strip()
-        try:
-            h, m = hm.split(":")
-            cur_hm = now_str[11:16]
-            target = f"{int(h):02d}:{int(m):02d}"
-            last = task.get("last_run_at") or ""
-            today = now_str[:10]
-            return cur_hm >= target and not last.startswith(today)
-        except Exception:
-            return False
-
-
-_SCHED_GRAPH = None
-_SCHED_LOCK = threading.Lock()
-
-
-def _get_sched_graph():
-    """调度专用 graph：在调用线程（调度线程）内首次构建，connection 与主线程隔离。"""
-    global _SCHED_GRAPH
-    if _SCHED_GRAPH is None:
-        from app.graph.builder import build_graph
-        _SCHED_GRAPH = build_graph()
-    return _SCHED_GRAPH
-
-
-def _sched_run_task(task: dict):
-    """执行定时任务：把 prompt 提交给调度专用 graph。"""
-    result = "graph 不可用，任务未执行"
-    with _SCHED_LOCK:  # 防止重入
-        try:
-            import uuid as _uid
-            from app.graph.builder import build_graph
-            g = _get_sched_graph()
-            tid = task.get("thread_id") or _uid.uuid4().hex
-            config = {"configurable": {"thread_id": tid}}
-            inputs = {"messages": [("user", task["prompt"])]}
-            outputs = []
-            for ev in g.stream(inputs, config, stream_mode="updates", recursion_limit=30):
-                for node, upd in (ev or {}).items():
-                    if isinstance(upd, dict) and isinstance(upd.get("messages"), list):
-                        for m in reversed(upd["messages"]):
-                            if hasattr(m, "type") and getattr(m, "type") == "ai":
-                                c = getattr(m, "content", "") or ""
-                                if c:
-                                    outputs.append(str(c)[:800])
-                                break
-            result = outputs[-1] if outputs else "已执行（无文本输出）"
-        except Exception as e:
-            result = f"执行失败: {e}"
-    from datetime import datetime as _dt
-    _sched_update(task["id"], last_run_at=_dt.now().isoformat(), last_result=result[:2000])
-
-
-def _scheduler_loop():
-    """后台调度线程：每 30 秒检查一次到期任务。"""
-    while True:
-        try:
-            from datetime import datetime as _dt
-            now = _time.time()
-            now_str = _dt.now().isoformat()
-            for task in _sched_all():
-                if _sched_due(task, now, now_str):
-                    try:
-                        _sched_run_task(task)
-                    except Exception as e:
-                        try:
-                            _sched_update(task["id"], last_result=f"执行失败: {e}"[:2000])
-                        except Exception:
-                            pass
-        except Exception:
-            pass
-        _time.sleep(10)
-
-
-_sched_thread = threading.Thread(target=_scheduler_loop, daemon=True)
-_sched_thread.start()
+from app.scheduler import start_scheduler as _start_scheduler
+_start_scheduler()
 
 
 # ==================== 长期记忆 daemon（遗忘/衰减调度） ====================
@@ -701,6 +505,45 @@ async def sched_create(payload: dict, request: Request = None):
     }
     _sched_insert(task)
     return {"task": _sched_get(task["id"])}
+
+
+@app.post("/api/scheduler/{task_id}/update")
+async def sched_update(task_id: str, payload: dict, request: Request = None):
+    if request is not None:
+        _g = _sched_admin_guard(request)
+        if _g:
+            return _g
+    from app.scheduler import clean_update, get_task, update_task
+    task = get_task(task_id)
+    if not task:
+        return JSONResponse({"error": "任务不存在"}, status_code=404)
+    fields, err = clean_update(task, payload or {})
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+    update_task(task_id, **fields)
+    return {"task": get_task(task_id)}
+
+
+@app.post("/api/scheduler/{task_id}/run")
+async def sched_run(task_id: str, request: Request = None):
+    if request is not None:
+        _g = _sched_admin_guard(request)
+        if _g:
+            return _g
+    from app.scheduler import get_task, run_task_now
+    from app.userctx import run_in_user_thread, current_user
+    if request is not None:
+        from app.server.auth import _current_username
+        u = _current_username(request) or "Mirror"
+    else:
+        u = current_user()
+    task = get_task(task_id, u)
+    if not task:
+        return JSONResponse({"error": "任务不存在"}, status_code=404)
+    if not task.get("enabled"):
+        return JSONResponse({"error": "任务已停用，请先启用"}, status_code=400)
+    run_in_user_thread(u, lambda: run_task_now(task_id, u))
+    return {"ok": True, "message": "已提交执行，稍后可刷新查看结果"}
 
 
 @app.post("/api/scheduler/{task_id}/toggle")

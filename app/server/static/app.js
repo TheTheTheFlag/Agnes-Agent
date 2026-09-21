@@ -2696,6 +2696,7 @@ async function renderSkillDetail(el, name) {
 }
 
 /* ---- 定时任务 ---- */
+let _schedEditId = null;
 async function renderSchedTab(el) {
   el.innerHTML = `<div class="d-empty">加载中…</div>`;
   try {
@@ -2713,6 +2714,8 @@ async function renderSchedTab(el) {
           <span class="s-badge ${t.enabled ? "on" : "off"}">${t.enabled ? "运行中" : "已停用"}</span>
           <span style="flex:1"></span>
           <button class="d-btn sm" data-act="toggle" data-id="${t.id}">${t.enabled ? "停用" : "启用"}</button>
+          <button class="d-btn sm" data-act="run" data-id="${t.id}">立即执行</button>
+          <button class="d-btn sm" data-act="edit" data-id="${t.id}">编辑</button>
           <button class="d-btn sm danger" data-act="del" data-id="${t.id}">删除</button>
         </div>
         <div class="s-meta">${schedDesc(t)} · ${t.thread_id || "默认线程"}</div>
@@ -2722,16 +2725,31 @@ async function renderSchedTab(el) {
 
     el.innerHTML = `
       <div class="d-card">
-        <h4 style="margin-bottom:8px">新建定时任务</h4>
+        <h4 style="margin-bottom:8px">${_schedEditId ? "编辑定时任务" : "新建定时任务"}</h4>
         <div class="d-row"><label>任务名</label><input class="d-input" id="schedName" placeholder="如：每日日报"></div>
         <div class="d-row"><label>Cron 表达式</label><input class="d-input" id="schedCron" placeholder="*/5 * * * *（分 时 日 月 周）"></div>
         <div class="d-row" style="font-size:11px;color:var(--text-faint)">示例：<code>*/5 * * * *</code> 每5分钟 · <code>0 9 * * *</code> 每天9点 · <code>0 9 * * 1-5</code> 工作日9点</div>
         <div class="d-row"><label>提示词</label><textarea class="d-input" id="schedPrompt" rows="2" placeholder="任务内容…"></textarea></div>
-        <div class="d-row"><button class="d-btn primary" id="schedAdd">创建</button></div>
+        <div class="d-row">
+          ${_schedEditId
+            ? `<button class="d-btn primary" id="schedSave">保存修改</button><button class="d-btn" id="schedCancel">取消</button>`
+            : `<button class="d-btn primary" id="schedAdd">创建</button>`}
+        </div>
       </div>
       ${drawerSection("任务列表", list)}`;
 
-    $("#schedAdd", el).addEventListener("click", async () => {
+    const fillForm = (t) => {
+      $("#schedName", el).value = t.name || "";
+      $("#schedCron", el).value = t.cron_expr || "";
+      $("#schedPrompt", el).value = t.prompt || "";
+    };
+    if (_schedEditId) {
+      const editing = tasks.find((x) => x.id === _schedEditId);
+      if (editing) fillForm(editing);
+    }
+    $("#schedCancel", el)?.addEventListener("click", () => { _schedEditId = null; renderSchedTab(el); });
+
+    $("#schedAdd", el)?.addEventListener("click", async () => {
       const name = $("#schedName", el).value.trim();
       const prompt = $("#schedPrompt", el).value.trim();
       const cron = $("#schedCron", el).value.trim();
@@ -2744,11 +2762,27 @@ async function renderSchedTab(el) {
         renderSchedTab(el);
       } catch (e) { toast(e.message, "error"); }
     });
+    $("#schedSave", el)?.addEventListener("click", async () => {
+      const name = $("#schedName", el).value.trim();
+      const prompt = $("#schedPrompt", el).value.trim();
+      const cron = $("#schedCron", el).value.trim();
+      if (!name || !prompt) { toast("任务名和提示词必填", "error"); return; }
+      if (!cron || cron.split(/\s+/).length !== 5) { toast("请填写 5 段 cron 表达式（分 时 日 月 周）", "error"); return; }
+      const payload = { name, prompt, schedule_type: "cron", cron_expr: cron };
+      try {
+        await apiPost(`/api/scheduler/${_schedEditId}/update`, payload);
+        toast("已保存", "success");
+        _schedEditId = null;
+        renderSchedTab(el);
+      } catch (e) { toast(e.message, "error"); }
+    });
     $$("[data-act]", el).forEach((btn) => {
       btn.addEventListener("click", async () => {
         const id = btn.dataset.id;
         try {
           if (btn.dataset.act === "toggle") await apiPost(`/api/scheduler/${id}/toggle`);
+          else if (btn.dataset.act === "run") await apiPost(`/api/scheduler/${id}/run`);
+          else if (btn.dataset.act === "edit") { _schedEditId = id; renderSchedTab(el); return; }
           else await fetch(`/api/scheduler/${id}`, { method: "DELETE" });
           toast("已更新", "success");
           renderSchedTab(el);
