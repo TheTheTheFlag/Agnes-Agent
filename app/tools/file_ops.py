@@ -5,8 +5,10 @@ file_ops.py — Python 包装的文件/目录能力工具集。
 目录边界（多用户）：
   - 普通用户：限制在自己的用户工作区 data/users/<用户名>/ 内，越界读写一律拒绝；
   - 管理员：不限制目录，可操作整台电脑（相对路径以项目根解析，绝对路径任意）。
-核心文件保护（path_guard）对所有人保留：app/server/static、data/、.env、.model_config、
-.git、memory.db、checkpoints.db、pyproject.toml、uv.lock 等不可经文件工具改写。
+核心文件保护（path_guard）对所有人保留：app/server/static、.env、.model_config、.git、
+memory.db、checkpoints.db、pyproject.toml、uv.lock 等不可经文件工具改写；
+当前用户自己的工作区开放全权读写（deliverables/ uploads/ 均可写），仅其中自身的 data/、
+.thread_id、.approval_mode 等运行时文件受保护。
 """
 import os
 import glob as _glob
@@ -49,9 +51,11 @@ def _resolve_path(path: str) -> str:
 
 
 def _assert_writable(path: str):
-    """写/删前检查：命中保护路径则拒绝（读不受限）。"""
+    """写/删前检查：命中保护路径则拒绝（读不受限）。先解析成绝对路径，保证非管理员
+    相对路径（基于自己的工作区）与绝对路径的保护判定一致。"""
+    p = _resolve_path(path)
     from app.tools.path_guard import is_protected
-    if is_protected(path):
+    if is_protected(p):
         raise ValueError(f"禁止修改受保护路径: {path}（核心文件不允许 Agent 写入，产出请放 deliverables/）")
 
 
