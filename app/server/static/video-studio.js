@@ -212,7 +212,7 @@ function paintVideoRefs() {
   } else {
     box.innerHTML = VideoStudio.refs.map((r, i) => `
     <div class="st-ref">
-      <img src="/api/uploads/${encodeURIComponent(r.name)}" alt="">
+      <img src="${r.url || ("/api/uploads/" + encodeURIComponent(r.name))}" alt="">
       <div class="st-ref-body">
         <span class="st-ref-tag">${escapeHtml(spec.labels[i] || ("图 " + (i + 1)))}</span>
         <div class="st-ref-ops">

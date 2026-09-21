@@ -3185,10 +3185,10 @@ const DRAWER_LOADERS = {
 // Mirror用户显示所有tab（除显示外），其他用户只显示基础tab
 const DRAWER_TABS = [
   { id: "state", label: "State", icon: "📊" },
-  { id: "display", label: "显示", icon: "🖥️" },
+  // 显示 / 追踪 / 模型 tab 已隐藏：renderXxxTab 与 DRAWER_LOADERS 保留，
+  // 需要时用 activateTab("display" | "trace" | "models") 临时打开，或取消注释恢复。
+  // { id: "display", label: "显示", icon: "🖥️" },
   { id: "prompt", label: "提示词", icon: "📄" },
-  // 追踪 tab 已隐藏：renderTraceTab 与 DRAWER_LOADERS.trace 保留，
-  // 需要时把下面这行取消注释即可恢复（也可用 activateTab("trace") 临时打开）。
   // { id: "trace", label: "追踪", icon: "🧭" },
   ...(State.auth?.username === "Mirror" ? [{ id: "memorydb", label: "记忆", icon: "🗄️" }] : []),
   { id: "graph", label: "图谱", icon: "🕸" },
@@ -3196,22 +3196,22 @@ const DRAWER_TABS = [
   { id: "tools", label: "工具", icon: "🔧" },
   { id: "skills", label: "技能", icon: "✨" },
   { id: "sched", label: "定时任务", icon: "🗓️", admin: true },
-  { id: "models", label: "模型", icon: "⚙️", admin: true },
   { id: "settings", label: "设置", icon: "🧩", admin: true },
   { id: "users", label: "用户管理", icon: "👥", admin: true },
+  // { id: "models", label: "模型", icon: "⚙️", admin: true },
   // 交付物 tab 已移到主页顶栏（#btnDeliverables），点击时仍通过 activateTab("deliv") 渲染
 ];
 
-// Mirror用户显示所有tab（除显示外），其他用户隐藏记忆/模型/用户管理/设置
+// Mirror用户显示所有可见tab，其他用户隐藏记忆/用户管理/设置
 function initDrawer() {
   const isMirror = State.auth?.username === "Mirror";
   const tabs = DRAWER_TABS.filter((t) => {
     // 所有用户隐藏"显示"tab
     if (t.id === "display") return false;
-    // Mirror用户显示所有tab
+    // Mirror用户显示所有可见tab
     if (isMirror) return true;
-    // 其他用户隐藏：记忆、模型、用户管理、设置
-    return !["memorydb", "models", "users", "settings"].includes(t.id);
+    // 其他用户隐藏：记忆、用户管理、设置
+    return !["memorydb", "users", "settings"].includes(t.id);
   });
   // 确保记忆tab在DRAWER_TABS中（如果State.auth已设置）
   if (isMirror && !tabs.find(t => t.id === "memorydb")) {
