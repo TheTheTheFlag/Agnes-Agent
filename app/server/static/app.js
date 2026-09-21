@@ -3150,7 +3150,7 @@ const DRAWER_TABS = [
   // { id: "display", label: "显示", icon: "🖥️" },
   { id: "prompt", label: "提示词", icon: "📄" },
   // { id: "trace", label: "追踪", icon: "🧭" },
-  ...(State.auth?.username === "Mirror" ? [{ id: "memorydb", label: "记忆", icon: "🗄️" }] : []),
+  { id: "memorydb", label: "记忆", icon: "🗄️" },
   { id: "graph", label: "图谱", icon: "🕸" },
   { id: "rag", label: "RAG 管理", icon: "🗂️" },
   { id: "tools", label: "工具", icon: "🔧" },
@@ -3173,10 +3173,6 @@ function initDrawer() {
     // 其他用户隐藏：记忆、用户管理（设置页对所有用户开放，只显示自己的密钥）
     return !["memorydb", "users"].includes(t.id);
   });
-  // 确保记忆tab在DRAWER_TABS中（如果State.auth已设置）
-  if (isMirror && !tabs.find(t => t.id === "memorydb")) {
-    tabs.push({ id: "memorydb", label: "记忆", icon: "🗄️" });
-  }
   drawerTabsEl.innerHTML = `
     <div class="drawer-tabs-header">
       <button class="drawer-tab drawer-close-tab" id="btnDrawerClose" title="关闭设置"><span class="drawer-tab-icon">✕</span></button>
