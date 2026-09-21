@@ -45,9 +45,10 @@ tools = [
     lightgraph_query,
 ]
 
-# 仅管理员可见的工具：命令执行（高风险）/ 联网搜索（透传外部请求）。
-# 普通用户在注册时只提交自己的模型 Key，因此工具面也收窄——两种工具都不下发给非管理员。
-_ADMIN_ONLY_TOOLS = ("execute_command", "tavily_search")
+# 仅管理员可见的工具：命令执行（高风险）。
+# 联网搜索（tavily_search）对所有用户开放，key 按当前用户从 accounts.db 读取
+#（见 tavily_search.py：每用户自己的 users.extra.tavily_api_key）。
+_ADMIN_ONLY_TOOLS = ("execute_command",)
 
 
 def _role_is_admin(username: Optional[str]) -> bool:
@@ -66,9 +67,11 @@ def _role_is_admin(username: Optional[str]) -> bool:
 
 
 def get_tools_for_user(username: Optional[str] = None) -> List:
-    """某个用户可见的工具集：非管理员不提供 execute_command / tavily_search。
+    """某个用户可见的工具集：非管理员不提供 execute_command（风险命令）。
 
-    调用方需保证 username 语义正确（通常传 current_user()）；缺省时用当前上下文用户。
+    联网搜索 tavily_search 面向所有用户开放，key 按用户各自读取；
+    其余只读/记忆/文件工具全员可见。调用方需保证 username 语义正确
+    （通常传 current_user()）；缺省时用当前上下文用户。
     """
     from app.userctx import current_user
     u = username or current_user()

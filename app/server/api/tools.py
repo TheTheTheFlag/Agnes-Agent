@@ -8,7 +8,8 @@ router = APIRouter()
 async def get_tools():
     """列出当前用户可见的工具及其参数 schema（用于前端"工具"面板）。
 
-    非管理员不展示 execute_command / tavily_search（与 agent 实际下发的工具集一致）。
+    非管理员不展示 execute_command（与 agent 实际下发的工具集一致）；
+    联网搜索 tavily_search 全员可见，key 按用户各自从 accounts.db 读取。
     """
     try:
         from app.tools import get_tools_for_user

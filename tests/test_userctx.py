@@ -229,7 +229,7 @@ class ModelsMaskTest(unittest.TestCase):
 
 
 class ToolsFilterTest(unittest.TestCase):
-    """非管理员工具的收窄：不提供 execute_command / tavily_search。"""
+    """非管理员工具的收窄：不提供 execute_command；联网搜索 tavily_search 全员开放。"""
 
     def setUp(self):
         from app.server import accounts
@@ -271,8 +271,9 @@ class ToolsFilterTest(unittest.TestCase):
         self.assertIn("read_file", names)
         self.assertIn("ls", names)
         self.assertNotIn("execute_command", names)
-        self.assertNotIn("tavily_search", names)
-        self.assertEqual(len(mine), len([t for t in tools if t.name not in ("execute_command", "tavily_search")]))
+        # 联网搜索已对所有用户放开（key 按用户各自读取）
+        self.assertIn("tavily_search", names)
+        self.assertEqual(len(mine), len([t for t in tools if t.name != "execute_command"]))
 
 
 class SkillInstallPerUserTest(unittest.TestCase):
@@ -405,7 +406,7 @@ class PerUserStateTest(unittest.TestCase):
 
 
 class ToolsApiFilterTest(unittest.TestCase):
-    """/api/tools 按当前用户返回可见工具：非管理员不含 execute_command / tavily_search。"""
+    """/api/tools 按当前用户返回可见工具：非管理员不含 execute_command，联网搜索全员可见。"""
 
     def setUp(self):
         from app.server import accounts
@@ -436,7 +437,7 @@ class ToolsApiFilterTest(unittest.TestCase):
         names = {t["name"] for t in res["tools"]}
         self.assertIn("read_file", names)
         self.assertNotIn("execute_command", names)
-        self.assertNotIn("tavily_search", names)
+        self.assertIn("tavily_search", names)
 
     def test_admin_tools_api_includes_all(self):
         import asyncio
