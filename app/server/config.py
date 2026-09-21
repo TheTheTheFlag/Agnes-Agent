@@ -143,14 +143,24 @@ def get_current_model() -> dict:
 
 def resolve_provider_env(provider: str) -> str:
     """把任意 provider 解析为 create_llm 能用的 provider 名 + 注入 OPENAI_BASE_URL/OPENAI_API_KEY。
-    所有 provider（内置/自定义）统一从配置目录取凭据注入环境变量，返回 openai_compatible。"""
+
+    .model_config 不再存任何 api_key：注入环境变量时 api_key 优先取数据库全库 agnes 池
+    （resolve_user_keys），配置里的残留 api_key 作兜底。返回 openai_compatible。"""
     catalog = get_full_catalog()
     info = catalog.get(provider)
-    if info:
-        if info.get("base_url"):
-            _os.environ["OPENAI_BASE_URL"] = info["base_url"]
-        if info.get("api_key"):
-            _os.environ["OPENAI_API_KEY"] = info["api_key"]
+    base_url = (info or {}).get("base_url")
+    if base_url:
+        _os.environ["OPENAI_BASE_URL"] = base_url
+    keys: list = []
+    try:
+        from app.userctx import resolve_user_keys
+        keys = resolve_user_keys().get("agnes") or []
+    except Exception:
+        keys = []
+    if not keys and info and info.get("api_key"):
+        keys = [k.strip() for k in str(info["api_key"]).split(",") if k.strip()]
+    if keys:
+        _os.environ["OPENAI_API_KEY"] = ",".join(keys)
     return "openai_compatible"
 
 
