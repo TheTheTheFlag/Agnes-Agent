@@ -5,10 +5,15 @@
 路径与方法都不匹配 → 点「删除」报 404。本测试锁定前端约定的 POST /api/image/delete。
 """
 import asyncio
+import types
 import unittest
 from unittest import mock
 
 from app.server.api import image as img
+
+
+def _req(username="tester"):
+    return types.SimpleNamespace(state=types.SimpleNamespace(username=username))
 
 
 class ImageDeleteRouteTest(unittest.TestCase):
@@ -30,20 +35,21 @@ class ImageDeleteRouteTest(unittest.TestCase):
         self.assertIn("/api/image/generate", paths)
 
     def test_delete_removes_items(self):
-        with mock.patch.object(img, "_save_manifest"):
-            with img._lock:
-                old = list(img._items)
-                img._items[:] = [{"id": "a"}, {"id": "b"}]
+        user = "tester"
+        with mock.patch.object(img, "_save_user_manifest"):
+            with img._user_items_lock(user):
+                img._user_items[user] = [{"id": "a"}, {"id": "b"}]
             try:
-                resp = asyncio.run(img.delete({"ids": ["a"]}))
+                resp = asyncio.run(img.delete({"ids": ["a"]}, _req(user)))
                 self.assertEqual(resp, {"ok": True, "deleted": 1})
-                self.assertEqual([it["id"] for it in img._items], ["b"])
+                self.assertEqual([it["id"] for it in img._user_items[user]], ["b"])
             finally:
-                with img._lock:
-                    img._items[:] = old
+                with img._user_items_lock(user):
+                    img._user_items.pop(user, None)
+                    img._user_locks.pop(user, None)
 
     def test_delete_requires_ids(self):
-        resp = asyncio.run(img.delete({}))
+        resp = asyncio.run(img.delete({}, _req()))
         self.assertEqual(getattr(resp, "status_code", None), 400)
 
 

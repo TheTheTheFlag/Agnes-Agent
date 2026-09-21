@@ -27,8 +27,8 @@ class _FakeResp:
         return self._body
 
 
-def _req(base="http://god.makeup:8081/"):
-    return types.SimpleNamespace(base_url=base)
+def _req(base="http://god.makeup:8081/", username="tester"):
+    return types.SimpleNamespace(base_url=base, state=types.SimpleNamespace(username=username))
 
 
 class VideoRoutesTest(unittest.TestCase):
@@ -176,22 +176,24 @@ class VideoGenerateValidationTest(unittest.TestCase):
     def test_success_persists_item(self):
         created = {"video_id": "vid_9", "task_id": "task_9", "status": "queued", "progress": 0,
                    "seconds": "4", "size": "720P"}
+        user = "tester"
         with mock.patch.object(vid, "_agnes_keys", return_value=["sk-good"]), \
              mock.patch.object(vid, "_create_task", return_value=(0, created)), \
-             mock.patch.object(vid, "_save_manifest"), \
+             mock.patch.object(vid, "_save_user_manifest"), \
              mock.patch.object(vid, "_prune_refs"):
-            with vid._lock:
-                old = list(vid._items)
+            with vid._user_items_lock(user):
+                vid._user_items[user] = []
             try:
                 resp = vid.generate({"model": "agnes-video-2.5-flash", "mode": "text",
                                      "prompt": "hello", "seconds": "4"}, _req())
                 self.assertTrue(resp["ok"])
                 self.assertEqual(resp["items"][0]["video_id"], "vid_9")
                 self.assertEqual(resp["items"][0]["status"], "queued")
-                self.assertEqual(vid._items[0]["video_id"], "vid_9")
+                self.assertEqual(vid._user_items[user][0]["video_id"], "vid_9")
             finally:
-                with vid._lock:
-                    vid._items[:] = old
+                with vid._user_items_lock(user):
+                    vid._user_items.pop(user, None)
+                    vid._user_locks.pop(user, None)
 
     def test_generate_falls_back_to_public_url(self):
         created = {"video_id": "vid_9", "task_id": "task_9", "status": "queued", "seconds": "4", "size": "720P"}
@@ -204,13 +206,14 @@ class VideoGenerateValidationTest(unittest.TestCase):
                 raise err
             return 0, created
 
+        user = "tester"
         with mock.patch.object(vid, "_agnes_keys", return_value=["sk-good"]), \
              mock.patch.object(vid, "_create_task", side_effect=fake_create), \
              mock.patch.object(vid, "_to_data_uri", return_value="data:image/png;base64,AAAA"), \
              mock.patch.object(vid, "_to_public_url", return_value="http://god.makeup:8081/pub/video-ref/x.png"), \
-             mock.patch.object(vid, "_save_manifest"), mock.patch.object(vid, "_prune_refs"):
-            with vid._lock:
-                old = list(vid._items)
+             mock.patch.object(vid, "_save_user_manifest"), mock.patch.object(vid, "_prune_refs"):
+            with vid._user_items_lock(user):
+                vid._user_items[user] = []
             try:
                 resp = vid.generate({"model": "agnes-video-2.5-flash", "mode": "reference",
                                      "prompt": "x", "refs": ["uploads/a.png"]}, _req())
@@ -218,15 +221,16 @@ class VideoGenerateValidationTest(unittest.TestCase):
                 self.assertEqual(len(calls), 2)
                 self.assertTrue(calls[1]["images"][0].startswith("http://"))
             finally:
-                with vid._lock:
-                    vid._items[:] = old
+                with vid._user_items_lock(user):
+                    vid._user_items.pop(user, None)
+                    vid._user_locks.pop(user, None)
 
     def test_generate_carrier_error_local_base_hint(self):
         err = RuntimeError('上游 HTTP 400: {"message":"载体必须是公开 http(s) URL 或合法 Base64"}')
         with mock.patch.object(vid, "_agnes_keys", return_value=["sk-good"]), \
              mock.patch.object(vid, "_create_task", side_effect=err), \
              mock.patch.object(vid, "_to_data_uri", return_value="data:image/png;base64,AAAA"), \
-             mock.patch.object(vid, "_save_manifest"), mock.patch.object(vid, "_prune_refs"):
+             mock.patch.object(vid, "_prune_refs"):
             resp = vid.generate({"model": "agnes-video-2.5-flash", "mode": "reference",
                                  "prompt": "x", "refs": ["uploads/a.png"]}, _req("http://localhost:8081/"))
         self.assertEqual(resp.status_code, 502)
@@ -242,20 +246,21 @@ class VideoGenerateValidationTest(unittest.TestCase):
 
 class VideoDeleteTest(unittest.TestCase):
     def test_delete_removes_items(self):
-        with mock.patch.object(vid, "_save_manifest"):
-            with vid._lock:
-                old = list(vid._items)
-                vid._items[:] = [{"id": "a"}, {"id": "b"}]
+        user = "tester"
+        with mock.patch.object(vid, "_save_user_manifest"):
+            with vid._user_items_lock(user):
+                vid._user_items[user] = [{"id": "a"}, {"id": "b"}]
             try:
-                resp = vid.delete({"ids": ["a"]})
+                resp = vid.delete({"ids": ["a"]}, _req())
                 self.assertEqual(resp, {"ok": True, "deleted": 1})
-                self.assertEqual([it["id"] for it in vid._items], ["b"])
+                self.assertEqual([it["id"] for it in vid._user_items[user]], ["b"])
             finally:
-                with vid._lock:
-                    vid._items[:] = old
+                with vid._user_items_lock(user):
+                    vid._user_items.pop(user, None)
+                    vid._user_locks.pop(user, None)
 
     def test_delete_requires_ids(self):
-        resp = vid.delete({})
+        resp = vid.delete({}, _req())
         self.assertEqual(resp.status_code, 400)
 
 
