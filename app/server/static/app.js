@@ -3090,75 +3090,35 @@ async function renderUsersTab(el) {
 }
 
 /* ---- 全局设置（仅管理员） ---- */
-const SETTINGS_META = {
-  embedding: { title: "Embedding（向量嵌入）", fields: { base_url: "Base URL", model: "模型名" } },
-  rerank: { title: "Rerank（重排）", fields: { base_url: "Base URL", model: "模型名" } },
-  graph: { title: "图谱存储（Neo4j）", fields: { storage: "后端(networkx/neo4j)", neo4j_uri: "URI", neo4j_username: "用户名", neo4j_password: "密码", neo4j_database: "数据库", cosine_threshold: "余弦阈值", namespace: "命名空间" } },
-  wechat: { title: "企业微信机器人", fields: { enabled: "启用(1/0)", welcome: "欢迎语", prefix: "thread 前缀", timeout: "超时", concurrency: "并发", kbs: "知识库" } },
-  limits: { title: "限额", fields: { embedding_max_batch: "Embedding 批大小", embedding_max_tokens: "Embedding 最大 token" } },
-};
-/* Mirror 密钥（accounts.db）：agnes/siliconflow 存 users 列，tavily/企微存 extra(JSON) */
 const MIRROR_KEY_META = {
-  agnes_key: { label: "Agnes Key", hint: "本账号 key（多个逗号分隔）；管理员会自动轮换全部用户的 key 池" },
+  agnes_key: { label: "Agnes Key", hint: "本账号 key（多个逗号分隔）" },
   siliconflow_key: { label: "硅基流动 Key", hint: "用于 Embedding / Rerank" },
-  tavily_api_key: { label: "Tavily Key", hint: "全局搜索服务" },
+  tavily_api_key: { label: "Tavily Key", hint: "联网搜索" },
   wechat_bot_id: { label: "企业微信 BotID", hint: "" },
   wechat_secret: { label: "企业微信 Secret", hint: "" },
 };
-const SETTINGS_SECRET = new Set(["api_key", "secret", "neo4j_password"]);
 
 async function renderSettingsTab(el) {
-  el.innerHTML = `<div class="tab-title">全局设置</div><div class="d-empty">加载中…</div>`;
+  el.innerHTML = `<div class="tab-title">密钥</div><div class="d-empty">加载中…</div>`;
   try {
     const data = await apiGet("/api/admin/settings");
-    const cfg = data.config || {};
     const dbk = data.db_keys || {};
-    let html = `<div class="tab-title">全局设置</div>
-      <div class="tab-note" style="margin-bottom:10px">写入 <code>data/.model_config</code>；密钥仅显示尾部 4 位，留空/不改动的掩码不会被覆盖。</div>`;
-    // 1) Mirror 密钥卡片（账号密钥，存 accounts.db）
-    const keyRows = Object.entries(MIRROR_KEY_META).map(([k, meta]) => `
+    const rows = Object.entries(MIRROR_KEY_META).map(([k, meta]) => `
       <div class="d-row"><label>${escapeHtml(meta.label)}</label>
-        <input class="d-input" data-db="${k}" type="password" value="${escapeHtml((dbk[k] || ""))}">
+        <input class="d-input" data-db="${k}" value="${escapeHtml(dbk[k] || "")}">
       </div>${meta.hint ? `<div class="d-hint" style="font-size:11px;color:var(--muted);margin:-4px 0 6px">${escapeHtml(meta.hint)}</div>` : ""}`).join("");
-    html += `<div class="d-card${dbk.pool_size ? ' has-mirror-keys' : ''}" style="border-left:3px solid var(--accent,#f0b90b)">
-      <h4 style="margin-bottom:8px">Mirror 密钥</h4>${keyRows}
-      <div class="d-hint" style="font-size:11px;color:var(--muted);margin-top:4px">账号池：数据库中共 ${dbk.pool_size || 0} 个 agnes key 参与轮换</div>
-    </div>`;
-    // 2) 其余非密钥配置
-    for (const sec of (data.editable || [])) {
-      const meta = SETTINGS_META[sec];
-      if (!meta) continue;
-      const val = cfg[sec];
-      if (typeof val !== "object" || val === null) {
-        html += `<div class="d-card"><h4>${escapeHtml(sec)}</h4>
-          <div class="d-row"><input class="d-input" data-sec="${sec}" data-scalar="1" value="${escapeHtml(String(val ?? ""))}"></div></div>`;
-        continue;
-      }
-      const rows = Object.entries(meta.fields).map(([k, label]) => {
-        const v = val[k];
-        const isSecret = SETTINGS_SECRET.has(k);
-        return `<div class="d-row"><label>${escapeHtml(label)}</label>
-          <input class="d-input" data-sec="${sec}" data-key="${k}" ${isSecret ? 'type="password"' : ""} value="${escapeHtml(v == null ? "" : String(v))}"></div>`;
-      }).join("");
-      html += `<div class="d-card"><h4 style="margin-bottom:8px">${escapeHtml(meta.title)}</h4>${rows}</div>`;
-    }
-    html += `<div class="d-row"><button class="d-btn primary" id="setSave">💾 保存</button></div>`;
-    el.innerHTML = html;
+    el.innerHTML = `<div class="tab-title">密钥</div>
+      <div class="tab-note" style="margin-bottom:10px">明文显示本账号的模型与工具密钥，保存到 <code>data/accounts.db</code>。</div>
+      <div class="d-card">${rows}
+        <div class="d-row" style="margin-top:10px;padding-bottom:0"><button class="d-btn primary" id="setSave">💾 保存</button></div>
+      </div>`;
 
     $("#setSave", el).addEventListener("click", async () => {
-      const patch = {};
-      $$("input[data-sec]", el).forEach((inp) => {
-        const sec = inp.dataset.sec;
-        const val = inp.value;
-        if (inp.dataset.scalar) { patch[sec] = val; return; }
-        patch[sec] = patch[sec] || {};
-        patch[sec][inp.dataset.key] = val;
-      });
       const dbPatch = {};
       $$("input[data-db]", el).forEach((inp) => { dbPatch[inp.dataset.db] = inp.value; });
       try {
-        await apiPost("/api/admin/settings", { config: patch, db_keys: dbPatch });
-        toast("已保存全局设置", "success");
+        await apiPost("/api/admin/settings", { config: {}, db_keys: dbPatch });
+        toast("已保存", "success");
       } catch (e) { toast("保存失败：" + e.message, "error"); }
     });
   } catch (e) { el.innerHTML = drawerErr(e); }
@@ -3210,8 +3170,8 @@ function initDrawer() {
     if (t.id === "display") return false;
     // Mirror用户显示所有可见tab
     if (isMirror) return true;
-    // 其他用户隐藏：记忆、用户管理、设置
-    return !["memorydb", "users", "settings"].includes(t.id);
+    // 其他用户隐藏：记忆、用户管理（设置页对所有用户开放，只显示自己的密钥）
+    return !["memorydb", "users"].includes(t.id);
   });
   // 确保记忆tab在DRAWER_TABS中（如果State.auth已设置）
   if (isMirror && !tabs.find(t => t.id === "memorydb")) {

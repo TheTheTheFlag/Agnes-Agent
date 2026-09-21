@@ -1,11 +1,12 @@
-"""app.server.api.settings — 全局配置读写（仅管理员）。
+"""app.server.api.settings — 密钥读写作（所有用户）。
 
 路径前缀 `/api/admin/settings`。分两部分：
-  - `data/.model_config`：非密钥配置（embedding/rerank 的 base_url+model、graph、
-    wechat 非密钥字段、limits 等），见 app.config_store。
-  - accounts.db：所有密钥 —— 管理员的 agnes / siliconflow 存 users 对应列，
-    tavily / 企微 BotID/Secret 存 users.extra(JSON)。普通用户各自的 agnes/sf 也只在 DB。
-前端「设置」页的 Mirror 密钥卡片读写 DB；其它设置读写 .model_config。
+  - accounts.db：所有密钥 —— 每登录用户只能读写**自己那一行**的 agnes / siliconflow
+    （users 对应列）与 tavily / 企微 BotID/Secret（users.extra JSON），明文返回。
+    `.model_config` 不再存任何密钥。
+  - `.model_config`：非密钥配置（embedding/rerank 的 base_url+model、graph、wechat
+    非密钥字段、limits 等），仅管理员可改，见 app.config_store。
+前端「设置」页只显示 5 个密钥输入框（明文）；配置管理仅限管理员。
 """
 import os
 from typing import List, Optional
@@ -44,12 +45,6 @@ def _uniq(keys: List[str]) -> List[str]:
     return out
 
 
-def _mask(v: str) -> str:
-    if not v:
-        return ""
-    return ("*" * max(0, len(v) - 4)) + v[-4:]
-
-
 def _is_admin_request(request: Optional[Request]) -> bool:
     user = getattr(getattr(request, "state", None), "username", None)
     if not user:
@@ -62,38 +57,30 @@ def _is_admin_request(request: Optional[Request]) -> bool:
         return accounts.is_admin(user)
 
 
-def _db_keys_masked(username: str) -> dict:
-    """管理员的密钥脱敏视图（供「Mirror 密钥」卡片回显）。"""
+def _db_keys_plain(username: str) -> dict:
+    """当前用户自己那行密钥的明文视图（仅本人可见，供设置页明文显示）。"""
     from app.server import accounts
     full = accounts.get_user(username, include_secrets=True) or {}
     extra = full.get("extra") or {}
     out = {}
     for k in _DB_KEY_FIELDS:
-        v = str(full.get(k) or "")
-        out[k] = _mask(v) if v else ""
+        out[k] = str(full.get(k) or "")
     for k in _EXTRA_KEY_FIELDS:
-        v = str(extra.get(k) or "")
-        out[k] = _mask(v) if v else ""
-    try:
-        out["pool_size"] = len(accounts.all_agnes_keys())
-    except Exception:
-        out["pool_size"] = 0
+        out[k] = str(extra.get(k) or "")
     return out
 
 
 @router.get("")
 async def get_settings(request: Request = None):
-    resp = {
+    from app.userctx import DEFAULT_USER
+    username = getattr(getattr(request, "state", None), "username", None) or DEFAULT_USER
+    return {
         "ok": True,
         "config": config_store.mask_config(),
         "editable": list(config_store.EDITABLE_SECTIONS),
         "env_file_present": os.path.isfile(config_store.ENV_FILE),
+        "db_keys": _db_keys_plain(username),
     }
-    if _is_admin_request(request):
-        username = getattr(getattr(request, "state", None), "username", None)
-        from app.userctx import DEFAULT_USER
-        resp["db_keys"] = _db_keys_masked(username or DEFAULT_USER)
-    return resp
 
 
 def _apply_db_update(username: str, patch_config: dict, db_keys: dict) -> None:
@@ -170,41 +157,45 @@ async def update_settings(payload: dict, request: Request = None):
     db_keys = payload.get("db_keys") or {}
     if not isinstance(db_keys, dict):
         db_keys = {}
-    if patch is None:
-        return JSONResponse({"error": "缺少 config 对象"}, status_code=400)
     admin = _is_admin_request(request)
     username = getattr(getattr(request, "state", None), "username", None)
     from app.userctx import DEFAULT_USER
     username = username or DEFAULT_USER
     if not admin:
-        return JSONResponse({"error": "仅管理员可修改全局设置与 Mirror 密钥"}, status_code=403)
+        # 非管理员：只能保存自己那行的 db_keys；任何 config 变更均拒绝
+        if patch and any(patch.values()):
+            return JSONResponse({"error": "仅管理员可修改全局配置"}, status_code=403)
+        patch = {}
+    if not db_keys and not (patch and any(patch.values())):
+        return JSONResponse({"error": "没有可保存的内容"}, status_code=400)
     try:
-        # 密钥字段先落 DB，其余（非密钥）配置走 .model_config
+        # 密钥字段先落 DB（每个用户自己的行），其余（非密钥）配置仅管理员走 .model_config
         _apply_db_update(username, patch, db_keys)
-        config_store.update_config(patch)
-        config_store.apply_to_env()
-        from app.server.accounts import apply_db_secrets_to_env
-        apply_db_secrets_to_env()
-        # Embedding/Rerank/网关变更会影响每用户 LLM/RAG：清缓存，下次请求按新配置重建
-        from app.userctx import clear_llm_cache
-        clear_llm_cache()
-        from app.server import config as srv_cfg
-        srv_cfg.clear_user_graphs()
-        try:
-            from app.memory.ligraphrag_adapter import reset_all as _reset_rag
-            _reset_rag()
-        except Exception:
-            pass
+        if admin:
+            config_store.update_config(patch)
+            config_store.apply_to_env()
+            from app.server.accounts import apply_db_secrets_to_env
+            apply_db_secrets_to_env()
+            # Embedding/Rerank/网关变更会影响每用户 LLM/RAG：清缓存，下次请求按新配置重建
+            from app.userctx import clear_llm_cache
+            clear_llm_cache()
+            from app.server import config as srv_cfg
+            srv_cfg.clear_user_graphs()
+            try:
+                from app.memory.ligraphrag_adapter import reset_all as _reset_rag
+                _reset_rag()
+            except Exception:
+                pass
     except Exception as e:
         return JSONResponse({"error": f"保存失败：{e}"}, status_code=500)
     try:
         from app.server.store import add_log_entry
-        add_log_entry("info", "全局配置已更新（/api/admin/settings）")
+        add_log_entry("info", f"设置已更新（/api/admin/settings, user={username}）")
     except Exception:
         pass
     return {
         "ok": True,
         "config": config_store.mask_config(),
-        "db_keys": _db_keys_masked(username),
-        "note": "已保存并写入环境变量；Embedding/Rerank/企业微信等在下一次重建或重启后完全生效。",
+        "db_keys": _db_keys_plain(username),
+        "note": "已保存到 accounts.db。",
     }
