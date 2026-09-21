@@ -1,8 +1,8 @@
 """app.server.api.video — 视频创作工作台后端（Agnes Video 2.5 Flash / V2.0）。
 
 把「文生视频 / 图生视频 / 首尾帧 / 关键帧 / 图片参考」封装为简单 API：
-  - 密钥复用 `app.server.api.image._agnes_keys`（.model_config 中 base_url 含 agnes-ai
-    的 provider，支持逗号分隔多 key）。视频接口按 key 限流（429），创建任务时逐个轮换。
+  - 密钥复用 `app.server.api.image._agnes_keys`（每用户自己的 key；管理员轮换全库
+    账号池，支持逗号分隔多 key）。视频接口按 key 限流（429），创建任务时逐个轮换。
   - 异步任务：POST 创建拿到 video_id → 前端轮询 /api/video/task/{id} → 后端再查上游，
     completed 后自动把 mp4 下载到 data/video_library/（ffmpeg 抽帧生成封面 + 读时长）。
   - 参考图：两个模型都直接内联 Data URI（实测 flash 的 first_frame/last_frame/images
@@ -27,7 +27,7 @@ import requests
 from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, JSONResponse
 
-from app.config import BASE_DIR, MODEL_CONFIG_PATH, user_subdir
+from app.config import user_subdir
 from app.server.api.image import _agnes_keys, _mask_key
 from app.userctx import current_user, set_current_user
 

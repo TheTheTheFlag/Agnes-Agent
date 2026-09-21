@@ -1,8 +1,8 @@
 """app.server.api.image — 图片创作工作台后端（Agnes Image 2.5/2.1/2.0 Flash）。
 
 把「文生图 / 图生图 / 多图合成」封装为简单 API：
-  - 密钥复用项目主 agnes 网关接入（.model_config 中 base_url 含 agnes-ai 的 provider，
-    支持逗号分隔多 key 自动轮换），退化到 skills/agnes-media/keys.json。
+  - 密钥复用项目主 agnes 网关接入（每用户自己的 key；管理员自动轮换账号池，
+    支持逗号分隔多 key），退化到 skills/agnes-media/keys.json。
   - 产物统一落盘 data/image_library/（原图 + 缩略图），manifest.json 记录参数，
     前端"作品库"画廊直接读取，无需二次联网。
   - 参考图复用 /api/upload 落盘的 uploads/ 路径，后端转 Data URI 传给上游。
@@ -21,7 +21,7 @@ import requests
 from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, JSONResponse
 
-from app.config import BASE_DIR, MODEL_CONFIG_PATH, user_subdir
+from app.config import BASE_DIR, user_subdir
 from app.userctx import current_user, set_current_user
 
 router = APIRouter(prefix="/api/image", tags=["image"])
@@ -50,20 +50,18 @@ _MAX_GALLERY = None    # 不限制作品数量，显示全部历史作品
 
 
 def _agnes_keys() -> list:
-    """解析 agnes 图片密钥列表（.model_config 优先，skills/agnes-media/keys.json 兜底）。"""
+    """解析当前用户可用的 agnes 图片密钥。
+
+    每用户自己的 users.agnes_key（逗号分隔多 key）；管理员为数据库全量 key 池。
+    均无时退化为 skills/agnes-media/keys.json。
+    返回去重后的 key 列表。
+    """
     keys: list = []
     try:
-        with open(MODEL_CONFIG_PATH, "r", encoding="utf-8") as f:
-            cfg = json.load(f)
-        for cm in cfg.get("custom", []) or []:
-            bu = str(cm.get("base_url") or "")
-            if "agnes-ai" in bu or bu.startswith("https://api.agnes-ai"):
-                for k in str(cm.get("api_key") or "").split(","):
-                    k = k.strip()
-                    if k:
-                        keys.append(k)
+        from app.userctx import resolve_user_keys
+        keys = resolve_user_keys().get("agnes", []) or []
     except Exception:
-        pass
+        keys = []
     if not keys:
         try:
             kf = os.path.join(BASE_DIR, "app", "skills", "agnes-media", "keys.json")

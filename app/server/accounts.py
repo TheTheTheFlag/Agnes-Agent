@@ -2,8 +2,13 @@
 
 账号数据存放 `data/accounts.db`（不入版本库，Linux 下收紧为 0600）：
   users(username PK, salt, hash, role, status, agnes_key, siliconflow_key,
-        created_at, approved_at, approved_by, note)
+        extra, created_at, approved_at, approved_by, note)
   sessions(token PK, username, expires_at, created_at)
+
+密钥全部存数据库：每用户 `agnes_key` / `siliconflow_key` 列 + 管理员（Mirror）的
+`extra`(JSON) 里存放服务级密钥（tavily_api_key / wechat_bot_id / wechat_secret）。
+`.model_config` 只保留非密钥配置（provider/base_url/model、embedding/rerank 的
+base_url/model、neo4j、limits 等），不再保存任何密钥值。
 
 - 角色 role：`admin`（管理员，如 Mirror，可审批用户）/ `user`。
 - 状态 status：`pending`（待审批）/ `active`（已通过）/ `rejected`（已拒绝）。
@@ -81,6 +86,7 @@ CREATE TABLE IF NOT EXISTS users (
     status          TEXT NOT NULL DEFAULT 'pending',
     agnes_key       TEXT,
     siliconflow_key TEXT,
+    extra           TEXT,
     created_at      TEXT,
     approved_at     TEXT,
     approved_by     TEXT,
@@ -94,16 +100,28 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 """
 
+# users.extra(JSON) 里允许存放的服务级密钥键（管理员/Mirror 使用）
+EXTRA_KEYS = ("tavily_api_key", "wechat_bot_id", "wechat_secret")
+# 这些 extra 键值需要在启动/保存后写回环境变量（供 langchain_tavily / wecom 读取）
+_EXTRA_ENV = {
+    "tavily_api_key": "TAVILY_API_KEY",
+    "wechat_bot_id": "WECHAT_BOT_ID",
+    "wechat_secret": "WECHAT_BOT_SECRET",
+}
+
 
 def _now() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def init_db() -> None:
-    """建表 + 迁移旧 auth.json（幂等，可重复调用）。"""
+    """建表 + 迁移旧 auth.json + 补列（幂等，可重复调用）。"""
     try:
         with _connect() as conn:
             conn.executescript(_DDL)
+            cols = {r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
+            if "extra" not in cols:
+                conn.execute("ALTER TABLE users ADD COLUMN extra TEXT")
     except Exception:
         return
     try:
@@ -138,6 +156,16 @@ def _migrate_legacy() -> None:
 
 
 # ==================== 用户读写 ====================
+def _parse_extra(raw: Optional[str]) -> Dict[str, str]:
+    if not raw:
+        return {}
+    try:
+        d = json.loads(raw)
+    except Exception:
+        return {}
+    return {k: str(v) for k, v in (d or {}).items() if isinstance(d, dict)}
+
+
 def _row_to_user(row: sqlite3.Row, include_secrets: bool = False) -> Dict[str, Any]:
     u = {
         "username": row["username"],
@@ -151,6 +179,7 @@ def _row_to_user(row: sqlite3.Row, include_secrets: bool = False) -> Dict[str, A
     if include_secrets:
         u["agnes_key"] = row["agnes_key"]
         u["siliconflow_key"] = row["siliconflow_key"]
+        u["extra"] = _parse_extra(row["extra"])
     return u
 
 
@@ -264,6 +293,61 @@ def set_keys(username: str, agnes_key: str, siliconflow_key: str) -> bool:
     if changed:
         _invalidate_user_caches(username)
     return changed
+
+
+def get_user_extra(username: str) -> Dict[str, str]:
+    """取某用户 extra(JSON) 里的服务级配置（如 Mirror 的 tavily / 企微密钥）。"""
+    with _connect() as conn:
+        row = conn.execute("SELECT extra FROM users WHERE username=?", (username,)).fetchone()
+    return _parse_extra(row["extra"]) if row else {}
+
+
+def set_user_extra(username: str, extra: Optional[Dict[str, Any]]) -> bool:
+    """整表替换某用户的 extra(JSON)（仅保留非空字符串值；写后刷新 env）。"""
+    if not isinstance(extra, dict):
+        return False
+    clean = {k: v for k, v in extra.items() if isinstance(v, str) and v.strip()}
+    with _connect() as conn:
+        cur = conn.execute(
+            "UPDATE users SET extra=? WHERE username=?",
+            (json.dumps(clean, ensure_ascii=False), username),
+        )
+        changed = cur.rowcount > 0
+    if changed:
+        apply_db_secrets_to_env()
+    return changed
+
+
+def all_agnes_keys() -> List[str]:
+    """数据库里存放的所有 agnes key（全量去重，管理员轮询池用）。"""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT agnes_key FROM users WHERE agnes_key IS NOT NULL AND agnes_key != ''"
+        ).fetchall()
+    out: List[str] = []
+    for r in rows:
+        for k in str(r["agnes_key"] or "").split(","):
+            k = k.strip()
+            if k and k not in out:
+                out.append(k)
+    return out
+
+
+def apply_db_secrets_to_env() -> None:
+    """把数据库（Mirror extra）里的服务级密钥写回环境变量（幂等）。
+
+    langchain_tavily / 企业微信 SDK 仍读 os.environ：启动时与应用设置保存后调用本函数，
+    把 tavily / 企微 BotID/Secret 同步到 env。
+    """
+    try:
+        from app.userctx import DEFAULT_USER
+        extra = get_user_extra(DEFAULT_USER)
+    except Exception:
+        return
+    for key, env in _EXTRA_ENV.items():
+        val = extra.get(key)
+        if val:
+            os.environ[env] = val
 
 
 def _invalidate_user_caches(username: str) -> None:

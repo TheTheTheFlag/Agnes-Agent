@@ -66,7 +66,7 @@ Web 面板（默认 http://localhost:8081，被占自动顺延）：
 - ✅ **自定义 ReAct 循环**：亲手实现思考—行动—观察闭环（`ReActLoop`），支持工具安全拦截、人工审批、连续拒绝熔断、迭代上限防死循环
 - ✅ **分层记忆系统**：L1 对话消息（含工具调用事件） / L2 用户画像 / L3 任务历史（dag_plans） / L6 知识图谱 GraphRAG（实体关系图谱 + 混合检索，详见 [docs/l6-graphrag.md](docs/l6-graphrag.md)；原 L4 命令历史与 L5 语义缓存已并入 L1 事件与 L6 图谱）
 - ✅ **实体归一化双保险**：入库前 `normalize_terms` 术语还原 + 入库后 `merge_entities` 图谱合并，抑制 LightRAG 大小写/拼写变体导致的实体节点膨胀（`RAG/Rag`、`GraphRAG/GraphRag` 等只留一个规范节点）
-- ✅ **多 Key 自动轮换**：api_key 逗号分隔，限流/超时/鉴权自动换 key + 指数退避重试；**按用户隔离**——普通用户只用自己注册时提交的 Key，管理员（Mirror）使用全局 Key + 所有已激活用户的 Key 汇成轮询池
+- ✅ **多 Key 自动轮换**：api_key 逗号分隔，限流/超时/鉴权自动换 key + 指数退避重试；**按用户隔离**——普通用户只用自己注册时提交的 Key，管理员（Mirror）的轮询池 = **数据库里所有用户的 agnes key**（全量去重，含普通用户与管理员自己的）
 - ✅ **知识库（KB）管理**：文档/分块/检索/问答反馈管理，每库可覆盖分块策略与抽取指引；对话图谱默认**全局共享一张图**（所有会话读写同一命名空间 `__global__`，跨会话可共享每轮对话知识）；用户经 `kb_create` 显式创建的知识库是**独立命名空间**（`lightrag_storage/<kb_id>/` 自含目录/图谱/向量索引），消息框可**多选勾选**确定本轮 L6 检索范围——**勾了什么查什么，什么都没勾就什么都不查**（`__global__` 只是列表里的一项；默认一个都不勾，勾选结果存在浏览器 localStorage 下次自动恢复）；`GRAPH_NAMESPACE=per_thread` 可退回按线程隔离
 - ✅ **技能系统（Skills）**：SKILL.md 即技能，命中本地装、不够用 SkillHub 在线搜装
 - ✅ **沉浸式 Web 面板**：流式对话、工具状态行、审批卡片、State/日志/记忆/定时任务调试抽屉、模型一键切换
@@ -115,7 +115,7 @@ LLM 类型: <class 'app.llm.llm_factory.RotatingKeyChatOpenAI'> | provider=opena
 
 打开 http://localhost:8081 即可使用。**首次打开调试面板时会引导你设置首个管理员账号（admin）**——凭据以 PBKDF2-SHA256（12 万轮 + 随机 salt）存入 `data/accounts.db`（已 `.gitignore`，不含明文密码）。其余用户在登录页「注册新账号」提交后，由管理员在 **设置 → 用户管理** 中审批通过/拒绝。若设置了 `.env` 的 `AGENT_USERNAME` / `AGENT_PASSWORD`（两个都填才生效），则视为管理员凭据，适合无人值守部署。首次使用先到右上角 **设置 → 模型** 页接入你的模型（填 Base URL + API Key，可自动拉取模型列表）。
 
-> `.env` 只放非模型密钥（如 `TAVILY_API_KEY`）；模型凭据统一在 `data/.model_config` 由设置页管理。
+> **密钥全部存数据库**（`data/accounts.db`，不入 `.model_config`）：每用户的 Agnes / 硅基流动 Key 存 `users` 表；管理员的 Tavily / 企微 BotID/Secret 存 `users.extra`(JSON)。`.model_config` 只留非密钥配置（base_url/模型名、Neo4j、限额等）。旧配置里的密钥会在启动时由 `migrate_keys_from_config_store()` 一次性迁入 DB 并自动剥除。
 >
 > 创作工作台另有可选环境变量 `AGNES_PUBLIC_BASE_URL`（如 `http://god.makeup:8081`）：仅当上游拒收内联 Data URI、需要公开素材地址时作为兜底基址（见[创作工作台](#-创作工作台图片--视频生成)）。
 
@@ -173,7 +173,7 @@ journalctl -u agnes-agent -f                          # 看日志
 
 | 角色 | 说明 |
 |---|---|
-| `admin` | 首个 `setup` 创建的管理员；可审批用户、管理全局模型配置、执行 `/api/git/*`、定时任务与自动快照 |
+| `admin` | 首个 `setup` 创建的管理员；可审批用户、管理全局模型配置与 Mirror 密钥（设置页「Mirror 密钥」卡片，全部存 accounts.db）、执行 `/api/git/*`、定时任务与自动快照 |
 | `user` | 普通用户：填 Key 注册 → 等待管理员审批 → 登录后独立使用面板 |
 
 用户状态：`pending`（注册待审批，无法登录）/ `active`（可用）/ `rejected`（被拒绝，登录返回 403 + 原因）。
@@ -199,9 +199,9 @@ data/users/<username>/
 └── .approval_mode         # 审批模式：per_ask / session_allow / always_allow
 ```
 
-- **Key 策略**：普通用户仅使用自己提交的 Agnes / 硅基流动 Key（embedding、rerank、对话推理都走本人 Key）；Key 随 `data/accounts.db` 落盘——`users` 表 `agnes_key` / `siliconflow_key` 两个 TEXT 字段按注册/设置时写入原样存储（库文件已 `.gitignore`，接口对非本人/非管理员一律脱敏为 `****xxxx`，前端永不显示）；管理员（Mirror）使用全局配置 `data/.model_config` 中的 LLM / embedding / rerank Key，不与普通用户的 Key 混用。
+- **Key 策略**：普通用户仅使用自己提交的 Agnes / 硅基流动 Key（embedding、rerank、对话推理都走本人 Key）；Key 随 `data/accounts.db` 落盘——`users` 表 `agnes_key` / `siliconflow_key` 两个 TEXT 字段按注册/设置时写入原样存储（库文件已 `.gitignore`，接口对非本人/非管理员一律脱敏为 `****xxxx`，前端永不显示）；管理员（Mirror）轮询池 = 数据库里**所有用户的 agnes key**（含普通用户与管理员自己的，全量去重），硅基流动 Key 用管理员自己的；管理员的 Tavily / 企微 BotID/Secret 存 `users.extra`(JSON)。
 
-> Key 存储速查：**每用户** Key → `data/accounts.db`（`users` 表 `agnes_key`/`siliconflow_key`）；**全局** Key（LLM/embedding/rerank/tavily）→ `data/.model_config`（设置页管理，无 `.env` 文件）。
+> Key 存储速查：**每用户** Key → `data/accounts.db`（`users` 表 `agnes_key`/`siliconflow_key`）；**管理员** Tavily / 企微 BotID/Secret → `data/accounts.db`（`users.extra` JSON）；`.model_config` 与 `.env` 不再存放任何密钥，设置页「Mirror 密钥」卡片统一在 DB 读写。
 - **权限边界**：工具层对非管理员隐藏 `execute_command`（命令执行）与 `tavily_search`（联网搜索）；`/api/git/*`、`/api/scheduler`、自动 git 快照仅管理员可用；非管理员每次对话写入自己 `data/users/` 下的工作区，不会产生仓库级 commit。
 - **审批模式**：每次询问 / 本次会话允许 / 永久允许，按用户单独记忆（`.approval_mode`），互不继承。
 - **迁移**：升级自旧版（单用户）时，服务启动会把仓库级 `data/`、`lightrag_storage/` 等旧数据自动迁移到 `data/users/Mirror/`，管理员即旧版用户，无缝衔接。
@@ -526,7 +526,7 @@ pending ──(强依赖父全部 success)──► ready ──► running ─�
 
 ### 图片
 
-- 复用 agnes 网关的多 Key 轮换（`.model_config` 中 base_url 含 `agnes-ai` 的 provider，`api_key` 逗号分隔；退化到 `skills/agnes-media/keys.json`）；
+- 复用 agnes 网关的多 Key 轮换（`data/accounts.db` 里全部用户的 agnes key 池，`api_key` 逗号分隔；无 DB 密钥时退化到 `skills/agnes-media/keys.json`）；
 - 产物落盘 `data/image_library/`，删除走 `POST /api/image/delete`。
 
 ### 视频（Agnes Video 2.5 Flash / V2.0）
@@ -714,7 +714,7 @@ Agnes-Agent/
 │   ├── main.py                    # 入口（后台服务）：端口被占自动顺延 8082+；启动失败打印 [startup error] 并落库兜底
 │   ├── service.py                 # 入口（服务模式）：HTTP 常驻 0.0.0.0:8081 + `--reload` 热重载（监控 app/ 与 .model_config）
 │   ├── config.py                  # 路径配置中心：DB_PATH / CHECKPOINT_DB_PATH / PROMPT 等统一指向 data/ 与用户目录
-│   ├── config_store.py            # `data/.model_config` 读写：模型目录（LLM/embedding/rerank/tavily）+ secret 脱敏（****xxxx）
+│   ├── config_store.py            # `data/.model_config` 读写：非密钥配置（base_url/模型名/Neo4j/限额...）；启动时把旧密钥迁入 accounts.db 并从配置剥除
 │   ├── userctx.py                 # 多用户上下文核心：用户路径解析、Key 解析与轮询池、旧数据迁移、后台线程继承用户上下文
 │   ├── trace.py                   # 会话级追踪：每次对话写 `traces/<thread_id>.jsonl`（调试面板追踪页读取）
 │   ├── llm/
@@ -758,7 +758,7 @@ Agnes-Agent/
 │   │   └── bot.py                 # 企业微信长连接接入：消息解析、thread_id 映射（wx:single / wx:group）、分段回复
 │   └── server/                    # 服务层（FastAPI + 调试面板）
 │       ├── __init__.py            #   app 装配：静态面板 /api/* 挂载、/pub/video-ref 静态暴露
-│       ├── accounts.py            #   账号 CRUD + 旧 auth.json 迁移 + 每用户 Key 存取（set_keys/get_keys）
+│       ├── accounts.py            #   账号 CRUD + 旧 auth.json 迁移 + 全部密钥存取（users 列 + extra JSON + all_agnes_keys 轮询池 + DB→env）
 │       ├── auth.py                #   PBKDF2-SHA256（12 万轮 + 随机 salt）+ token 会话（7 天）
 │       ├── keycheck.py            #   Key 可用性即时校验（注册/改 Key 时探测可达）
 │       ├── config.py              #   模型目录管理（写入 data/.model_config，无内置厂商）
@@ -780,8 +780,8 @@ Agnes-Agent/
 │           ├── image.py           #   图片生成（创作工作台）
 │           └── video.py           #   视频生成（异步任务轮询 + 完成自动下载 mp4 + 封面/时长）
 ├── data/                          # 运行时数据（已被 .gitignore，不提交）
-│   ├── accounts.db                # 账号库 users(username, salt, hash, role, status, agnes_key, siliconflow_key, …) —— **每用户 Key 即存于此**
-│   ├── .model_config              # 全局模型配置：LLM / embedding / rerank / tavily 的 base_url + api_key（设置页管理）
+│   ├── accounts.db                # 账号库 users(username, salt, hash, role, status, agnes_key, siliconflow_key, extra, …) —— **所有密钥即存于此**（每用户 Key 存 agnes_key/siliconflow_key 列；管理员 Tavily/企微 BotID/Secret 存 extra JSON）
+│   ├── .model_config              # 全局配置：embedding/rerank 的 base_url+model、graph、limits 等（不再含任何密钥；设置页管理）
 │   ├── video_ref/                 # 视频参考图公开挂载目录（/pub/video-ref）
 │   ├── traces/                    # 会话追踪 <thread_id>.jsonl（trace.py 写入）
 │   └── users/                     # 每用户独立工作区（互不可见）
@@ -801,7 +801,7 @@ Agnes-Agent/
 ├── tests/                         # pytest 回归测试（test_userctx / test_config_store / test_kb / test_graph_rag / test_entity_normalizer / test_chat_* / test_auth / test_image / test_video 等 14 个）
 ├── deploy/
 │   └── agnes-agent.service        # systemd 开机自启单元文件
-├── .env                           # 环境变量/非模型密钥（TAVILY_API_KEY、NEO4J_*、WECHAT_BOT_* 等；模型密钥统一走 .model_config）
+├── .env                           # 历史环境变量（TAVILY_API_KEY、NEO4J_*、WECHAT_BOT_* 等）——密钥启动时自动迁入 accounts.db 并从配置剥除
 ├── pyproject.toml / uv.lock       # 项目元数据与依赖锁定（uv 管理）
 └── README.md
 ```

@@ -3091,12 +3091,19 @@ async function renderUsersTab(el) {
 
 /* ---- 全局设置（仅管理员） ---- */
 const SETTINGS_META = {
-  embedding: { title: "Embedding（向量嵌入）", fields: { base_url: "Base URL", api_key: "API Key", model: "模型名" } },
-  rerank: { title: "Rerank（重排）", fields: { base_url: "Base URL", api_key: "API Key", model: "模型名" } },
-  tavily: { title: "Tavily 搜索", fields: { api_key: "API Key" } },
+  embedding: { title: "Embedding（向量嵌入）", fields: { base_url: "Base URL", model: "模型名" } },
+  rerank: { title: "Rerank（重排）", fields: { base_url: "Base URL", model: "模型名" } },
   graph: { title: "图谱存储（Neo4j）", fields: { storage: "后端(networkx/neo4j)", neo4j_uri: "URI", neo4j_username: "用户名", neo4j_password: "密码", neo4j_database: "数据库", cosine_threshold: "余弦阈值", namespace: "命名空间" } },
-  wechat: { title: "企业微信机器人", fields: { bot_id: "BotID", secret: "Secret", enabled: "启用(1/0)", welcome: "欢迎语", prefix: "thread 前缀", timeout: "超时", concurrency: "并发", kbs: "知识库" } },
+  wechat: { title: "企业微信机器人", fields: { enabled: "启用(1/0)", welcome: "欢迎语", prefix: "thread 前缀", timeout: "超时", concurrency: "并发", kbs: "知识库" } },
   limits: { title: "限额", fields: { embedding_max_batch: "Embedding 批大小", embedding_max_tokens: "Embedding 最大 token" } },
+};
+/* Mirror 密钥（accounts.db）：agnes/siliconflow 存 users 列，tavily/企微存 extra(JSON) */
+const MIRROR_KEY_META = {
+  agnes_key: { label: "Agnes Key", hint: "本账号 key（多个逗号分隔）；管理员会自动轮换全部用户的 key 池" },
+  siliconflow_key: { label: "硅基流动 Key", hint: "用于 Embedding / Rerank" },
+  tavily_api_key: { label: "Tavily Key", hint: "全局搜索服务" },
+  wechat_bot_id: { label: "企业微信 BotID", hint: "" },
+  wechat_secret: { label: "企业微信 Secret", hint: "" },
 };
 const SETTINGS_SECRET = new Set(["api_key", "secret", "neo4j_password"]);
 
@@ -3105,8 +3112,19 @@ async function renderSettingsTab(el) {
   try {
     const data = await apiGet("/api/admin/settings");
     const cfg = data.config || {};
+    const dbk = data.db_keys || {};
     let html = `<div class="tab-title">全局设置</div>
-      <div class="tab-note">写入 <code>data/.model_config</code>；密钥仅显示尾部 4 位，留空/不改动的掩码不会被覆盖。</div>`;
+      <div class="tab-note" style="margin-bottom:10px">写入 <code>data/.model_config</code>；密钥仅显示尾部 4 位，留空/不改动的掩码不会被覆盖。</div>`;
+    // 1) Mirror 密钥卡片（账号密钥，存 accounts.db）
+    const keyRows = Object.entries(MIRROR_KEY_META).map(([k, meta]) => `
+      <div class="d-row"><label>${escapeHtml(meta.label)}</label>
+        <input class="d-input" data-db="${k}" type="password" value="${escapeHtml((dbk[k] || ""))}">
+      </div>${meta.hint ? `<div class="d-hint" style="font-size:11px;color:var(--muted);margin:-4px 0 6px">${escapeHtml(meta.hint)}</div>` : ""}`).join("");
+    html += `<div class="d-card${dbk.pool_size ? ' has-mirror-keys' : ''}" style="border-left:3px solid var(--accent,#f0b90b)">
+      <h4 style="margin-bottom:8px">Mirror 密钥</h4>${keyRows}
+      <div class="d-hint" style="font-size:11px;color:var(--muted);margin-top:4px">账号池：数据库中共 ${dbk.pool_size || 0} 个 agnes key 参与轮换</div>
+    </div>`;
+    // 2) 其余非密钥配置
     for (const sec of (data.editable || [])) {
       const meta = SETTINGS_META[sec];
       if (!meta) continue;
@@ -3136,8 +3154,10 @@ async function renderSettingsTab(el) {
         patch[sec] = patch[sec] || {};
         patch[sec][inp.dataset.key] = val;
       });
+      const dbPatch = {};
+      $$("input[data-db]", el).forEach((inp) => { dbPatch[inp.dataset.db] = inp.value; });
       try {
-        await apiPost("/api/admin/settings", { config: patch });
+        await apiPost("/api/admin/settings", { config: patch, db_keys: dbPatch });
         toast("已保存全局设置", "success");
       } catch (e) { toast("保存失败：" + e.message, "error"); }
     });

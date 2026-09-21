@@ -170,6 +170,14 @@ def rebuild_graph_with_model(provider: str, model: str):
     real_provider = resolve_provider_env(provider)
     save_model_config(provider, model)   # 先落盘：每用户 LLM 构建时读取新默认模型
     _current_model = {"provider": provider, "model": model}
+    # 模块级 llm 兜底也要有 key：.model_config 不再存密钥，注入当前用户的 DB agnes 池
+    try:
+        from app.userctx import current_user as _cu, resolve_user_keys as _rku
+        _keys = _rku(_cu()).get("agnes") or []
+        if _keys:
+            _os.environ["OPENAI_API_KEY"] = ",".join(_keys)
+    except Exception:
+        pass
     # 重建模块级 llm（兜底：无用户上下文时 chatbot/planner 使用）
     g_mod.llm = create_llm(provider=real_provider, model=model)
     g_mod.llm_with_tools = g_mod.llm.bind_tools(tools)
@@ -293,13 +301,32 @@ async def add_model(payload: dict, request: Request = None):
     import uuid as _uuid
     pid = "custom-" + label.lower().replace(" ", "-") + "-" + _uuid.uuid4().hex[:4]
     custom = get_custom_models()
-    custom.append({
+    entry = {
         "id": pid,
         "label": label,
         "base_url": base_url,
         "api_key": api_key,
         "models": models,
-    })
+    }
+    if "agnes-ai.cn" in base_url:
+        # agnes 网关的 key 已迁入 accounts.db：锚定当前管理员的 agnes_key，不入 .model_config
+        _raw_key = api_key
+        entry["api_key"] = ""
+        api_key = ""
+        try:
+            from app.server import accounts
+            _by_username = getattr(getattr(request, "state", None), "username", None)
+            from app.userctx import DEFAULT_USER
+            _uname = _by_username or DEFAULT_USER
+            _full = accounts.get_user(_uname, include_secrets=True) or {}
+            _cur = [k.strip() for k in str(_full.get("agnes_key") or "").split(",") if k.strip()]
+            _key = _raw_key.strip()
+            if _key:
+                _cur = [_key]
+            accounts.set_keys(_uname, ",".join(_cur), str(_full.get("siliconflow_key") or ""))
+        except Exception:
+            pass
+    custom.append(entry)
     save_custom_models(custom)
     return {"ok": True, "model": custom[-1], "note": "已接入。可在设置中设为默认，或在上方下拉切换。"}
 

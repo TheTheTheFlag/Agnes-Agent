@@ -11,9 +11,9 @@
   - 后台线程：用 `run_in_user_thread()` 包装以继承用户上下文；
   - 缺省：`Mirror`（兼容离线单用户 / 定时任务 / 旧数据迁移）。
 
-密钥解析：
+密钥解析（全部存 accounts.db，.model_config 不再存密钥）：
   - 普通用户 → 仅用自己在注册时提交的 Agnes / 硅基流动 Key；
-  - 管理员（Mirror）→ 全局 .model_config 的 Key + 所有已审批用户 Key 组成轮换池。
+  - 管理员（Mirror）→ 轮询池 = 数据库里所有用户的 agnes key；自己的硅基流动 Key。
 """
 from __future__ import annotations
 
@@ -311,53 +311,39 @@ def _split_keys(raw: Optional[str]) -> List[str]:
     return [k.strip() for k in str(raw).split(",") if k.strip()]
 
 
-def _dedup(keys: List[str]) -> List[str]:
-    seen = set()
-    out = []
-    for k in keys:
-        if k and k not in seen:
-            seen.add(k)
-            out.append(k)
-    return out
-
-
 def global_agnes_keys() -> List[str]:
-    """全局 .model_config 中 agnes 接入的 Key（逗号分隔多 Key）。"""
-    from app import config_store
-    cfg = config_store.get_config()
-    for cm in cfg.get("custom", []) or []:
-        base = str((cm or {}).get("base_url") or "")
-        if "agnes-ai.cn" in base:
-            return _split_keys(cm.get("api_key"))
-    return []
+    """管理员轮询池 = 数据库里所有 agnes key（全量去重）。
+
+    旧实现读 .model_config.custom[].api_key；密钥现已全部迁到 accounts.db。
+    """
+    from app.server import accounts
+    try:
+        return accounts.all_agnes_keys()
+    except Exception:
+        return []
 
 
 def global_sf_keys() -> List[str]:
-    """全局 .model_config 的 Embedding / Rerank Key（硅基流动）。"""
-    from app import config_store
-    cfg = config_store.get_config()
-    emb = (cfg.get("embedding") or {}).get("api_key")
-    rer = (cfg.get("rerank") or {}).get("api_key")
-    return _dedup(_split_keys(emb) + _split_keys(rer))
+    """管理员（Mirror）的硅基流动 Key = 数据库里他自己的 siliconflow_key。"""
+    from app.server import accounts
+    try:
+        full = accounts.get_user(DEFAULT_USER, include_secrets=True) or {}
+        return _split_keys(full.get("siliconflow_key"))
+    except Exception:
+        return []
 
 
 def _all_active_user_keys() -> Tuple[List[str], List[str]]:
-    from app.server import accounts
     agnes, sf = [], []
     try:
-        for u in accounts.list_users():
-            if u.get("status") != "active":
-                continue
-            full = accounts.get_user(u.get("username"), include_secrets=True) or {}
-            agnes += _split_keys(full.get("agnes_key"))
-            sf += _split_keys(full.get("siliconflow_key"))
+        return global_agnes_keys(), global_sf_keys()
     except Exception:
         pass
     return agnes, sf
 
 
 def resolve_user_keys(username: Optional[str] = None) -> Dict[str, List[str]]:
-    """返回 {agnes: [...], siliconflow: [...]}（管理员为全局池 + 所有已审批用户）。"""
+    """返回 {agnes: [...], siliconflow: [...]}（管理员为全库 agnes 轮询池 + 自己的 sf）。"""
     user = username or current_user()
     from app.server import accounts
     is_admin = False

@@ -155,12 +155,23 @@ def _patch_faiss_lazy_vectors() -> None:
 
 
 def _resolve_llm() -> Any:
-    """对话 LLM：走项目的主配置（用户当前选的那个模型），并把 base_url/api_key 注入环境变量。"""
+    """对话 LLM：走项目的主配置（用户当前选的那个模型），并把 base_url/api_key 注入环境变量。
+
+    .model_config 不再存密钥：API Key 用当前用户（管理员=全库轮询池）的 agnes key。
+    """
     _load_dotenv()
     from app.server.config import load_model_config, resolve_provider_env
     cfg = load_model_config()
-    # resolve_provider_env 内部把 base_url/api_key 注入 OPENAI_BASE_URL/OPENAI_API_KEY
+    # resolve_provider_env 内部把 base_url 注入 OPENAI_BASE_URL（api_key 已迁出配置）
     resolve_provider_env(cfg.get("provider", ""))
+    try:
+        from app.userctx import resolve_user_keys
+        _keys = resolve_user_keys().get("agnes") or []
+        if _keys:
+            import os as _os
+            _os.environ["OPENAI_API_KEY"] = ",".join(_keys)
+    except Exception:
+        pass
     from app.llm.llm_factory import create_llm
     return create_llm(
         provider=cfg.get("provider", "openai_compatible"),
