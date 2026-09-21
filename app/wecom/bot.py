@@ -6,12 +6,16 @@
   - 企微 → 本服务：aibot_msg_callback（消息）/ aibot_event_callback（事件）
   - 本服务 → 企微：aibot_respond_msg（本条回复，stream 类型）/ aibot_send_msg（主动推送）
 
+多用户：每个账号用自己的企业微信机器人。
+  每个用户的 BotID/Secret 存在 accounts.db 的 users.extra（wechat_bot_id / wechat_secret）。
+  启动时遍历所有配置了凭证的用户，各建一条长连接；某机器人收到的消息一律以**该用户**身份
+  运行 Agent（Agnes / 硅基流动 / Tavily / 画像记忆都按该用户解析）。没有在 DB 配置凭证、
+  但 .env 里仍填了 WECHAT_BOT_ID/SECRET 的，作为 Mirror 兜底保留旧行为。
+
 回复策略：收到消息先回一条「正在处理…」占位，Agent 跑完后用同一个 stream.id 推最终答案。
 Agent 调用与 /api/chat 完全一致，因此企业微信里同样带多轮上下文、记忆与工具能力。
 
-配置（.env，全部可选；填了 BotID + Secret 即自动启用）：
-    WECHAT_BOT_ID            机器人 BotID（管理后台 → 机器人编辑页 → API 模式 → 长连接）
-    WECHAT_BOT_SECRET        长连接专用 Secret
+全局行为配置（.env，可选）：
     WECHAT_BOT_ENABLED       显式开关，0/false 强制关闭（默认有凭证即启用）
     WECHAT_BOT_WELCOME       用户进入会话时的欢迎语
     WECHAT_BOT_THREAD_PREFIX thread_id 前缀（默认 wx），用于与 Web 面板会话隔离
@@ -21,8 +25,8 @@ Agent 调用与 /api/chat 完全一致，因此企业微信里同样带多轮上
 
 会话映射：每个企微会话固定映射到一个 thread_id —— 单聊 wx:single:<userid>，群聊 wx:group:<chatid>。
 
-图片：图片/图文混排回调里的图片会下载并 AES 解密后落到**当前用户**（多用户下默认为 Mirror）
-的 `data/users/<user>/uploads/` 目录，再把 `uploads/xxx` 相对路径随用户文字一起交给 Agent
+图片：图片/图文混排回调里的图片会下载并 AES 解密后落到**当前用户**的
+`data/users/<user>/uploads/` 目录，再把 `uploads/xxx` 相对路径随用户文字一起交给 Agent
 （与 Web 面板上传图片的约定一致），由 Agent 识别图片。
 """
 from __future__ import annotations
@@ -51,7 +55,8 @@ _MEDIA_HINT = {"file": "文件", "video": "视频"}
 # SDK 会单独分发的事件类型（其余走 message 兜底）
 _SDK_MSGTYPES = {"text", "mixed", "voice", "image", "file"}
 
-_STATE: Dict[str, Any] = {"client": None, "ready": False, "started": False}
+# 多用户多实例：clients 按 username 索引
+_STATE: Dict[str, Any] = {"clients": {}, "ready": False, "started": False}
 _SEEN_MSGIDS: set = set()
 _TURN_SEM: Optional[asyncio.Semaphore] = None
 
@@ -66,11 +71,9 @@ def _int_env(name: str, default: int) -> int:
 
 
 def config() -> dict:
-    """读取企业微信接入配置（每次读取 .env 环境变量，便于改配置后重启即生效）。"""
+    """读取企业微信全局行为配置（非凭证；每次读取 .env 环境变量，便于改配置后重启即生效）。"""
     raw = (os.getenv("WECHAT_BOT_ENABLED") or "").strip().lower()
     return {
-        "bot_id": (os.getenv("WECHAT_BOT_ID") or "").strip(),
-        "secret": (os.getenv("WECHAT_BOT_SECRET") or "").strip(),
         "disabled": raw in ("0", "false", "no", "off"),
         "welcome": os.getenv("WECHAT_BOT_WELCOME")
         or "你好，我是 Agnes 智能助手。直接发消息即可对话，支持多轮上下文与工具调用。",
@@ -79,6 +82,26 @@ def config() -> dict:
         "concurrency": max(1, _int_env("WECHAT_BOT_CONCURRENCY", 2)),
         "kbs": [k.strip() for k in (os.getenv("WECHAT_BOT_KBS") or "").split(",") if k.strip()],
     }
+
+
+def _db_wecom_users() -> List[Tuple[str, str, str]]:
+    """收集 accounts.db 里配置了企业微信长连接凭证的用户。
+
+    返回 [(username, bot_id, secret)]：每个用户用自己的机器人，消息按该用户身份处理。
+    """
+    out: List[Tuple[str, str, str]] = []
+    try:
+        from app.server import accounts
+        for row in accounts.list_users_with_secrets():
+            extra = row.get("extra") or {}
+            bid = str(extra.get("wechat_bot_id") or "").strip()
+            sec = str(extra.get("wechat_secret") or "").strip()
+            u = row.get("username")
+            if u and bid and sec:
+                out.append((u, bid, sec))
+    except Exception as e:
+        _log(f"读取企微账号配置失败：{e}", "warn")
+    return out
 
 
 def _log(msg: str, level: str = "info"):
@@ -312,8 +335,12 @@ def _split_chunks(text: str, limit: int = _STREAM_MAX_BYTES) -> List[str]:
 
 # ==================== Agent 调用 ====================
 
-def _run_turn(thread_id: str, text: str) -> str:
-    """同步执行一轮对话（在线程池里跑）。与 /api/chat 的 graph.stream 用法一致。"""
+def _run_turn(username: str, thread_id: str, text: str) -> str:
+    """同步执行一轮对话（在线程池里跑）。与 /api/chat 的 graph.stream 用法一致。
+
+    显式以该消息所属用户身份运行：Agnes / 硅基流动 / Tavily / 企微均按该用户解析。
+    """
+    from app.userctx import set_current_user, reset_current_user
     from app.server import config as _srv_cfg
 
     graph = getattr(_srv_cfg, "_GRAPH", None)
@@ -325,27 +352,31 @@ def _run_turn(thread_id: str, text: str) -> str:
     if kbs:
         cfg["configurable"]["selected_kbs"] = kbs
 
-    inputs = {"messages": [("user", text)]}
-    outputs: List[str] = []
-    interrupted = False
-    for ev in graph.stream(inputs, cfg, stream_mode="updates", recursion_limit=40):
-        for node, upd in (ev or {}).items():
-            if node == "__interrupt__":
-                interrupted = True
+    tok = set_current_user(username or "Mirror")
+    try:
+        inputs = {"messages": [("user", text)]}
+        outputs: List[str] = []
+        interrupted = False
+        for ev in graph.stream(inputs, cfg, stream_mode="updates", recursion_limit=40):
+            for node, upd in (ev or {}).items():
+                if node == "__interrupt__":
+                    interrupted = True
+                    break
+                if isinstance(upd, dict) and isinstance(upd.get("messages"), list):
+                    for m in reversed(upd["messages"]):
+                        if getattr(m, "type", None) == "ai":
+                            content = _as_text(getattr(m, "content", "") or "")
+                            if content:
+                                outputs.append(content)
+                            break
+            if interrupted:
                 break
-            if isinstance(upd, dict) and isinstance(upd.get("messages"), list):
-                for m in reversed(upd["messages"]):
-                    if getattr(m, "type", None) == "ai":
-                        content = _as_text(getattr(m, "content", "") or "")
-                        if content:
-                            outputs.append(content)
-                        break
-        if interrupted:
-            break
 
-    if interrupted:
-        return "⚠️ 本轮触发了工具调用审批（安全检查）。企业微信侧暂不支持审批，请在 Web 调试面板打开该会话并确认后继续。"
-    return outputs[-1] if outputs else "（本轮没有产生文本回复）"
+        if interrupted:
+            return "⚠️ 本轮触发了工具调用审批（安全检查）。企业微信侧暂不支持审批，请在 Web 调试面板打开该会话并确认后继续。"
+        return outputs[-1] if outputs else "（本轮没有产生文本回复）"
+    finally:
+        reset_current_user(tok)
 
 
 # ==================== 收发处理 ====================
@@ -361,99 +392,109 @@ async def _finish_reply(client, frame: dict, stream_id: str, text: str):
             _log(f"分段补发失败：{e}", "warn")
 
 
-async def _handle_message(frame: dict):
-    """aibot_msg_callback：用户消息 → 一轮 Agent 对话 → 回复。
+def _client_for(username: str):
+    """取某用户的机器人客户端（该机器人收到的消息用此客户端回复）。"""
+    return _STATE.get("clients", {}).get(username)
 
-    注意：SDK 的事件监听器只收到 frame（不含 client），client 从 _STATE 取。
+
+async def _handle_message(frame: dict, username: str):
+    """aibot_msg_callback：用户消息 → 一轮 Agent 对话 → 回复（以 username 身份）。
+
+    注意：SDK 的事件监听器只收到 frame（不含 client），client 按 username 从 _STATE 取。
     """
-    client = _STATE.get("client")
+    client = _client_for(username)
     if client is None:
         _log("长连接客户端未就绪，忽略本条消息", "warn")
         return
-    body = frame.get("body") or {}
+    from app.userctx import set_current_user, reset_current_user
+    _utok = set_current_user(username or "Mirror")
+    try:
+        body = frame.get("body") or {}
 
-    msgid = body.get("msgid") or ""
-    if msgid:
-        if msgid in _SEEN_MSGIDS:
-            return  # 企微可能重复回调，按 msgid 排重
-        _SEEN_MSGIDS.add(msgid)
-        if len(_SEEN_MSGIDS) > 5000:
-            _SEEN_MSGIDS.clear()
+        msgid = body.get("msgid") or ""
+        if msgid:
+            if msgid in _SEEN_MSGIDS:
+                return  # 企微可能重复回调，按 msgid 排重
+            _SEEN_MSGIDS.add(msgid)
+            if len(_SEEN_MSGIDS) > 5000:
+                _SEEN_MSGIDS.clear()
 
-    cfg = config()
-    thread_id = _thread_id(body, cfg["prefix"])
-    userid = (body.get("from") or {}).get("userid") or ""
-    text = _extract_text(body)
-    images = _extract_images(body)
+        cfg = config()
+        thread_id = _thread_id(body, cfg["prefix"])
+        userid = (body.get("from") or {}).get("userid") or ""
+        text = _extract_text(body)
+        images = _extract_images(body)
 
-    # 图片：下载解密后落到 uploads/，把路径连同用户文字交给 Agent（由图片理解技能识别）
-    if images:
-        refs = await _save_images(client, images, msgid)
-        if refs:
-            img_lines = "\n".join(f"![{name}]({path})" for name, path, _ in refs)
-            instr = (
-                "（用户发来图片，已保存到当前用户工作区的 uploads 目录下，请识别图片内容后再回答）"
-            )
-            text = img_lines + "\n" + instr + (("\n\n" + text) if text else "")
-            _log(f"收到图片 {len(refs)} 张，已保存：" + ", ".join(p for _, p, _ in refs))
-        else:
-            # 图片没下下来：直接回失败，且不再跑 Agent ——
-            # 否则 Agent 会去翻 uploads/ 里的历史图片，拿旧图乱答（曾实际发生）。
-            _log("图片接收失败，未保存任何图片，直接回失败提示", "warn")
+        # 图片：下载解密后落到当前用户 uploads/，把路径连同用户文字交给 Agent
+        if images:
+            refs = await _save_images(client, images, msgid)
+            if refs:
+                img_lines = "\n".join(f"![{name}]({path})" for name, path, _ in refs)
+                instr = (
+                    "（用户发来图片，已保存到当前用户工作区的 uploads 目录下，请识别图片内容后再回答）"
+                )
+                text = img_lines + "\n" + instr + (("\n\n" + text) if text else "")
+                _log(f"收到图片 {len(refs)} 张，已保存：" + ", ".join(p for _, p, _ in refs))
+            else:
+                # 图片没下下来：直接回失败，且不再跑 Agent ——
+                # 否则 Agent 会去翻 uploads/ 里的历史图片，拿旧图乱答（曾实际发生）。
+                _log("图片接收失败，未保存任何图片，直接回失败提示", "warn")
+                try:
+                    await client.reply_stream(
+                        frame, generate_req_id("stream"),
+                        "图片接收失败（下载或解密出错），请重发一次或改用文字描述。", finish=True,
+                    )
+                except Exception as e:
+                    _log(f"图片失败提示发送失败：{e}", "warn")
+                return
+
+        if text is None:
+            msgtype = (body.get("msgtype") or "").strip().lower()
+            hint = _MEDIA_HINT.get(msgtype, msgtype or "该类型")
             try:
                 await client.reply_stream(
                     frame, generate_req_id("stream"),
-                    "图片接收失败（下载或解密出错），请重发一次或改用文字描述。", finish=True,
+                    f"暂不支持{hint}消息，请直接发送文字（语音会自动转写为文本）。", finish=True,
                 )
             except Exception as e:
-                _log(f"图片失败提示发送失败：{e}", "warn")
+                _log(f"类型提示发送失败：{e}", "warn")
             return
 
-    if text is None:
-        msgtype = (body.get("msgtype") or "").strip().lower()
-        hint = _MEDIA_HINT.get(msgtype, msgtype or "该类型")
+        _log(f"[{username}] 收到消息 chat={body.get('chattype')} thread={thread_id} user={str(userid)[:16]} len={len(text)}")
+        stream_id = generate_req_id("stream")
         try:
-            await client.reply_stream(
-                frame, generate_req_id("stream"),
-                f"暂不支持{hint}消息，请直接发送文字（语音会自动转写为文本）。", finish=True,
-            )
+            await client.reply_stream(frame, stream_id, "🤖 正在处理，请稍候…", finish=False)
         except Exception as e:
-            _log(f"类型提示发送失败：{e}", "warn")
-        return
+            _log(f"占位消息发送失败：{e}", "warn")
 
-    _log(f"收到消息 chat={body.get('chattype')} thread={thread_id} user={str(userid)[:16]} len={len(text)}")
-    stream_id = generate_req_id("stream")
-    try:
-        await client.reply_stream(frame, stream_id, "🤖 正在处理，请稍候…", finish=False)
-    except Exception as e:
-        _log(f"占位消息发送失败：{e}", "warn")
-
-    try:
-        if _TURN_SEM is not None:
-            async with _TURN_SEM:
+        try:
+            if _TURN_SEM is not None:
+                async with _TURN_SEM:
+                    answer = await asyncio.wait_for(
+                        asyncio.to_thread(_run_turn, username, thread_id, text), timeout=cfg["timeout"]
+                    )
+            else:
                 answer = await asyncio.wait_for(
-                    asyncio.to_thread(_run_turn, thread_id, text), timeout=cfg["timeout"]
+                    asyncio.to_thread(_run_turn, username, thread_id, text), timeout=cfg["timeout"]
                 )
-        else:
-            answer = await asyncio.wait_for(
-                asyncio.to_thread(_run_turn, thread_id, text), timeout=cfg["timeout"]
-            )
-    except asyncio.TimeoutError:
-        answer = f"⚠️ 处理超时（超过 {cfg['timeout']} 秒）。任务可能仍在后台继续，稍后可再发消息追问。"
-    except Exception as e:
-        _log(f"处理失败：{e}", "error")
-        answer = f"⚠️ 处理失败：{e}"
+        except asyncio.TimeoutError:
+            answer = f"⚠️ 处理超时（超过 {cfg['timeout']} 秒）。任务可能仍在后台继续，稍后可再发消息追问。"
+        except Exception as e:
+            _log(f"处理失败：{e}", "error")
+            answer = f"⚠️ 处理失败：{e}"
 
-    try:
-        await _finish_reply(client, frame, stream_id, answer)
-        _log(f"已回复 thread={thread_id} len={len(answer)}")
-    except Exception as e:
-        _log(f"回复发送失败：{e}", "error")
+        try:
+            await _finish_reply(client, frame, stream_id, answer)
+            _log(f"[{username}] 已回复 thread={thread_id} len={len(answer)}")
+        except Exception as e:
+            _log(f"回复发送失败：{e}", "error")
+    finally:
+        reset_current_user(_utok)
 
 
-async def _handle_event(frame: dict):
+async def _handle_event(frame: dict, username: str):
     """aibot_event_callback：进入会话 → 欢迎语（需在 5 秒内回复）。"""
-    client = _STATE.get("client")
+    client = _client_for(username)
     if client is None:
         return
     body = frame.get("body") or {}
@@ -470,41 +511,68 @@ async def _handle_event(frame: dict):
         _log(f"未处理事件：{eventtype}", "debug")
 
 
-async def _handle_disconnected_event(frame: dict):
+async def _handle_disconnected_event(frame: dict, username: str):
     """被新连接踢出：企微同一 BotID 只允许一条长连接。
     官方 SDK 收到此事件不会自动重连，这里明确报错，避免消息静默丢失。"""
     _log(
-        "长连接被新连接接管并断开（同一 BotID 只允许一条长连接）："
+        f"[{username}] 长连接被新连接接管并断开（同一 BotID 只允许一条长连接）："
         "请确认没有第二个实例或其他机器人在使用同一个 BotID",
         "error",
     )
 
 
-async def _handle_any_message(frame: dict):
+async def _handle_any_message(frame: dict, username: str):
     """兜底：SDK 未单独分发的高类型（如 video）也给出提示，避免用户消息石沉大海。"""
     body = frame.get("body") or {}
     if (body.get("msgtype") or "").strip().lower() in _SDK_MSGTYPES:
         return  # 已由对应的 message.<type> 处理，避免重复回复
-    await _handle_message(frame)
+    await _handle_message(frame, username)
 
 
-def _register(client):
+def _register(client, username: str):
     for name in ("message.text", "message.mixed", "message.voice",
                  "message.image", "message.file"):
-        client.on(name, _handle_message)
-    client.on("message", _handle_any_message)
-    client.on("event.enter_chat", _handle_event)
-    client.on("event.disconnected_event", _handle_disconnected_event)
-    client.on("authenticated", lambda: _log("长连接认证成功，已开始接收消息"))
-    client.on("disconnected", lambda reason: _log(f"长连接断开：{reason}", "warn"))
-    client.on("reconnecting", lambda attempt: _log(f"长连接重连中（第 {attempt} 次）", "warn"))
-    client.on("error", lambda err: _log(f"长连接错误：{err}", "error"))
+        client.on(name, lambda frame, _n=username: _handle_message(frame, _n))
+    client.on("message", lambda frame, _n=username: _handle_any_message(frame, _n))
+    client.on("event.enter_chat", lambda frame, _n=username: _handle_event(frame, _n))
+    client.on("event.disconnected_event",
+              lambda frame, _n=username: _handle_disconnected_event(frame, _n))
+    client.on("authenticated", lambda: _log(f"[{username}] 长连接认证成功，已开始接收消息"))
+    client.on("disconnected", lambda reason: _log(f"[{username}] 长连接断开：{reason}", "warn"))
+    client.on("reconnecting", lambda attempt: _log(f"[{username}] 长连接重连中（第 {attempt} 次）", "warn"))
+    client.on("error", lambda err: _log(f"[{username}] 长连接错误：{err}", "error"))
 
 
 # ==================== 生命周期 ====================
 
+async def _run_client(username: str, client):
+    """单用户的企微长连接：注册回调节点后阻塞在 connect()（SDK 内部重连循环）。"""
+    try:
+        _register(client, username)
+        await client.connect()  # 阻塞：握手成功后由 authenticated 事件通知
+        _STATE.setdefault("clients", {})[username] = client
+        _STATE["ready"] = True
+        _log(f"[{username}] 长连接已发起（bot_id 已配置，thread 前缀 {config()['prefix']}）")
+    except Exception as e:
+        _STATE.get("clients", {}).pop(username, None)
+        _log(f"[{username}] 企业微信长连接启动失败：{e}", "error")
+
+
+def _wecom_credentials() -> List[Tuple[str, str, str]]:
+    """企微凭证清单：优先每个用户自己的（accounts.db extra）；为空时回退 .env → Mirror。"""
+    creds = _db_wecom_users()
+    if creds:
+        return creds
+    bid = (os.getenv("WECHAT_BOT_ID") or "").strip()
+    sec = (os.getenv("WECHAT_BOT_SECRET") or "").strip()
+    if bid and sec:
+        from app.userctx import DEFAULT_USER
+        return [(DEFAULT_USER, bid, sec)]
+    return []
+
+
 async def start_wecom_bot():
-    """由 FastAPI lifespan 以 asyncio 任务方式调用：建连并开始收消息。
+    """由 FastAPI lifespan 以 asyncio 任务方式调用：为每个配置了凭证的用户建连。
     任何失败只记日志，不影响 HTTP 服务本身。"""
     global _TURN_SEM
 
@@ -516,52 +584,61 @@ async def start_wecom_bot():
     if cfg["disabled"]:
         _log("企业微信接入已在 .env 关闭（WECHAT_BOT_ENABLED=0），跳过启动")
         return
-    if not cfg["bot_id"] or not cfg["secret"]:
-        _log("未配置 WECHAT_BOT_ID / WECHAT_BOT_SECRET，跳过启动（企业微信接入未生效）")
-        return
     if WSClient is None:
         _log("未安装 wecom-aibot-python-sdk，跳过启动：pip install wecom-aibot-python-sdk", "error")
         return
 
+    creds = _wecom_credentials()
+    if not creds:
+        _log("没有用户配置企业微信 BotID/Secret（accounts.db 或 .env），跳过启动")
+        return
+
     _TURN_SEM = asyncio.Semaphore(cfg["concurrency"])
-    try:
-        client = WSClient(WSClientOptions(
-            bot_id=cfg["bot_id"],
-            secret=cfg["secret"],
-            max_reconnect_attempts=-1,  # 无限重连：常驻服务不能被 10 次上限打断
-        ))
-        _register(client)
-        await client.connect()  # 返回即握手完成，认证结果由 authenticated 事件通知
-        _STATE["client"] = client
-        _STATE["ready"] = True
-        _log(f"长连接已发起（bot_id={cfg['bot_id'][:8]}…，thread 前缀 {cfg['prefix']}）")
-    except Exception as e:
-        _STATE["ready"] = False
-        _log(f"启动失败：{e}", "error")
+    started = 0
+    for username, bid, sec in creds:
+        try:
+            client = WSClient(WSClientOptions(
+                bot_id=bid,
+                secret=sec,
+                max_reconnect_attempts=-1,  # 无限重连：常驻服务不能被 10 次上限打断
+            ))
+        except Exception as e:
+            _log(f"[{username}] 创建客户端失败：{e}", "error")
+            continue
+        asyncio.get_running_loop().create_task(_run_client(username, client))
+        started += 1
+    if started:
+        _log(f"企业微信已启动 {started} 个机器人（各自用自己的 BotID/Secret）")
+    else:
+        _STATE["started"] = False
+        _log("企业微信没有可启动的机器人（配置无效？）", "error")
 
 
 def stop_wecom_bot():
-    """由 lifespan 收尾调用：断开长连接。"""
-    client = _STATE.get("client")
-    _STATE["client"] = None
+    """由 lifespan 收尾调用：断开所有用户的长连接。"""
+    clients = _STATE.get("clients") or {}
+    _STATE["clients"] = {}
     _STATE["ready"] = False
     _STATE["started"] = False
-    if client is not None:
+    for username, client in clients.items():
         try:
             client.disconnect()
-            _log("长连接已断开")
+            _log(f"[{username}] 长连接已断开")
         except Exception as e:
-            _log(f"断开失败：{e}", "warn")
+            _log(f"[{username}] 断开失败：{e}", "warn")
 
 
 def status() -> dict:
     """接入状态（供日志/排查使用）。"""
     cfg = config()
-    client = _STATE.get("client")
+    clients = _STATE.get("clients") or {}
+    online = [u for u, c in clients.items() if getattr(c, "is_connected", False)]
     return {
-        "configured": bool(cfg["bot_id"] and cfg["secret"]),
+        "users": sorted(clients.keys()),
+        "online": sorted(online),
+        "configured": _wecom_credentials(),
         "disabled": cfg["disabled"],
         "started": bool(_STATE.get("started")),
-        "connected": bool(getattr(client, "is_connected", False)) if client else False,
+        "connected": len(online),
         "thread_prefix": cfg["prefix"],
     }

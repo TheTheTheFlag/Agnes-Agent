@@ -197,6 +197,15 @@ def list_users() -> List[Dict[str, Any]]:
     return [_row_to_user(r) for r in rows]
 
 
+def list_users_with_secrets() -> List[Dict[str, Any]]:
+    """全用户 + 密钥（含 extra JSON），供运行时按用户取配置（如企微多机器人）。"""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM users ORDER BY (status='pending') DESC, created_at DESC"
+        ).fetchall()
+    return [_row_to_user(r, include_secrets=True) for r in rows]
+
+
 def count_users() -> int:
     try:
         with _connect() as conn:
