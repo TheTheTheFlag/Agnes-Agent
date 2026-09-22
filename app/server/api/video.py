@@ -524,7 +524,7 @@ def task(item_id: str, request: Request = None):
 
     try:
         data = _query_task(_pick_key(keys, item), video_id, item["model"])
-    except RuntimeError as e:
+    except Exception as e:
         return {"ok": True, "item": item, "warning": str(e)}
 
     st = data.get("status") or data.get("internal_status") or item.get("status")

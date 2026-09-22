@@ -183,14 +183,20 @@ def _path_to_data_uri(relpath: str) -> str:
 
 
 def _call_generate(key: str, payload: dict) -> dict:
-    resp = requests.post(_UPSTREAM, headers={
-        "Authorization": f"Bearer {key}",
-        "Content-Type": "application/json",
-    }, json=payload, timeout=_TIMEOUT)
+    try:
+        resp = requests.post(_UPSTREAM, headers={
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+        }, json=payload, timeout=_TIMEOUT)
+    except requests.RequestException as e:
+        raise RuntimeError(f"上游连接失败: {e.__class__.__name__}: {e}")
     if resp.status_code >= 400:
         snippet = resp.text[:300]
         raise RuntimeError(f"上游 HTTP {resp.status_code}: {snippet}")
-    data = resp.json().get("data") or []
+    try:
+        data = (resp.json() or {}).get("data") or []
+    except (ValueError, AttributeError) as e:
+        raise RuntimeError(f"上游响应解析失败: {e}: {resp.text[:200]}")
     if not data:
         raise RuntimeError(f"上游返回空结果: {resp.text[:200]}")
     first = data[0] or {}
@@ -277,7 +283,7 @@ async def status():
 
 
 @router.post("/generate")
-async def generate(payload: dict, request: Request):
+def generate(payload: dict, request: Request):
     p = payload or {}
     mode = str(p.get("mode") or "txt2img")
     model = str(p.get("model") or "agnes-image-2.5-flash")

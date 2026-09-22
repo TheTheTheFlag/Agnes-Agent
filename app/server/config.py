@@ -241,7 +241,7 @@ async def get_models(request: Request = None):
 
 
 @router.post("/api/models/fetch")
-async def fetch_models(payload: dict, request: Request = None):
+def fetch_models(payload: dict, request: Request = None):
     """从 OpenAI 兼容网关拉取可用模型列表（GET {base_url}/models）。
     payload: {base_url, api_key}  api_key 支持逗号分隔多 key（逐个尝试）"""
     if not _is_request_admin(request):
