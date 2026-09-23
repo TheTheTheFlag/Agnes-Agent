@@ -218,7 +218,11 @@ class ReActLoop:
                 same_call_count += 1
                 if same_call_count >= 3:
                     print("⚠️ 连续3次相同工具调用，终止循环并报告信息不足")
-                    final_answer = "无法获取有效信息，请尝试更具体的查询或稍后再试。"
+                    final_answer = (
+                        "任务未能继续完成：连续 3 次发起了完全相同的工具调用，未产生任何推进，"
+                        "循环已安全终止。常见原因：工具参数不完整（如 write_file 只带 path 没带 content）、"
+                        "或模型在长会话下输出劣化。请修正参数后重试，或改用技能脚本（execute_command）生成目标文件。"
+                    )
                     break
                 if same_call_count >= 2:
                     # 第二次发起完全相同的工具调用（参数逐字一致）：多半是模型空转/没消化结果。
@@ -352,6 +356,30 @@ class ReActLoop:
                                 f"{tool_name}|{json.dumps(params, sort_keys=True, ensure_ascii=False)}")
                     except Exception:
                         pass
+                    # write_file/edit_file 连续缺 content 升级引导：模型反复只带 path/空参时，
+                    # 是闪档模型在长会话下的典型输出劣化（content 没进工具参数）。
+                    # 第 2 次起注入决定性方案，避免空转到「连续 3 次相同调用」被一刀切终止。
+                    if tool_name in ("write_file", "edit_file") and "缺少必填参数" in result_str and "content" in result_str:
+                        self._wf_missing_content = getattr(self, "_wf_missing_content", 0) + 1
+                        if self._wf_missing_content >= 2:
+                            messages.append(SystemMessage(
+                                content=(
+                                    "[写文件参数修复] 你已连续多次发起 write_file 但参数里始终缺 content，"
+                                    "这些调用都未执行成功。请按顺序选一种可立即执行的方式继续，"
+                                    "禁止再次发起只有 path 或空参数的 write_file：\n"
+                                    "1) 重新调用 write_file，把 path 和完整 content（JSON string）都放进工具参数；\n"
+                                    "2) 直接调用 execute_command 运行对应技能脚本生成文件"
+                                    "（如角色卡：cd /home/mirror/Agnes-Agent && node app/skills/novel-characters/scripts/novel-characters.mjs <按该技能 SKILL.md 的必填参数>），"
+                                    "脚本会自己写盘，不需要手工拼完整 JSON；\n"
+                                    "3) 把内容拆成 2–3 个小文件分别 write_file（每个 content 控制在 2KB 内），"
+                                    "再用 execute_command 的 node 单行脚本把碎片合并成目标文件；\n"
+                                    "4) 若确实无法继续，调用 fail_subtask / complete_node 声明，并写明阻塞原因。"
+                                )
+                            ))
+                            print("⚠️ write_file 连续缺 content，注入写文件参数修复引导", flush=True)
+                    else:
+                        # 非缺参错误/正常完成 → 重置计数（成功一次即视为模型学会）
+                        self._wf_missing_content = 0
 
             # 纪律强制终止：连续被拒 ≥3 次 → 退出整个 ReAct 循环（保留纪律消息，不再覆盖）
             if getattr(self, "_reject_count", 0) >= 3:
@@ -638,8 +666,9 @@ class ReActLoop:
             if missing:
                 return (
                     f"工具参数错误: {tool_name} 缺少必填参数 {', '.join(missing)}。"
-                    f"请重新发起该调用并补全参数——{tool_name} 需要 path（目标文件路径）"
-                    f"和 content（目标文件的完整内容，原样全部写出，不要用省略号或截图代替）。"
+                    f"{tool_name} 需要 path（目标文件路径）和 content（文件完整内容，作为 JSON string 放进工具参数，"
+                    f"不能写在消息正文里）。若内容太大一次写不全，请改用 execute_command 运行对应技能脚本生成文件，"
+                    f"或在收尾前分块写入。"
                 )
         for tool in tools:
             if tool.name == tool_name:
