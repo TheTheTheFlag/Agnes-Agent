@@ -245,7 +245,7 @@ class ReActLoop:
 
             for tc in tool_calls:
                 tool_name = tc.get("name")
-                params = tc.get("args", {})
+                params = self._normalize_tool_args(tc.get("args", {}) or {})
                 tool_id = tc.get("id", "unknown")
 
                 # 1) 安全策略拦截：on_tool_before 返回 (allow, reason)
@@ -463,17 +463,74 @@ class ReActLoop:
         return []
 
     def _parse_xml_tool_calls(self, content):
+        """把文本里 XML 形态的工具调用解析成结构化 tool_calls。
+
+        模型/gateway 未走结构化 tool_calls 时，常以两类文本格式回工具调用：
+          <invoke name="write_file"><parameter name="path">…</parameter><parameter name="content">…</parameter></invoke>
+          <tool_call><function=write_file><parameter=path>…</parameter><parameter=content>…</parameter></tool_call>
+        重要：一次调用里所有 <parameter> 块必须全部抓取（旧实现只抓第一个，
+        导致 write_file 的 content 丢失 → pydantic “Field required” 校验错误）。
+        """
         tool_calls = []
-        pattern = r'<invoke\s+name=["\']?([^"\'<>]+)["\']?\s*>(.*?)</invoke>'
-        for name, params_xml in re.findall(pattern, content, re.DOTALL | re.IGNORECASE):
-            param_pattern = r'<parameter\s+name=["\']?([^"\'<>]+)["\']?\s*>(.*?)</parameter>'
-            params = {pname.strip(): pvalue.strip() for pname, pvalue in re.findall(param_pattern, params_xml, re.DOTALL | re.IGNORECASE)}
-            tool_calls.append({"name": name.strip(), "args": params, "id": f"manual_{int(time.time())}_{len(tool_calls)}"})
+
+        def _mk(name, body):
+            return {
+                "name": str(name).strip(),
+                "args": self._parse_xml_parameters(body),
+                "id": f"manual_{int(time.time())}_{len(tool_calls)}",
+            }
+
+        # 1) <invoke name="工具">…<parameter name="k">v</parameter>…</invoke>
+        for name, body in re.findall(
+            r'<invoke\s+name\s*=\s*["\']?([^"\'<>]+)["\']?\s*>(.*?)</invoke>',
+            content, re.DOTALL | re.IGNORECASE,
+        ):
+            tool_calls.append(_mk(name, body))
+        # 2) <tool_call>…<function=工具>…<parameter=path>…<parameter=content>…</tool_call>
+        #    函数名在 body 内；所有参数块都要抓（旧实现只取第一个 → content 丢失）。
         if not tool_calls:
-            short = r'<tool_call>.*?<function=([^>]+)>.*?<parameter=([^>]+)>(.*?)</parameter>.*?</tool_call>'
-            for name, pname, pvalue in re.findall(short, content, re.DOTALL | re.IGNORECASE):
-                tool_calls.append({"name": name.strip(), "args": {pname.strip(): pvalue.strip()}, "id": f"manual_{int(time.time())}_{len(tool_calls)}"})
+            for body in re.findall(r'<tool_call\b[^>]*>(.*?)</tool_call>', content, re.DOTALL | re.IGNORECASE):
+                fn = re.search(r'function\s*=\s*["\']?([^"\'<>\s]+)["\']?', body)
+                if fn:
+                    tool_calls.append(_mk(fn.group(1), body))
         return tool_calls
+
+    @staticmethod
+    def _parse_xml_parameters(body):
+        """抓取一段文本里所有 <parameter …>value</parameter> 块（name= / name=".." 两种写法）。"""
+        params = {}
+        for pname, pvalue in re.findall(
+            r'<parameter(?:\s+name)?\s*=\s*["\']?([^"\'<>]+)["\']?\s*>\s*(.*?)\s*</parameter>',
+            body, re.DOTALL | re.IGNORECASE,
+        ):
+            params[pname.strip()] = pvalue
+        return params
+
+    @staticmethod
+    def _normalize_tool_args(params):
+        """把各 gateway 形态的工具参数归一成 dict：
+        dict 原样返回；{"arguments"/"args"/"input": "…"} 包裹结构解包；
+        JSON 字符串解包；其余兜底为 {}。"""
+        if isinstance(params, dict):
+            if params.keys() & {"arguments", "args", "input"} and len(params) <= 2:
+                for k in ("arguments", "args", "input"):
+                    v = params.get(k)
+                    if isinstance(v, str):
+                        try:
+                            parsed = json.loads(v)
+                            if isinstance(parsed, dict):
+                                return parsed
+                        except Exception:
+                            pass
+            return params
+        if isinstance(params, str):
+            try:
+                parsed = json.loads(params.strip())
+                if isinstance(parsed, dict):
+                    return parsed
+            except Exception:
+                pass
+        return {}
 
     def _response_has_text(self, response):
         """判断响应是否含正文（content 可能为 str / list(多模态) / None）。"""
@@ -573,6 +630,17 @@ class ReActLoop:
         return content
 
     def _execute_tool(self, tool_name, params, tools, state, tool_id=None):
+        # 参数完整性前置检查：模型/gateway 偶尔只带 path 漏 content（或完全空参数），
+        # 提前给出可操作的报错，让模型下一轮针对性补全，而不是等到 pydantic 校验才失败。
+        if tool_name in ("write_file", "edit_file"):
+            params = self._normalize_tool_args(params or {})
+            missing = [k for k in ("path", "content") if not str((params or {}).get(k) or "").strip()]
+            if missing:
+                return (
+                    f"工具参数错误: {tool_name} 缺少必填参数 {', '.join(missing)}。"
+                    f"请重新发起该调用并补全参数——{tool_name} 需要 path（目标文件路径）"
+                    f"和 content（目标文件的完整内容，原样全部写出，不要用省略号或截图代替）。"
+                )
         for tool in tools:
             if tool.name == tool_name:
                 try:
@@ -588,7 +656,13 @@ class ReActLoop:
                         })
                     return tool.invoke(params)
                 except Exception as e:
-                    return f"工具执行错误: {str(e)}"
+                    msg = str(e)
+                    if "validation error" in msg.lower() or "field required" in msg.lower():
+                        return (
+                            f"工具参数错误: {tool_name} 的参数校验未通过（{msg[:200]}）。"
+                            f"请重新发起该调用并补全全部必填参数。"
+                        )
+                    return f"工具执行错误: {msg}"
         return f"未知工具: {tool_name}"
 
     def _force_answer(self, messages):
