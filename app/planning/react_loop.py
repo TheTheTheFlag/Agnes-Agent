@@ -55,6 +55,16 @@ def _llm_messages_to_text(messages):
 # - chatbot 节点不依赖这个计数器（有 apply_reply_guard 兜底）。
 _NO_PROGRESS_LIMIT = 3
 
+# ---- 长会话上下文窗口管理 ----
+# agnes-flash 在超大上下文（实测约 14.6 万字符 → 对应几十万 token）下输出劣化：
+# 表现为发空参/缺参工具调用（write_file params={}、execute_command params={}）。
+# 对策（源头治理）：
+#   1) 每条工具结果写回上下文前截断（_bounded_tool_result），防止单轮就把窗口刷爆；
+#   2) 每轮调模型前压缩中间历史（_compact_window），只保留系统区 + 最近几轮。
+_MAX_WINDOW_CHARS = 60_000          # 累计字符数超过则压缩中间历史
+_KEEP_TAIL_MSGS = 18                # 保留最近 N 条消息（当前轮 + 最近执行轮）
+_MAX_TOOL_RESULT_CHARS = 6_000      # 单条工具结果保留上限（防上下文被结果刷爆）
+
 
 class ReActLoop:
     def __init__(self, llm_with_tools, max_iterations: int = 15, node: str = "agent",
@@ -111,6 +121,8 @@ class ReActLoop:
             current_messages = messages
             if on_before_llm:
                 current_messages = on_before_llm(messages)
+            # 长会话上下文压缩：只影响本次模型调用的窗口，不动外部 messages
+            current_messages = self._compact_window(current_messages)
 
             try:
                 response = self._invoke_llm(current_messages)
@@ -348,14 +360,16 @@ class ReActLoop:
                     if not response_appended:
                         messages.append(response)
                         response_appended = True
-                    messages.append(ToolMessage(content=result_str, tool_call_id=tool_id))
-                    # 记录成功完成的命令 → 供"防重复执行"拦截使用（成功标志：returncode 0 / 生成 URL）
+                    # 成功标志检测用原始完整结果（截断可能切掉 returncode/URL 字段）
                     try:
                         if '"returncode": 0' in result_str or 'URL=' in result_str:
                             self._done_cmds.add(
                                 f"{tool_name}|{json.dumps(params, sort_keys=True, ensure_ascii=False)}")
                     except Exception:
                         pass
+                    # 写回上下文的工具结果做上限截断（防上下文被单条结果刷爆）
+                    messages.append(ToolMessage(
+                        content=self._bounded_tool_result(result_str), tool_call_id=tool_id))
                     # write_file/edit_file 连续缺 content 升级引导：模型反复只带 path/空参时，
                     # 是闪档模型在长会话下的典型输出劣化（content 没进工具参数）。
                     # 第 2 次起注入决定性方案，避免空转到「连续 3 次相同调用」被一刀切终止。
@@ -656,6 +670,69 @@ class ReActLoop:
                 pass
             return "[模型未返回内容] 请检查模型配置或 API 额度（网关可能已耗尽配额或返回空响应）。"
         return content
+
+    def _bounded_tool_result(self, s: str) -> str:
+        """截断过长的工具结果（保头保尾），防止单轮工具输出刷爆上下文。"""
+        if len(s) <= _MAX_TOOL_RESULT_CHARS:
+            return s
+        cut_head = _MAX_TOOL_RESULT_CHARS - 1200
+        return (
+            s[:cut_head]
+            + f"\n…[结果过长，原 {len(s)} 字符，已截断为 {_MAX_TOOL_RESULT_CHARS} 字符；"
+              f"如需要完整内容，请用技能脚本把结果写盘后再读取文件]…\n"
+            + s[-1200:]
+        )
+
+    def _compact_window(self, messages):
+        """长会话上下文压缩：累计超过 _MAX_WINDOW_CHARS 时，丢弃中间旧消息，
+        只保留【开头系统区】+【最近 _KEEP_TAIL_MSGS 条】，并插入一条压缩说明。
+
+        只作用于本次模型调用的输入窗口（调用处 current_messages），外部 messages
+        保持原样（trace / 日志 / 最终答复提取不受影响）。
+        根因：agnes-flash 在约 14 万字符上下文下输出劣化（空参工具调用），
+        压缩窗口让模型始终工作在可控上下文内。
+
+        配对安全：本循环中每条带 tool_calls 的 assistant 消息后紧跟其全部
+        ToolMessage（连续 append）。因此裁剪边界如恰好落在 ToolMessage 上，
+        会被保留的工具结果就会失去所属的 tool_calls（OpenAI 兼容 API 会 400）。
+        对策：边界前移若干位，保证保留段起点不是 tool 消息（即为普通 text /
+        system / assistant-tool_calls 的起点，其后缀工具结果都随之保留）。
+        """
+        if not messages:
+            return messages
+        try:
+            total = sum(len(str(getattr(m, "content", "") or "")) for m in messages)
+        except Exception:
+            return messages
+        if total <= _MAX_WINDOW_CHARS or len(messages) <= _KEEP_TAIL_MSGS + 2:
+            return messages
+        # 头部系统区：开头的连续 SystemMessage（系统提示 + 记忆注入）
+        head = []
+        i = 0
+        while i < len(messages) and getattr(messages[i], "type", "") == "system":
+            head.append(messages[i])
+            i += 1
+        # 最近保留段：从尾部取 _KEEP_TAIL_MSGS 条，边界对齐（起点不能是 tool 消息）
+        tail_start = len(messages) - _KEEP_TAIL_MSGS
+        if tail_start < 0:
+            tail_start = 0
+        while tail_start > 0 and getattr(messages[tail_start], "type", "") == "tool":
+            tail_start -= 1
+        # 若起点仍是一条带 tool_calls 的 assistant 消息，其工具结果在其后已保留；安全
+        tail = list(messages[tail_start:])
+        dropped = tail_start - len(head)
+        if dropped <= 2:
+            return messages
+        kept = head + tail
+        dropped_chars = max(0, total - sum(len(str(getattr(m, "content", "") or "")) for m in kept))
+        summary = SystemMessage(
+            content=(
+                f"[上下文压缩] 为避免长会话上下文膨胀导致模型输出劣化，已移除中间"
+                f" {dropped} 条较早的消息（约 {dropped_chars} 字符，多为早期对话与工具执行结果）。"
+                f"任务目标与最近几轮内容保持不变，请基于现有信息继续，不要假设被移除内容仍可引用。"
+            )
+        )
+        return head + [summary] + tail
 
     def _execute_tool(self, tool_name, params, tools, state, tool_id=None):
         # 参数完整性前置检查：模型/gateway 偶尔只带 path 漏 content（或完全空参数），

@@ -145,6 +145,91 @@ def _make_thumb(src: str, dst: str) -> bool:
         return False
 
 
+# ---------------- agnes-media 技能产物同步 ----------------
+# agnes-media 技能（图片/视频创作台）生成的文件默认落在
+#   app/skills_builtin/agnes-media/output/YYYYMMDD/（内置版）
+#   app/skills/agnes-media/output/YYYYMMDD/（用户版）
+# 本函数把其中的图片复制进当前用户作品库并登记 manifest，使技能产物
+# 自动出现在创作台「作品库」里。幂等：按 (basename, size) 去重。
+_SKILL_OUTPUT_DIRS = (
+    os.path.join(BASE_DIR, "app", "skills_builtin", "agnes-media", "output"),
+    os.path.join(BASE_DIR, "app", "skills", "agnes-media", "output"),
+)
+_IMG_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
+
+
+def _sync_skill_outputs(username: str) -> int:
+    """把 agnes-media 技能产出的图片同步进当前用户作品库，返回新增数量。"""
+    import shutil
+    added = 0
+    old_user = current_user()
+    try:
+        set_current_user(username)
+        items = _get_user_items(username)
+
+        def _src_key(it):
+            return (it.get("src_name") or os.path.basename(it.get("file") or ""),
+                    it.get("size_bytes") or 0,
+                    it.get("src_mtime") or 0)
+
+        known = {_src_key(it) for it in items}
+        for root in _SKILL_OUTPUT_DIRS:
+            if not os.path.isdir(root):
+                continue
+            for dirpath, _, filenames in os.walk(root):
+                for fn in sorted(filenames):
+                    if not fn.lower().endswith(_IMG_EXTS):
+                        continue
+                    src = os.path.join(dirpath, fn)
+                    try:
+                        sz = os.path.getsize(src)
+                        src_mtime = int(os.path.getmtime(src))
+                    except Exception:
+                        continue
+                    if (fn, sz, src_mtime) in known:
+                        continue
+                    item_id = uuid.uuid4().hex[:12]
+                    ext = os.path.splitext(fn)[1].lower() or ".png"
+                    dst = os.path.join(str(_LIB), f"{item_id}{ext}")
+                    try:
+                        shutil.copy2(src, dst)
+                    except Exception:
+                        continue
+                    thumb_fp = os.path.join(str(_LIB), f"{item_id}_t.jpg")
+                    if not _make_thumb(dst, thumb_fp):
+                        thumb_fp = None
+                    item = {
+                        "id": item_id,
+                        "mode": "txt2img",
+                        "model": "agnes-media",
+                        "prompt": "",
+                        "size": "",
+                        "ratio": "",
+                        "n_refs": 0,
+                        "file": os.path.basename(dst),
+                        "thumb": os.path.basename(thumb_fp) if thumb_fp else "",
+                        "size_bytes": sz,
+                        "src_name": fn,
+                        "src_mtime": src_mtime,
+                        "created_at": time.strftime("%Y-%m-%d %H:%M:%S",
+                                                    time.localtime(os.path.getmtime(src))),
+                        "user": username,
+                        "source": "agnes-media",
+                    }
+                    with _user_items_lock(username):
+                        _get_user_items(username).insert(0, item)
+                    _save_user_manifest(username)
+                    added += 1
+    except Exception:
+        pass
+    finally:
+        try:
+            set_current_user(old_user)
+        except Exception:
+            pass
+    return added
+
+
 _EXT_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
 
 
@@ -366,6 +451,11 @@ def generate(payload: dict, request: Request):
 async def history(limit: int = 60, offset: int = 0, request: Request = None):
     """返回当前用户的作品列表"""
     username = getattr(getattr(request, "state", None), "username", None) or current_user()
+    # 打开作品库前先把 agnes-media 技能产物同步进来（幂等；输出目录通常为空，开销可忽略）
+    try:
+        _sync_skill_outputs(username)
+    except Exception:
+        pass
     limit = max(1, limit) if _MAX_GALLERY is None else max(1, min(limit, _MAX_GALLERY))
     offset = max(0, offset)
     with _user_items_lock(username):

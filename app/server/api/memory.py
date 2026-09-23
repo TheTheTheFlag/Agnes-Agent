@@ -142,9 +142,10 @@ async def get_memory_api(thread_id: str = Query("default")):
 
 
 @router.get("/api/threads")
-async def get_threads():
+async def get_threads(page: int = 1, page_size: int = 8):
     """列出所有有过活动的 thread（来自 messages），
     并把当前会话（main.py 注入的 thread_id）置顶、标记 current=true。
+    其余会话按最后活动时间倒序（最近对话在最上面），支持分页（默认一页 8 个）。
     每项携带 last_user_msg（该会话最后一条用户消息，供列表标题展示）。"""
     try:
         from app.server.store import _ensure_persist
@@ -183,15 +184,32 @@ async def get_threads():
         current_tid = _ct(_u)
     except Exception:
         current_tid = (_srv_cfg._CONFIG or {}).get("configurable", {}).get("thread_id") or "default"
+    # 排序：置顶当前会话；其余按最后活动时间倒序（最近在最上面），无活动的沉底
+    cur_entry = None
     if current_tid:
         cur_entry = next((t for t in out if t["thread_id"] == current_tid), None)
         if cur_entry:
             cur_entry["current"] = True
             out.remove(cur_entry)
-            out.insert(0, cur_entry)
         else:
-            out.insert(0, {"thread_id": current_tid, "source": "current", "count": 0, "last": None, "current": True, "last_user_msg": ""})
-    return {"threads": out, "current_thread_id": current_tid}
+            cur_entry = {"thread_id": current_tid, "source": "current", "count": 0, "last": None, "current": True, "last_user_msg": ""}
+    rest = sorted(
+        (t for t in out if not t.get("current")),
+        key=lambda t: (t.get("last") or ""),
+        reverse=True,
+    )
+    ordered = ([cur_entry] if cur_entry else []) + rest
+    total = len(ordered)
+    page = max(1, int(page or 1))
+    page_size = max(1, min(int(page_size or 8), 500))
+    start = (page - 1) * page_size
+    return {
+        "threads": ordered[start:start + page_size],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "current_thread_id": current_tid,
+    }
 
 
 @router.post("/api/threads/delete")

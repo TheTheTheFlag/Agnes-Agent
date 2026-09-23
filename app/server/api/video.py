@@ -27,7 +27,7 @@ import requests
 from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, JSONResponse
 
-from app.config import user_subdir
+from app.config import BASE_DIR, user_subdir
 from app.server.api.image import _agnes_keys, _mask_key
 from app.userctx import current_user, set_current_user
 
@@ -180,6 +180,99 @@ def _make_thumb(src: str, dst: str) -> bool:
         except Exception:
             continue
     return False
+
+
+# ---------------- agnes-media 技能产物同步 ----------------
+_SKILL_OUTPUT_DIRS = (
+    os.path.join(BASE_DIR, "app", "skills_builtin", "agnes-media", "output"),
+    os.path.join(BASE_DIR, "app", "skills", "agnes-media", "output"),
+)
+_VIDEO_EXTS = (".mp4", ".webm", ".mov", ".mkv")
+
+
+def _sync_skill_outputs(username: str) -> int:
+    """把 agnes-media 技能产出的视频同步进当前用户作品库（幂等），返回新增数量。"""
+    added = 0
+    old_user = current_user()
+    try:
+        set_current_user(username)
+        items = _get_user_items(username)
+
+        def _src_key(it):
+            return (it.get("src_name") or os.path.basename(it.get("file") or ""),
+                    it.get("size_bytes") or 0,
+                    it.get("src_mtime") or 0)
+
+        known = {_src_key(it) for it in items}
+        for root in _SKILL_OUTPUT_DIRS:
+            if not os.path.isdir(root):
+                continue
+            for dirpath, _, filenames in os.walk(root):
+                for fn in sorted(filenames):
+                    if not fn.lower().endswith(_VIDEO_EXTS):
+                        continue
+                    src = os.path.join(dirpath, fn)
+                    try:
+                        sz = os.path.getsize(src)
+                        src_mtime = int(os.path.getmtime(src))
+                    except Exception:
+                        continue
+                    if (fn, sz, src_mtime) in known:
+                        continue
+                    item_id = uuid.uuid4().hex[:12]
+                    ext = os.path.splitext(fn)[1].lower() or ".mp4"
+                    dst = os.path.join(str(_LIB), f"{item_id}{ext}")
+                    try:
+                        shutil.copy2(src, dst)
+                    except Exception:
+                        continue
+                    thumb_fp = os.path.join(str(_LIB), f"{item_id}_t.jpg")
+                    if not _make_thumb(dst, thumb_fp):
+                        thumb_fp = None
+                    mtime = "%.4f" % (os.path.getmtime(src) or 0)
+                    item = {
+                        "id": item_id,
+                        "model": "agnes-media",
+                        "mode": "video",
+                        "prompt": "",
+                        "status": "completed",
+                        "progress": 100,
+                        "video_id": "agnes-media:" + os.path.splitext(fn)[0],
+                        "task_id": "",
+                        "key_idx": -1,
+                        "seconds": "",
+                        "size": str(sz),
+                        "ratio": "",
+                        "num_frames": None,
+                        "frame_rate": None,
+                        "seed": None,
+                        "remote_url": "",
+                        "file": os.path.basename(dst),
+                        "thumb": os.path.basename(thumb_fp) if thumb_fp else "",
+                        "size_bytes": sz,
+                        "src_name": fn,
+                        "src_mtime": src_mtime,
+                        "duration": _probe_duration(dst),
+                        "error": "",
+                        "created_at": time.strftime("%Y-%m-%d %H:%M:%S",
+                                                    time.localtime(os.path.getmtime(src))),
+                        "completed_at": time.strftime("%Y-%m-%d %H:%M:%S",
+                                                      time.localtime(os.path.getmtime(src))),
+                        "user": username,
+                        "source": "agnes-media",
+                    }
+                    with _user_items_lock(username):
+                        _get_user_items(username).insert(0, item)
+                    _save_user_manifest(username)
+                    added += 1
+    except Exception:
+        pass
+    finally:
+        try:
+            set_current_user(old_user)
+        except Exception:
+            pass
+    return added
 
 
 def _probe_duration(src: str):
@@ -566,6 +659,11 @@ def task(item_id: str, request: Request = None):
 @router.get("/history")
 def history(limit: int = 60, offset: int = 0, request: Request = None):
     username = getattr(getattr(request, "state", None), "username", None) or current_user()
+    # 打开作品库前先把 agnes-media 技能产出的视频同步进来（幂等）
+    try:
+        _sync_skill_outputs(username)
+    except Exception:
+        pass
     limit = max(1, min(limit, _MAX_GALLERY))
     offset = max(0, offset)
     with _user_items_lock(username):

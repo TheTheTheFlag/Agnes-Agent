@@ -1930,19 +1930,52 @@ function prettyArgs(args) {
 
 /* ==================== 会话管理（边栏） ==================== */
 const threadListEl = $("#threadList");
+const threadPagerEl = $("#threadPager");
+const pgInfoEl = $("#pgInfo");
 
-async function loadThreads() {
+// 会话分页状态：一页 8 个，其余翻页查看；搜索时临时拉全量
+const THREAD_PAGE_SIZE = 8;
+const THREAD_SEARCH_SIZE = 500;
+State.threadPage = 1;
+State.threadTotal = 0;
+
+async function loadThreads(page) {
   try {
-    const data = await apiGet("/api/threads");
+    if (page && page >= 1) State.threadPage = page;
+    const kw = ThreadSearchState();
+    const size = kw ? THREAD_SEARCH_SIZE : THREAD_PAGE_SIZE;
+    const data = await apiGet(`/api/threads?page=${State.threadPage}&page_size=${size}`);
     const threads = data.threads || [];
+    State.threadTotal = data.total || 0;
+    State.threadMaxPage = Math.max(1, Math.ceil(State.threadTotal / THREAD_PAGE_SIZE));
+    if (!kw && State.threadPage > State.threadMaxPage) {
+      // 当前页已越界（批量删除后常见）→ 退回最后一页重取
+      State.threadPage = State.threadMaxPage;
+      return loadThreads(State.threadPage);
+    }
     if (data.current_thread_id && !State.threadId) {
       State.threadId = data.current_thread_id;
     }
     renderThreads(threads);
+    renderThreadPager();
     return data;
   } catch (e) {
     return { threads: [] };
   }
+}
+
+function ThreadSearchState() { return $("#threadSearch").value.trim().toLowerCase(); }
+
+/* 渲染会话翻页条：仅非搜索状态下显示 */
+function renderThreadPager() {
+  if (!threadPagerEl) return;
+  const kw = ThreadSearchState();
+  if (kw) { threadPagerEl.style.display = "none"; return; }
+  threadPagerEl.style.display = "flex";
+  if (pgInfoEl) pgInfoEl.textContent = `第 ${State.threadPage}/${State.threadMaxPage} 页 · ${State.threadTotal} 个会话`;
+  const prev = $("#pgPrev"), next = $("#pgNext");
+  if (prev) prev.disabled = State.threadPage <= 1;
+  if (next) next.disabled = State.threadPage >= State.threadMaxPage;
 }
 
 function renderThreads(threads) {
@@ -3350,6 +3383,8 @@ function bindEvents() {
   $("#btnCollapseSidebar").addEventListener("click", closeSidebar);
   $("#btnSidebar").addEventListener("click", openSidebar);
   $("#sidebarMask").addEventListener("click", closeSidebar);
+  $("#pgPrev").addEventListener("click", () => { if (State.threadPage > 1) loadThreads(State.threadPage - 1); });
+  $("#pgNext").addEventListener("click", () => { if (State.threadPage < State.threadMaxPage) loadThreads(State.threadPage + 1); });
   // 移动端：键盘弹出/收起及窗口尺寸变化时同步根高度
   window.addEventListener("resize", syncViewportHeight);
   if (window.visualViewport) window.visualViewport.addEventListener("resize", syncViewportHeight);
