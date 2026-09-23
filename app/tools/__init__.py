@@ -54,7 +54,9 @@ tools = [
     run_scheduled_task_now,
 ]
 
-# 仅管理员可见的工具：命令执行（高风险）。
+# 命令执行：默认仅管理员可用；普通用户只在「短剧创作」工作台作用域内临时获得
+#（按 用户×线程 签发、带保鲜期），见 app/workbench.py。作用域内仍走人工审批 +
+# path_guard（命令仅限当前用户自己的工作区与系统内置技能目录 app/skills/）。
 # 联网搜索（tavily_search）对所有用户开放，key 按当前用户从 accounts.db 读取
 #（见 tavily_search.py：每用户自己的 users.extra.tavily_api_key）。
 _ADMIN_ONLY_TOOLS = ("execute_command",)
@@ -75,17 +77,22 @@ def _role_is_admin(username: Optional[str]) -> bool:
             return True
 
 
-def get_tools_for_user(username: Optional[str] = None) -> List:
-    """某个用户可见的工具集：非管理员不提供 execute_command（风险命令）。
+def get_tools_for_user(username: Optional[str] = None, thread_id: Optional[str] = None) -> List:
+    """某个用户可见的工具集（每轮会话现算）。
 
-    联网搜索 tavily_search 面向所有用户开放，key 按用户各自读取；
-    其余只读/记忆/文件工具全员可见。调用方需保证 username 语义正确
-    （通常传 current_user()）；缺省时用当前上下文用户。
+    - 管理员：全量工具（含 execute_command）；
+    - 普通用户：默认不含 execute_command；仅当该用户 × 当前线程处于「短剧创作」
+      工作台作用域内（app.workbench.is_drama_command_enabled，含保鲜期校验）才追加；
+    - 其余只读/记忆/文件工具全员可见；联网搜索 tavily_search 面向所有用户开放，
+      key 按用户各自读取。
     """
     from app.userctx import current_user
     u = username or current_user()
     try:
         if _role_is_admin(u):
+            return tools
+        from app.workbench import is_drama_command_enabled
+        if is_drama_command_enabled(u, thread_id):
             return tools
     except Exception:
         pass

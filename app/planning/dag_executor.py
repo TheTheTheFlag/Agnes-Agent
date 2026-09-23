@@ -86,7 +86,7 @@ _missing_expected = core.missing_expected
 
 def _run_node(thread_id: str, task_plan_id: int, node: Dict, goal: str,
               parent_artifacts: List[str], missing_soft: List[str],
-              llm_builder, tools_list, mm, dag: DAGStorage, on_event):
+              llm_builder, tools_list, dag: DAGStorage, on_event):
     """执行单个节点（线程池 worker）。返回 (node_id, status, result, artifacts)。"""
     node_id = node["id"]
     description = node["description"]
@@ -404,7 +404,7 @@ def create_executor(llm_builder, tools_list):
                                     dict(node_map[nid]), goal,
                                     _parent_artifacts(node_map, edges, nid),
                                     _missing_soft(node_map, edges, nid),
-                                    llm_builder, tools_list, mm, dag,
+                                    llm_builder, tools_list, dag,
                                     _emit_dag_event(dag, plan["id"]))] = nid
             for fut in as_completed(futures):
                 nid = futures[fut]

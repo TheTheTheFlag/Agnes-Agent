@@ -4,6 +4,8 @@ file_ops.py — Python 包装的文件/目录能力工具集。
 替代直接执行 shell 命令（system_command 在跨平台适配差）。
 目录边界（多用户）：
   - 普通用户：限制在自己的用户工作区 data/users/<用户名>/ 内，越界读写一律拒绝；
+    只读例外：系统内置技能目录 app/skills/ 可读（短剧创作等系统级工作台要读技能
+    的 SKILL.md references/ 与脚本），写仍限工作区；
   - 管理员：不限制目录，可操作整台电脑（相对路径以项目根解析，绝对路径任意）。
 核心文件保护（path_guard）对所有人保留：app/server/static、.env、.model_config、.git、
 memory.db、checkpoints.db、pyproject.toml、uv.lock 等不可经文件工具改写；
@@ -67,6 +69,29 @@ def _resolve_path(path: str) -> str:
     return p
 
 
+def _resolve_read_path(path: str) -> str:
+    """读取路径解析：普通用户以工作区为基准，但**系统内置技能目录
+    （app/skills/）只读放行**——短剧创作等系统级工作台要读技能 SKILL.md 的
+    references/ 与脚本；写操作仍由写路径（_resolve_path）严格限定在工作区。
+    """
+    root = _root()
+    if _is_admin_user():
+        return os.path.abspath(os.path.join(root, path or ""))
+    p = os.path.abspath(os.path.join(root, path or ""))
+    # 优先用户工作区：存在于工作区内的路径照旧
+    if (p == root or p.startswith(root + os.sep)) and os.path.exists(p):
+        return p
+    # 工作区内没有 → 改按项目根解析，仅允许系统内置技能目录（app/skills/）
+    skills_abs = os.path.abspath(os.path.join(BASE_DIR, "app", "skills"))
+    p2 = os.path.abspath(os.path.join(BASE_DIR, path or ""))
+    if p2 == skills_abs or p2.startswith(skills_abs + os.sep):
+        return p2
+    # 仍在工作区内：交给调用方报"不存在"
+    if p == root or p.startswith(root + os.sep):
+        return p
+    raise ValueError(f"路径越界（仅允许用户工作区与系统内置技能目录）: {path}")
+
+
 def _assert_writable(path: str):
     """写/删前检查：命中保护路径则拒绝（读不受限）。先解析成绝对路径，保证非管理员
     相对路径（基于自己的工作区）与绝对路径的保护判定一致。"""
@@ -83,7 +108,7 @@ def ls(directory: str = ".", recursive: bool = False) -> str:
       directory: 相对基准的目录，如 '.' 或 'app/graph'（普通用户越界会被拒绝）
       recursive: 是否递归列出
     返回: JSON 数组 [{name, path, size, type}]"""
-    d = _resolve_path(directory)
+    d = _resolve_read_path(directory)
     if not os.path.isdir(d):
         return json.dumps({"error": f"目录不存在: {directory}"}, ensure_ascii=False)
     out = []
@@ -111,7 +136,7 @@ def read_file(path: str, offset: int = 0, limit: int = 2000) -> str:
       limit: 最多返回行数
     返回: 文件内容（含行号）。单次最多返回约 16000 字符，超出自动截断并提示用 offset 续读；
     图片请使用 Image-Understanding 技能识别，不要用 read_file 读取。"""
-    p = _resolve_path(path)
+    p = _resolve_read_path(path)
     if not os.path.isfile(p):
         return json.dumps({"error": f"文件不存在: {path}"}, ensure_ascii=False)
     try:
@@ -247,7 +272,7 @@ def grep_files(pattern: str, path: str = ".", max_results: int = 50) -> str:
       max_results: 最大结果数
     返回: [{file, line_no, text}]"""
     import re
-    d = _resolve_path(path)
+    d = _resolve_read_path(path)
     if not os.path.isdir(d):
         return json.dumps({"error": f"目录不存在: {path}"}, ensure_ascii=False)
     results = []

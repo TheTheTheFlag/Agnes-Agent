@@ -1430,6 +1430,16 @@ function renderHistoryRawEvent(m, meta) {
 }
 
 /* ==================== 对话流（SSE /api/chat） ==================== */
+function _finalizeTurnOnEvent() {
+  // 收到 done / error 事件即一轮终态：立刻复位发送锁与 UI，
+  // 不等整个 SSE 连接关闭（服务端可能在回合结束后仍用心跳保活连接）。
+  if (State.streaming) State.streaming = false;
+  if (State.chatAbort) { try { State.chatAbort.abort(); } catch (e) {} State.chatAbort = null; }
+  setLiveBadge(false);
+  updateComposer();
+  refreshTopbar();
+}
+
 function handleChatEvent(evt) {
   const step = evt.step;
   if (step === "node") {
@@ -1537,12 +1547,17 @@ function handleChatEvent(evt) {
     setLiveBadge(false);
     setLiveStatusIdle();
     State.currentAssistantEl = null;  // 真正的流结束：清空，下次新消息时建新气泡
+    _finalizeTurnOnEvent();           // 按 done 事件立即收口一轮（不等 SSE 连接断开）
+    // 工作台内嵌场景：回调标记模块进度 / 识别“智能体提问等待” / 展示完成横幅
+    if (typeof window.drmOnTurnDone === "function") window.drmOnTurnDone();
   } else if (step === "error") {
     endStreaming();
     setLiveBadge(false);
     setLiveStatusIdle();
     addErrorBubble(evt.message || "未知错误");
     State.currentAssistantEl = null;
+    _finalizeTurnOnEvent();           // error 事件即一轮终态：同样按事件收口，避免锁住发送器
+    if (typeof window.drmOnTurnError === "function") window.drmOnTurnError(evt.message);
   } else if (step === "dag_push") {
     // 规划开始时：用后端传来的节点结构初始化待办列表（替代原 DAG 图）
     if (Array.isArray((evt.dag || {}).edges)) window._currentEdges = evt.dag.edges;
@@ -1595,6 +1610,12 @@ async function readSSE(response, onEvent) {
           console.log("[SSE]", parsed.step, parsed.name || "", parsed.phase || "", parsed.node || "", "t='" + _t + "'", _a ? "args=" + _a : "");
         }
         onEvent(parsed);
+        // done/error = 一轮终态：无需等物理连接关闭即可结束本轮读取，
+        // 让 sendMessage 的 await readSSE 立即返回、finally 解锁发送器。
+        if (parsed.step === "done" || parsed.step === "error") {
+          try { reader.cancel(); } catch (e) {}
+          return;
+        }
       } catch (e) { /* 忽略坏帧 */ }
     }
   }
@@ -1606,7 +1627,13 @@ async function sendMessage(text, opts) {
 
   if (!isResume) {
     text = (text == null ? "" : String(text)).trim();
-    if (!text || State.streaming) return;
+    if (!text) return;
+    if (State.streaming) {
+      // 上一轮 SSE 连接可能仍在心跳保活（模块长跑/网络滞留），这一轮不能发。
+      // 明确告知而不是静默吞掉——工作台内嵌场景尤其需要这个信号。
+      toast("上一轮对话仍在执行中：请先等它结束，或点「⏹ 停止」", "warn");
+      return false;
+    }
     // 新会话的欢迎页必须先清掉：否则它会和这一轮对话叠在一起
     // （表现为"切了显示模式却没重绘、切会话才正常"）。
     // 顺手用首条消息当会话标题，省得顶栏一直挂着"新对话"。
@@ -1655,6 +1682,8 @@ async function sendMessage(text, opts) {
     }
     if (!resp.body) throw new Error("响应无流");
     await readSSE(resp, handleChatEvent);
+    // 兜底：SSE 流正常读完（done/error 事件可能因竞态未达）也结算一轮
+    if (typeof window.drmOnTurnStreamEnd === "function") window.drmOnTurnStreamEnd();
   } catch (e) {
     if (e.name === "AbortError") {
       endStreaming();
@@ -2325,10 +2354,11 @@ function drawerErr(e) {
   return `<div class="d-empty">加载失败: ${escapeHtml(e.message || e)}</div>`;
 }
 
-/* ==================== 创作工作台视图（图片 / 视频） ==================== */
-let _studioTab = "image";
+/* ==================== 创作工作台视图（短剧 / 图片 / 视频） ==================== */
+let _studioTab = "drama";
 let _studioImageReady = false;
 let _studioVideoReady = false;
+let _studioDramaReady = false;
 
 function isStudioOpen() { return $("#app").classList.contains("studio-open"); }
 
@@ -2340,48 +2370,64 @@ function openStudioView(tab) {
 }
 
 function closeStudioView() {
+  // 若首页对话页被打包进了工作台框内，先移回首页原位
+  if (typeof window.drmUnembedChat === "function") window.drmUnembedChat();
   $("#app").classList.remove("studio-open");
   $("#studio").classList.add("hidden");
   $("#btnStudio").classList.remove("active");
   chatInput.focus();
 }
 
-async function switchStudioTab(tab) {
-  console.log("[switchStudioTab] 调用时:", {
-    tab,
-    renderStudioTab_type: typeof renderStudioTab,
-    window_renderStudioTab: typeof window.renderStudioTab,
-    imageStudioReady: window.__imageStudioReady
+// 等待对应 tab 的渲染函数加载完成（脚本异步引入时兜底）
+function waitForFn(name, retries = 6, delay = 120) {
+  return new Promise((resolve) => {
+    const check = async (i) => {
+      if (typeof window[name] === "function") return resolve(true);
+      if (i >= retries) return resolve(false);
+      setTimeout(() => check(i + 1), delay);
+    };
+    check(0);
   });
+}
 
+async function switchStudioTab(tab) {
+  const prev = _studioTab;
+  // 正在沉浸式执行（对话页已内嵌）时，禁止切走创作 tab，避免脱离会话视图
+  if (prev === "drama" && tab !== "drama" && window.drmWouldLeaveBlocked && window.drmWouldLeaveBlocked()) {
+    toast("当前有模块正在生成中，请先等本轮结束或点「⏹ 停止」再切换", "warn");
+    return;
+  }
   _studioTab = tab;
+  // 离开短剧创作 tab：收回本线程的受限命令作用域（execute_command 仅对短剧创作开放）
+  if (prev === "drama" && tab !== "drama" && typeof window.deactivateDramaScope === "function") {
+    window.deactivateDramaScope();
+  }
+  // 同时把内嵌到工作台框内的首页对话页移回原位（图片/视频 tab 不展示对话）
+  if (prev === "drama" && tab !== "drama" && typeof window.drmUnembedChat === "function") {
+    window.drmUnembedChat();
+  }
   $$("#studioSeg button").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
+  const drmP = $("#studioDramaPanel");
   const imgP = $("#studioImagePanel");
   const vidP = $("#studioVideoPanel");
+  drmP.classList.toggle("hidden", tab !== "drama");
   imgP.classList.toggle("hidden", tab !== "image");
   vidP.classList.toggle("hidden", tab !== "video");
   try {
-    if (tab === "image") {
-      // 确保 renderStudioTab 已加载（添加重试机制）
-      const waitForRenderStudioTab = async (retries = 5, delay = 100) => {
-        for (let i = 0; i < retries; i++) {
-          if (typeof renderStudioTab === "function" || typeof window.renderStudioTab === "function") {
-            return true;
-          }
-          console.log(`[switchStudioTab] renderStudioTab 未加载，等待 ${delay}ms... (第${i + 1}次)`);
-          await new Promise(r => setTimeout(r, delay));
-        }
-        return false;
-      };
-
-      const loaded = await waitForRenderStudioTab();
+    if (tab === "drama") {
+      const loaded = await waitForFn("renderDramaStudioTab");
       if (!loaded) {
-        console.error("[switchStudioTab] renderStudioTab 加载超时");
+        drmP.innerHTML = drawerErr(new Error("短剧创作模块加载超时，请刷新页面重试"));
+        return;
+      }
+      const fn = window.renderDramaStudioTab || renderDramaStudioTab;
+      if (!_studioDramaReady) { _studioDramaReady = true; await fn(drmP); }
+    } else if (tab === "image") {
+      const loaded = await waitForFn("renderStudioTab");
+      if (!loaded) {
         imgP.innerHTML = drawerErr(new Error("图片创作模块加载超时，请刷新页面重试"));
         return;
       }
-
-      // 确保使用正确的函数引用
       const fn = window.renderStudioTab || renderStudioTab;
       if (!_studioImageReady) { _studioImageReady = true; await fn(imgP); }
     } else if (!_studioVideoReady) {
@@ -2389,8 +2435,10 @@ async function switchStudioTab(tab) {
       await renderVideoTab(vidP);
     }
   } catch (e) {
-    if (tab === "image") _studioImageReady = false; else _studioVideoReady = false;
-    (tab === "image" ? imgP : vidP).innerHTML = drawerErr(e);
+    if (tab === "drama") _studioDramaReady = false;
+    else if (tab === "image") _studioImageReady = false;
+    else _studioVideoReady = false;
+    (tab === "drama" ? drmP : tab === "image" ? imgP : vidP).innerHTML = drawerErr(e);
   }
 }
 
@@ -3308,9 +3356,9 @@ function bindEvents() {
   $("#threadSearch").addEventListener("input", () => loadThreads());
   $("#btnDrawer").addEventListener("click", openDrawer);
   $("#drawerMask").addEventListener("click", closeDrawer);
-  // 创作工作台：侧边栏品牌下方入口 → 独立全屏视图（图片 / 视频）
+  // 创作工作台：侧边栏品牌下方入口 → 独立全屏视图（短剧 / 图片 / 视频）
   $("#btnStudio").addEventListener("click", () => {
-    if (isStudioOpen()) closeStudioView(); else openStudioView("image");
+    if (isStudioOpen()) closeStudioView(); else openStudioView();
   });
   $("#btnStudioBack").addEventListener("click", closeStudioView);
   $("#btnStudioSettings").addEventListener("click", () => openDrawer());

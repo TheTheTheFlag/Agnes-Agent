@@ -275,7 +275,7 @@ def chatbot(state: State, config: RunnableConfig):
     initial_messages = prepare_context_messages(history_messages, system_text, keep_recent=KEEP_RECENT)
 
     print(f"[Chatbot] 自决模式（无 L1/L2/L3 硬切）")
-    user_tools = get_tools_for_user(_user)
+    user_tools = get_tools_for_user(_user, thread_id)
     loop = ReActLoop(_llm_with_tools, max_iterations=MAX_TOOL_CALL_ROUNDS, node="chatbot")
     try:
         result = loop.run(

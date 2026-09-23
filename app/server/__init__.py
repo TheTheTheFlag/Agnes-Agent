@@ -154,6 +154,7 @@ from app.server.api import image as _api_image
 from app.server.api import video as _api_video
 from app.server.api import debug as _api_debug
 from app.server.api import settings as _api_settings
+from app.server.api import workbench as _api_workbench
 app.include_router(_api_system.router)
 app.include_router(_api_memory.router)
 app.include_router(_api_tools.router)
@@ -167,6 +168,7 @@ app.include_router(_api_image.router)
 app.include_router(_api_video.router)
 app.include_router(_api_debug.router)
 app.include_router(_api_settings.router)
+app.include_router(_api_workbench.router)
 
 # 登录校验：登录/注册接口 + 管理员审批 + 全 API 保护中间件
 from app.server.auth import (
