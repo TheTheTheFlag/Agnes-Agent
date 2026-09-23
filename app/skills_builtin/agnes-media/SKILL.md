@@ -1,4 +1,4 @@
----
+﻿---
 name: agnes-media
 description: Agnes AI — 图片 & 视频统一生成（文生图 / 图生图 / 多图合成 / 文生视频 / 图生视频 / 关键帧动画），生成、下载、日志一条龙
 triggers:
@@ -28,7 +28,7 @@ config:
 
 # Agnes AI — 图片 & 视频生成（单脚本工作流）
 
-> 技能目录 `<skill_dir>` = `app/skills/agnes-media/`。
+> 技能目录 `<skill_dir>` = `app/skills_builtin/agnes-media/`。
 > **一切生成统一调用 `<skill_dir>/media.py`**：提交 → 轮询（视频）→ 下载产物 → 追加日志，
 > 全在一个脚本里完成。**禁止**再手写 `generate_*.py`、内联 curl、或复制固定生成脚本。
 > 调用参数（prompt / 模型 / 尺寸 / 参考图 / 时长 / seed 等）由你根据用户需求与下文参数表实时构造。

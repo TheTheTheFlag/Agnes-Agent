@@ -64,12 +64,25 @@ HTTP_TIMEOUT = 300
 
 def load_api_key() -> str:
     keys_file = SKILL_DIR / "keys.json"
-    if not keys_file.exists():
-        raise SystemExit(f"[media] 找不到 {keys_file}，请先配置 API Key")
-    keys = json.loads(keys_file.read_text(encoding="utf-8"))
-    key = keys.get("agnes") or keys.get("api_key") or ""
+    key = ""
+    if keys_file.exists():
+        try:
+            keys = json.loads(keys_file.read_text(encoding="utf-8"))
+            key = str(keys.get("agnes") or keys.get("api_key") or "").strip()
+        except Exception:
+            key = ""
     if not key:
-        raise SystemExit(f"[media] keys.json 缺少 'agnes' 字段: {keys_file}")
+        # 优雅降级：keys.json 缺失/为空时，从账号库按当前用户解析 agnes 密钥，
+        # 使「图片创作台」同一套密钥池对 execute_command 路径同样可用。
+        try:
+            from app.userctx import resolve_user_keys
+            pool = resolve_user_keys().get("agnes") or []
+            if pool:
+                key = str(pool[0]).strip()
+        except Exception:
+            pass
+    if not key:
+        raise SystemExit(f"[media] 找不到可用 API Key（{keys_file} 不存在或为空，且账号库无 agnes key）")
     return key
 
 

@@ -21,7 +21,7 @@ const SUMERU_TITLE_DFT = "我的新书";
 /* 公共说明尾巴（短剧技能指令的收尾约束） */
 function DRAMA_TAIL(title) {
   return `
-要求：严格按该技能的 SKILL.md 逐步执行。先用 read_skill 读取技能说明，再按它的 Step 顺序走：定位输入 → seed/chunk → 逐批生成 → validate → render；所有脚本（node {baseDir}/scripts/*.mjs，零依赖）与产物都放在当前用户自己的工作区 deliverables/短剧/${title}/ 下。validate 必须全绿才 render，报了质量门就就地修正后重跑。当前环境没有 codex 内置 $imagegen，出图类步骤按技能允许的降级写法：只生成/交付提示词与关键帧描述，不做真实出图。全程用中文汇报，完成后用 2–3 句话列出各产物文件路径。`;
+要求：严格按该技能的 SKILL.md 逐步执行。先用 read_skill 读取技能说明，再按它的 Step 顺序走：定位输入 → seed/chunk → 逐批生成 → validate → render；所有脚本（node {baseDir}/scripts/*.mjs，零依赖）与产物都放在当前用户自己的工作区 deliverables/短剧/${title}/ 下。validate 必须全绿才 render，报了质量门就就地修正后重跑。出图步骤统一用 Agnes 图片创作台（read_skill agnes-media 后照 SKILL.md 执行）：先写 image.sheet 提示词（必须含当前画风预设的 render 句、全英文、不得出现人名），再执行 python app/skills_builtin/agnes-media/media.py image --prompt "<image.sheet>" --size 1K --ratio 16:9，stdout 出现 FILE= 即成功，把该文件复制到 images/<slug>-sheet.png；平台有 Agnes 出图能力，不允许以"没有出图环境"为由跳过出图。全程用中文汇报，完成后用 2–3 句话列出各产物文件路径。`;
 }
 
 /* 公共说明尾巴（sumeru 小说写作技能指令的收尾约束） */

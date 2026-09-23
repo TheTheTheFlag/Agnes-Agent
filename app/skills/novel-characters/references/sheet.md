@@ -1,8 +1,11 @@
-# 角色设定图出图 · codex `$imagegen`
+# 角色设定图出图 · Agnes 图片创作台 / codex `$imagegen`
 
-出图走 codex 内置的 `$imagegen` 系统 skill。**这条路不需要任何 API key**——用的是本机 codex 登录态（订阅额度）。
+出图按可用性依次走两条路，第一条就够：
 
-**没有 codex 就跳过整个第 8 步**，只交提示词，其余产出照常。这是可选能力，不是硬依赖。
+1. **首选：Agnes 图片创作台**（本平台自带，见情况 A）：一条命令出图，密钥由脚本自动从账号库读取，无需配置。
+2. **备选：codex 内置 `$imagegen`**——用本机 codex 登录态（订阅额度），不需要任何 API key。见情况 B/C。
+
+**两条路都不可用才跳过整个第 8 步**，只交提示词，其余产出照常。这是可选能力，不是硬依赖。
 
 ## 每个角色一张图
 
@@ -25,13 +28,24 @@
 
 ---
 
-## 情况 A：本 skill 正跑在 codex 里
+## 情况 A：Agnes 图片创作台（本平台自带，首选）
+
+平台自带出图能力（`agnes-media` 技能，可用 `read_skill agnes-media` 读完整参数表）。出图一条命令：
+
+```bash
+mkdir -p <输出目录>/images
+python app/skills_builtin/agnes-media/media.py image --prompt "<image.sheet 的内容>" --size 1K --ratio 16:9
+```
+
+stdout 出现 `FILE=` 即产物落盘路径，复制为 `<输出目录>/images/<slug>-sheet.png` 即可。**一个角色一次调用，绝不批量。**
+
+## 情况 B：本 skill 正跑在 codex 里
 
 直接用 `$imagegen`，**不要再 shell 出去调 `codex exec`**——那是自己套自己。
 
 把 `image.sheet` 的内容作为图像规格交给 `$imagegen`，生成后把选定的 PNG 复制到 `<输出目录>/images/<slug>-sheet.png`。
 
-## 情况 B：跑在 Claude Code 或其他环境里
+## 情况 C：跑在 Claude Code 或其他环境里
 
 shell 调用本机 codex。
 
@@ -60,7 +74,7 @@ find_codex() {
 CODEX=$(find_codex)
 ```
 
-`$CODEX` 为空就跳过出图。
+`$CODEX` 为空就换情况 A（Agnes 图片创作台）；它也不可用才跳过出图。
 
 ### 调用
 

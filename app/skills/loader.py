@@ -62,6 +62,10 @@ def _skill_dir_files() -> list[tuple[str, str]]:
     """
     merged: dict[str, str] = {}
     roots = [BUILTIN_SKILLS_DIR]
+    # 附带内置技能区（app/skills_builtin/，随版本发布；同名时被 app/skills 覆盖）
+    builtin_extra = os.path.join(APP_DIR, "skills_builtin")
+    if builtin_extra != BUILTIN_SKILLS_DIR and os.path.isdir(builtin_extra):
+        roots.append(builtin_extra)
     udir = user_skills_dir()
     if udir and udir != BUILTIN_SKILLS_DIR:
         roots.append(udir)

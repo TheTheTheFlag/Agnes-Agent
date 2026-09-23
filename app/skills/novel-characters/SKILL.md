@@ -6,7 +6,7 @@ description: |
   并给每个角色出角色设定图（左半身像 + 右全身三视图 + 细节条），产出 JSON + Markdown + 可交互的 report.html。
   报告语言可指定（--lang），默认中文，任意语言都支持；
   出图风格可指定（--style），默认半写实，也可以出吉卜力动画风。
-  零依赖、零 API key，用当前会话额度；出图走 codex 内置 $imagegen（可选）。
+  零依赖、零 API key；出图首选 Agnes 图片创作台（media.py，密钥由账号库自动读取），或 codex 内置 $imagegen（可选）。
   Use when asked to 拆小说角色、分析人物、生成角色卡、character sheets from a novel。
 allowed-tools:
   - Read
@@ -29,7 +29,8 @@ metadata:
     bins:
       - node          # >= 18，只用标准库，无 npm 依赖
     optional:
-      - codex         # 有才出三视图；没有就只交提示词，其余照常
+      - agnes-media    # 首选出图：Agnes 图片创作台 media.py（密钥账号库自动读取）
+      - codex         # 备选出图：有才出三视图；都没有就只交提示词，其余照常
   runtimes:
     - claude-code
     - codex
@@ -41,7 +42,7 @@ metadata:
 
 `{baseDir}` = 本文件所在目录。脚本 `{baseDir}/scripts/novel-characters.mjs`，零依赖，`node` 直接跑。
 
-**运行环境**：Claude Code 和 codex 都能跑。差别只在第 8 步出图——见 `references/sheet.md`。
+**运行环境**：Claude Code 和 codex 都能跑。第 8 步出图优先走 Agnes 图片创作台（`app/skills_builtin/agnes-media/media.py`），其次 codex `$imagegen`——见 `references/sheet.md`。
 
 ---
 
@@ -214,8 +215,11 @@ node {baseDir}/scripts/novel-characters.mjs validate <cast.json> <book.txt>
 
 读 `{baseDir}/references/sheet.md`，照它的调用契约做。要点：
 
-- **没有 codex 就整步跳过**，只交提示词，后面照常走
-- 跑在 codex 里就直接用 `$imagegen`；跑在别处就 shell 调 codex，先按那里的脚本探测版本最高的 binary（旧版会直接报错）
+出图路径按可用性依次（第一条就够，不要重复尝试后面的）：
+
+- **首选：Agnes 图片创作台**：`python app/skills_builtin/agnes-media/media.py image --prompt "<image.sheet>" --size 1K --ratio 16:9`，stdout 出现 `FILE=` 即成功，把该文件复制为 `images/<slug>-sheet.png`；密钥脚本自动从账号库读，无需配置
+- 跑在 codex 里就直接用 `$imagegen`；只有图片创作台不可用才 shell 调 codex，先按那里的脚本探测版本最高的 binary（旧版会直接报错）
+- 两条路都不可用才整步跳过（只交提示词），后面照常走
 - **一个角色一次调用，绝不批量**
 - 单个失败就跳过，不阻断；最后汇总说明
 - **断点续跑**：`images/<slug>-sheet.png` 已存在就跳过，失败重来时只补缺的
@@ -244,12 +248,12 @@ report.html 的样式约定见 `{baseDir}/references/report-style.md`——要�
 ├── <书名>-cast.md
 ├── report.html                    ← 双击就能开
 └── images/
-    └── <slug>-sheet.png           ← 有 codex 才有
+    └── <slug>-sheet.png           ← 出图成功才有
 ```
 
 ### Step 10 — 汇报
 
-一句话说清：角色数、出图数、报告路径。校验一次没过的话，说明修了什么。有角色出图失败、被截断、或因为没有 codex 而没出图，明确说清楚。
+一句话说清：角色数、出图数、报告路径。校验一次没过的话，说明修了什么。有角色出图失败、被截断、或因环境无出图能力而没出图，明确说清楚。
 
 ---
 

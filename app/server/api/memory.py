@@ -9,6 +9,38 @@ from app.memory import MemoryManager
 
 router = APIRouter()
 
+
+# 列表页/会话页载荷控制：messages.meta 里存着 llm_call/tool_call 的全量 input/output
+# 快照（单条可达上百 KB）。整包下发会导致 /api/messages 返回几十 MB JSON，前端解析+渲染
+# 卡顿。这里在读取时递归裁剪大字符串字段，DB 原文不动（trace/审查仍可读全量）。
+_MAX_META_FIELD = 3000   # 单个字符串字段上限（字符）
+_MAX_META_TOTAL = 12000  # 单条 meta 上限（超限则放宽到能再放几个字段，纯防御）
+
+def _bounded_meta(meta, cap=_MAX_META_FIELD):
+    """递归裁剪 meta 中过大的字符串，保留结构；截断处追加省略标记。"""
+    if meta is None:
+        return None
+    truncated = 0
+
+    def walk(v):
+        nonlocal truncated
+        if isinstance(v, str):
+            if len(v) > cap:
+                truncated += 1
+                return v[:cap] + "…〔内容过长，已截断，完整内容见服务端 trace/meta〕"
+            return v
+        if isinstance(v, dict):
+            return {k: walk(x) for k, x in v.items()}
+        if isinstance(v, list):
+            return [walk(x) for x in v]
+        return v
+
+    out = walk(meta)
+    if truncated and isinstance(out, dict):
+        out["__meta_truncated_fields"] = truncated
+    return out
+
+
 @router.get("/api/messages")
 async def get_messages(thread_id: str = Query("default"), limit: int = Query(200, ge=1, le=1000),
                        type: str = Query("all")):
@@ -66,7 +98,7 @@ async def get_messages(thread_id: str = Query("default"), limit: int = Query(200
             "tool_calls": json.loads(r["tool_calls"]) if r["tool_calls"] else None,
             "tool_call_id": r["tool_call_id"],
             "kind": r["kind"] or "chat",
-            "meta": json.loads(r["meta"]) if r["meta"] else None,
+            "meta": _bounded_meta(json.loads(r["meta"])) if r["meta"] else None,
             "timestamp": r["timestamp"],
             "tokens": tokens,
         }
