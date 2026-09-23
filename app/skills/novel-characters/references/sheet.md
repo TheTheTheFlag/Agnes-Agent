@@ -34,7 +34,7 @@
 
 ```bash
 mkdir -p <输出目录>/images
-python app/skills_builtin/agnes-media/media.py image --prompt "<image.sheet 的内容>" --size 1K --ratio 16:9
+python app/skills_builtin/agnes-media/media.py image --prompt "<image.sheet 的内容>" --size 2K --ratio 16:9
 ```
 
 stdout 出现 `FILE=` 即产物落盘路径，复制为 `<输出目录>/images/<slug>-sheet.png` 即可。**一个角色一次调用，绝不批量。**
