@@ -96,8 +96,12 @@ class ReActLoop:
         # 把 max_iterations 跑满也收不了尾（dag_executor.py:79 _run_node 拿到
         # "[自动判定] 未调用..." 才最终收尾，但 LLM 调用次数已经爆炸）。
         no_progress_streak = 0
-        # 「继续执行」引导：最多注入 3 轮逐步升级（_nudge_continue 检测一次后即进入强推循环）
+        # 「继续执行」引导：最多注入 3 轮逐步升级（_should_force_continue 检测一次后即进入强推循环）
         self._nudge_used = 0
+        # 收尾标记：轮次是否因耗尽退出 / 最终答复是否来自纯文本（用于"不静默收尾"诚实汇报）
+        exhausted = False
+        final_from_text_only = False
+        _terminated = False
 
         while iteration < self.max_iterations:
             iteration += 1
@@ -172,10 +176,13 @@ class ReActLoop:
                     except Exception:
                         pass  # 重试失败：保留原空响应，走统一兜底
                 if not tool_calls:
-                    # 用户「好的/开始吧/继续」短促催促 + 上一轮助手正在干工具活 → 注入「继续执行」引导，
-                    # 让模型真的通过工具继续（而不是把"我正在重写..."当最终答复敷衍过去）。
-                    # 最多升 3 级：第 1 步检测到意图后，后续 2 步持续强推（纯文本不得作为最终答复混过去）。
-                    if self._nudge_used < 3 and (self._nudge_used > 0 or (iteration == 1 and self._nudge_continue(messages))):
+                    # 「继续执行」引导（状态驱动，不靠关键词）：
+                    # 用户每发一条消息 = 工具调用计数/预算重置（chatbot 每回合新建 ReActLoop）+
+                    # 若会话正处于未完成的工具工作态 → 强制续作。触发只看历史状态
+                    # （上一轮在干工具活 / 干到一半被打断 / 纯问答不打扰），与用户这条
+                    # 消息写了什么（好的/继续/调用工具呀…）无关。
+                    # 最多升 3 级：第 1 步检测到工作态后，后续 2 步持续强推（纯文本不得作为最终答复混过去）。
+                    if self._nudge_used < 3 and (self._nudge_used > 0 or (iteration == 1 and self._should_force_continue(messages))):
                         self._nudge_used += 1
                         _guide = self._nudge_guide(self._nudge_used)
                         messages.append(response)
@@ -183,6 +190,7 @@ class ReActLoop:
                         print(f"[ReAct] 检测到“继续执行”意图，注入强制工具执行引导（第 {self._nudge_used}/3 级）", flush=True)
                         continue
                     final_answer = self._extract_final_answer(response)
+                    final_from_text_only = True
                     break
 
             current_calls = [(tc.get("name"), tc.get("args", {}) or {}) for tc in tool_calls]
@@ -352,12 +360,61 @@ class ReActLoop:
             if _terminated:
                 break
 
+        # —— 收尾：#2 轮次耗尽不再静默收尾 ——
+        # 历史教训（20:22:55 大轮刚好吃满 24 次）：max_iterations 耗尽时若 final_answer 为空，
+        # 旧代码直接 _force_answer("请基于已有信息直接回答")，模型会自编「由于工具调用限制」的
+        # 假完成报告，把 episodes 未合并进 outline.json 说成"成功"。这里强制换措辞——
+        # 告知模型：轮次已用尽，若产物未完成/校验未通过，必须在最终答复里如实写明，
+        # 不得宣称已完成。
         if final_answer is None:
+            if iteration >= self.max_iterations:
+                exhausted = True
+                print(f"[ReAct] ⚠️ 工具轮次上限({self.max_iterations})已耗尽，强制收尾并要求如实汇报", flush=True)
+                try:
+                    add_log_entry("warning",
+                                  f"chatbot 工具轮次上限({self.max_iterations})已耗尽",
+                                  {"node": self._trace_node})
+                except Exception:
+                    pass
+                messages.append(SystemMessage(
+                    content=(
+                        "[轮次上限已用尽] 你已达本回合工具调用次数上限。"
+                        "若当前任务尚未实际完成——例如关键产物（如 outline.json / episodes）缺失、"
+                        "validate 校验未通过、环节之间存在未合并的中间产物——请在最终答复里明确写出"
+                        "『未完成』的原因与缺失项，并列出已完成的文件路径，不要宣称全部完成。"
+                        "用户看到未完成后会继续追问，届时工具预算会随新回合重置。"
+                    )
+                ))
             final_answer = self._force_answer(messages)
+        elif final_from_text_only and iteration >= self.max_iterations:
+            # 纯文本收尾恰好撞上轮次上限：上面那轮可能被当最终答复兜住（如"由于工具调用限制"），
+            # 但产物未必完整。为避免静默放行，追加一轮强制自检：让模型复核 key 产物是否齐备。
+            exhausted = True
+            print(f"[ReAct] ⚠️ 纯文本收尾且轮次已达上限({self.max_iterations})，追加产物完整性自检", flush=True)
+            try:
+                add_log_entry("warning",
+                              "纯文本收尾且工具轮次已达上限，追加产物完整性自检",
+                              {"node": self._trace_node})
+            except Exception:
+                pass
+            messages.append(SystemMessage(
+                content=(
+                    "[收尾自检] 你的上一条答复是本回合的最终答复，但本回合工具调用次数恰好用尽。"
+                    "请先复核本轮关键产物是否真实存在且内容完整（如有 outline.json / 各分集文件，"
+                    "确认 episodes 数量与集数一致），再重写最终答复：若一切齐备就正常汇报各文件路径；"
+                    "若有缺失/未合并/未过校验，必须明确写出『未完成』项，不要以口头承诺代替实际产物。"
+                )
+            ))
+            try:
+                response = self._invoke_llm(messages)
+                final_answer = re.sub(r'<tool_call>.*?</tool_call>', '', response.content, flags=re.DOTALL).strip()
+            except Exception:
+                pass  # 自检失败则保留原有最终答复
         return {
             "final_answer": final_answer,
             "iteration_count": iteration,
             "pending_plan": getattr(self, "_captured_pending_plan", None),
+            "rounds_exhausted": exhausted,
         }
 
     def _invoke_llm(self, messages):
@@ -425,24 +482,20 @@ class ReActLoop:
             return any(str((x.get("text", "") if isinstance(x, dict) else x) or "").strip() for x in raw)
         return bool(str(raw or "").strip())
 
-    _NUDGE_RE = re.compile(
-        r"(好的|开始吧|开始|继续|继续吧|接着|然后|嗯|行吧|可以|对|就是|再|再来|重新|重来|动手|执行|去做|做吧|搞|整|冲|等|快点|OK|ok)",
-        re.IGNORECASE,
-    )
-    _PROMISE_RE = re.compile(r"(重写|重新(生成|校验|整理|跑)|开始(执行|工作|生成)|正在|我来|重跑|继续|稍后|马上|随即)")
-
-    def _nudge_continue(self, messages):
-        """用户短促催促（如「好的/开始吧/继续」）+ 上一轮助手确在干工具活/给了口头承诺 → 应强制继续实际操作。"""
+    def _should_force_continue(self, messages):
+        """「继续执行」判定——纯状态驱动，不匹配任何关键词（对齐用户要求）：
+        用户发送消息 → 工具调用计数/预算重置（每轮新 ReActLoop 天然重置）。
+        只要会话正处于未完成的工具工作态，就在本回合一开场强制续作：
+          a) 最近一条 assistant 消息带 tool_calls（上轮正干工具活，被预算/中断切断）→ True
+          b) 最近一条 assistant 是纯文本，但其后可见的工具痕迹（ToolMessage / 带 tool_calls 的
+             assistant）存在于最近一两个回合（上轮"说了一堆但不动手"）→ True
+          c) 纯问答（最近几轮无任何工具痕迹）→ False（不打扰正常聊天）
+        """
         # 找到当前用户消息（回放末尾的 human）
         idx = len(messages) - 1
         while idx >= 0 and getattr(messages[idx], "type", "") != "human":
             idx -= 1
         if idx < 0:
-            return False
-        utxt = str(getattr(messages[idx], "content", "") or "").strip()
-        if not utxt or len(utxt) > 8:
-            return False
-        if not self._NUDGE_RE.search(utxt):
             return False
         # 再往前找最近的 assistant
         idx -= 1
@@ -453,7 +506,17 @@ class ReActLoop:
         prev = messages[idx]
         if getattr(prev, "tool_calls", None):
             return True
-        return bool(self._PROMISE_RE.search(str(getattr(prev, "content", "") or "")))
+        # 最近一条 assistant 是纯文本：向前看最近的工具痕迹（最多再扫 ~2 个用户回合的跨度）
+        scan = 0
+        while idx >= 0 and scan < 40:
+            m = messages[idx]
+            t = getattr(m, "type", "") or (m.get("type") if isinstance(m, dict) else "")
+            if t == "human":
+                scan += 15  # 每跨一个用户回合加权重，最多约 2.5 个回合
+            if t == "tool" or getattr(m, "tool_calls", None):
+                return True
+            idx -= 1
+        return False
 
     def _nudge_guide(self, level: int) -> str:
         """「继续执行」引导文案：分 3 级升级，逐级更强硬。"""
@@ -471,11 +534,11 @@ class ReActLoop:
                 "请不要输出计划或口头承诺，直接调用工具执行；若确实需要用户提供额外信息，请调用交互工具询问并说明原因。"
             )
         return (
-            "[继续执行] 用户仅简短催促（如“好的/开始吧/继续”），要求继续上一步的实际工作。"
-            "请不要再只输出口头承诺：立即通过工具实际操作来推进——"
+            "[继续执行] 会话正处于未完成的工具工作态（上一轮你在干工具活/只说了没动手），"
+            "用户已发来新消息继续本任务。不要再只输出口头承诺：立即通过工具实际操作来推进——"
             "read_file 定位当前未完成的目标文件 → execute_command 重新运行技能脚本 → write_file 写入/修正 → 再执行校验直到通过。"
             "全部完成后，用 2–3 句话汇报每个产物文件的路径。"
-            "例外：若你判断确实无需继续操作（例如用户只是在致谢/闲聊），可给出简短说明并直接结束本回合。"
+            "例外：若你判断当前确实不需要任何工具操作（例如用户只是在致谢/闲聊），可给出简短说明并直接结束本回合。"
         )
 
     def _extract_final_answer(self, response):

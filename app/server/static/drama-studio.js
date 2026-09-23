@@ -47,6 +47,18 @@ function drmFieldHtml(mod, f) {
     inner = `<select class="d-input" id="${id}">${opts}</select>`;
   } else if (f.type === "number") {
     inner = `<input type="number" class="d-input" id="${id}" value="${f.default == null ? "" : f.default}" min="${f.min == null ? 0 : f.min}"${ph}>`;
+  } else if (f.type === "path") {
+    // path 字段（srcPath 等）：文本输入 + 「📎 上传并填路径」按钮。
+    // #4 修复：旧缓存版前端曾把「✅ 文件已上传成功！文件信息…」提示文案错填进路径字段，
+    // 导致模型 read_file 读到一堆"提示话术"而非真实文件。新版改为正规上传链：
+    // 选本地文件 → POST /api/upload → 服务器返回 uploads/up_xxx.ext 真实路径 → 填入输入框。
+    inner = `
+      <div class="drm-path-row">
+        <input type="text" class="d-input" id="${id}" value="${f.default == null ? "" : f.default}"${ph} spellcheck="false">
+        <button type="button" class="d-btn ghost drm-path-up" data-up="${mod}-${f.key}" title="上传本地文件到 uploads/ 并自动填入工作区相对路径">📎 上传文件</button>
+      </div>
+      <div class="drm-path-note" id="drm-note-${mod}-${f.key}"></div>
+      <input type="file" class="drm-file-input" id="drm-file-${mod}-${f.key}" hidden>`;
   } else {
     inner = `<input type="text" class="d-input" id="${id}" value="${f.default == null ? "" : f.default}"${ph} spellcheck="false">`;
   }
@@ -480,6 +492,45 @@ function renderDrmModule(el, moduleKey) {
     } finally {
       if (DRM.run) DRM.run.streaming = false;
     }
+  });
+
+  /* path 字段（srcPath）上传 → 填入真实 uploads/ 路径（#4）
+     旧缓存版前端曾把「已上传成功+文件信息」提示文案错填进 srcPath 字段，模型 read_file 读到的是
+     话术而非文件。这里走常规 /api/upload 上传链，拿到真实工作区相对路径再回填输入框。 */
+  $$(".drm-path-up", box).forEach((b) => {
+    b.addEventListener("click", () => {
+      const fi = $("#" + "drm-file-" + b.dataset.up, box);
+      if (fi) fi.click();
+    });
+  });
+  $$(".drm-file-input", box).forEach((fi) => {
+    fi.addEventListener("change", async () => {
+      const file = fi.files && fi.files[0];
+      if (!file) return;
+      const srcKey = (fi.id || "").replace(/^drm-file-/, "");
+      const inputEl = $("#" + "drm-" + srcKey, box);
+      const noteEl = $("#" + "drm-note-" + srcKey, box);
+      const toastMsg = (m, t) => { try { toast(m, t); } catch (e) {} };
+      try {
+        const fd = new FormData();
+        fd.append("file", file);
+        const r = await fetch("/api/upload", { method: "POST", body: fd, credentials: "include" });
+        if (r.status === 401) { if (typeof onUnauthorized === "function") onUnauthorized(); return; }
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+        if (inputEl) inputEl.value = d.path || "uploads/";
+        if (noteEl) {
+          noteEl.textContent = `✅ 已上传：${d.name || file.name}（${fmtBytes ? fmtBytes(d.size) : d.size + "B"}）→ 工作区路径 ${d.path}`;
+          noteEl.style.color = "var(--ok, #2e9e5b)";
+        }
+        toastMsg(`已上传 ${d.name || file.name}，路径已填入（#4 修复后为真实 uploads/ 路径）`);
+      } catch (e) {
+        if (noteEl) noteEl.textContent = "❌ 上传失败：" + (e.message || e);
+        toastMsg("上传失败: " + (e.message || e), "error");
+      } finally {
+        fi.value = "";
+      }
+    });
   });
 }
 

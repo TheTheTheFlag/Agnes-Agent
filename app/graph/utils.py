@@ -226,6 +226,69 @@ def truncate_oversized_messages(messages: List, max_tokens: int, min_keep_chars:
     return sanitize_messages(messages)
 
 
+def build_recent_work_summary(messages, max_items=8):
+    """从历史中提取「上一轮已成功完成的工具动作」摘要，供下一轮注入上下文。
+    背景（#3 失忆重做修复）：20:17:48 事件里，模型在上一轮空回复后声称"找不到源文件、任务中断"
+    并推倒重做第二遍——因为它看不到自己上一轮实际写了哪些文件。这里扫描当前用户消息之前的
+    最近 assistant tool_calls + ToolMessage，把"已成功写入/已成功执行"提炼成摘要，
+    随下一轮 user 消息一起注入，让模型直接基于已有成果继续，而不是从零重来。
+    只统计成功动作（write_file/edit_file 返回含 ok:true；execute_command/system_command 返回
+    returncode:0），并去重（同路径只记一次），限制条数防上下文膨胀。"""
+    if not messages:
+        return ""
+    # 定位当前用户消息（回放末尾 human）
+    idx = len(messages) - 1
+    while idx >= 0 and getattr(messages[idx], "type", "") != "human":
+        idx -= 1
+    if idx < 0:
+        return ""
+    # 从用户消息后面（即上一轮的 assistant/tool 区）向前扫最近 max_items+2 条
+    seen = set()
+    out = []
+    start = max(idx - 1, len(messages) - 60)
+    for i in range(start, -1, -1):
+        m = messages[i]
+        t = getattr(m, "type", "") or (m.get("type") if isinstance(m, dict) else "")
+        if t == "human":
+            break  # 只回看最近一个用户回合
+        tcs = getattr(m, "tool_calls", None) or (m.get("tool_calls") if isinstance(m, dict) else None)
+        if not tcs:
+            continue
+        for tc in (tcs if isinstance(tcs, list) else []):
+            name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", "")
+            args = (tc.get("args") or {}) if isinstance(tc, dict) else (getattr(tc, "args", None) or {})
+            if name not in ("write_file", "edit_file", "execute_command", "system_command"):
+                continue
+            # 找与之配对的 ToolMessage 确认成功
+            for j in range(i + 1, len(messages)):
+                mm = messages[j]
+                if getattr(mm, "type", "") == "human":
+                    break
+                res = str(getattr(mm, "content", "") or "") if not isinstance(mm, dict) else str(mm.get("content") or "")
+                is_tool = getattr(mm, "type", "") == "tool" or (mm.get("type") if isinstance(mm, dict) else "") == "tool"
+                if not is_tool:
+                    continue
+                ok = ('"ok": true' in res) or ('"returncode": 0' in res) or ('"status": "success"' in res)
+                if not ok:
+                    continue
+                target = str(args.get("path") if name in ("write_file", "edit_file") else args.get("command") or "")
+                target = (target or str(args))[:160]
+                if target in seen:
+                    break
+                seen.add(target)
+                out.append(f"{name} → {target}")
+                break
+        if len(out) >= max_items:
+            break
+    if not out:
+        return ""
+    return (
+        "【上一轮已完成动作·续接参考】上一条助手回复后你已成功完成以下工具操作，"
+        "产物已落盘/结果已给出，请直接基于这些已有成果继续，不要从头重做：\n"
+        + "\n".join(f"- {x}" for x in out)
+    )
+
+
 def strip_degenerate_replies(messages):
     """清理历史中"模型异常"类回复（业界：错误/兜底文案不是有效对话内容，不进上下文）。
 

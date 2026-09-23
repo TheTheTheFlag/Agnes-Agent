@@ -22,7 +22,7 @@ from app.graph.state import State
 from app.graph.utils import (count_tokens, retry_llm_call, parse_tool_calls_from_content,
     ensure_tool_calls, ensure_token_limit, sync_state_to_db, load_prompt_template,
     MODEL_CONTEXT_LIMIT, TOKEN_LIMIT, KEEP_RECENT, MAX_TOOL_CALL_ROUNDS, _tool_params_summary,
-    prepare_context_messages, apply_reply_guard)
+    prepare_context_messages, apply_reply_guard, build_recent_work_summary)
 from app.tools import tools, request_planning, get_tools_for_user
 from app.llm import create_llm
 from app.memory import MemoryManager
@@ -274,6 +274,18 @@ def chatbot(state: State, config: RunnableConfig):
     # 修复"坏会话因孤儿 tool 消息 / 满屏兜底文案而持续空返回"的问题。
     initial_messages = prepare_context_messages(history_messages, system_text, keep_recent=KEEP_RECENT)
 
+    # #3 空回复/异常中断之下的续接：把"上一轮已成功完成的工具动作"摘要注入本回合上下文，
+    # 杜绝模型"失忆推倒重做"（20:17:48 事件：上一轮空回复后模型声称找不到源文件、重做第二遍）。
+    # 摘要只含成功写入的文件/成功执行的命令，且去重限条数，注入 60 条窗口内的最近动作。
+    _resume_summary = ""
+    try:
+        _resume_summary = build_recent_work_summary(history_messages)
+    except Exception:
+        _resume_summary = ""
+    if _resume_summary:
+        print(f"[Chatbot] 注入上一轮已完成动作摘要（防失忆重做）: {_resume_summary[:120]}...", flush=True)
+        initial_messages = initial_messages + [SystemMessage(content=_resume_summary)]
+
     print(f"[Chatbot] 自决模式（无 L1/L2/L3 硬切）")
     user_tools = get_tools_for_user(_user, thread_id)
     loop = ReActLoop(_llm_with_tools, max_iterations=MAX_TOOL_CALL_ROUNDS, node="chatbot")
@@ -288,6 +300,12 @@ def chatbot(state: State, config: RunnableConfig):
             on_before_llm=on_before_llm,
         )
         content = result["final_answer"]
+        # #2 轮次耗尽兜底可见化：ReActLoop 耗尽 max_iterations 时标记 rounds_exhausted，
+        # 记日志便于后续排查"该轮并未真正完成任务"（如 episodes 未合并进 outline.json）
+        if result.get("rounds_exhausted"):
+            add_log_entry("warning",
+                          f"chatbot 工具轮次已达上限({MAX_TOOL_CALL_ROUNDS})，最终答复可能未实际完成任务",
+                          {"node": "chatbot"})
         # 透传 ReActLoop 捕获的 pending_plan（来自 request_planning 工具的 Command.update）
         # → 让 route_after_chatbot 跳到 planner
         react_pending_plan = result.get("pending_plan")
