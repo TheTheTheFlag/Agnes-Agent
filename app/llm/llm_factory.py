@@ -36,6 +36,21 @@ except ImportError:
 _RETRYABLE = (RateLimitError, APIConnectionError, APITimeoutError, AuthenticationError, OpenAIConnectionError)
 if _InternalServerError is not None:
     _RETRYABLE = _RETRYABLE + (_InternalServerError,)
+# openai>=3 不再把 httpx.ReadTimeout 包成 APITimeoutError（会裸抛 httpx.ReadTimeout），
+# 不加进来的话轮换器会直接放行（不换 key 不退避）。httpx.TimeoutException 是其父类（覆盖读/连/写超时）。
+try:
+    import httpx as _httpx
+    _RETRYABLE = _RETRYABLE + (_httpx.TimeoutException,)
+except Exception:
+    pass
+
+# 默认读超时：原 30s 对 4 万+ token 的 thinking 模型响应必然 ReadTimeout。可调：LLM_TIMEOUT（秒）
+_TIMEOUT_DEFAULT = float(os.environ.get("LLM_TIMEOUT", "180"))
+
+# 配额保护：全部 key 均 429/限流时，挂起约 1 分钟再重试。适用「分钟级速率限制」：
+# 这一分钟打满、下一分钟即恢复（非真耗尽额度）。可调：LLM_QUOTA_WAIT_SECONDS（秒）
+_QUOTA_WAIT_SECONDS = float(os.environ.get("LLM_QUOTA_WAIT_SECONDS", "60"))
+_QUOTA_RETRY_ROUNDS = int(os.environ.get("LLM_QUOTA_RETRY_ROUNDS", "3"))
 
 
 # ============================================================
@@ -123,15 +138,22 @@ class RotatingKeyChatOpenAI:
     触发条件：可重试异常（401/429/5xx/网络/超时）→ 换下一个 key；全部 key 试完一轮后退避（2^n + jitter，上限 30s）
     再从头开始，直到 max_rounds 轮或成功。
     400(BadRequest)立即抛出，不重试（参数错/prompt 超长/tool_call 配对错——重试无意义）。
+    配额保护：所有 key 试满 max_rounds 轮且最后一次异常为 429/限流 → 挂起 quota_wait_seconds（默认约 1 分钟，
+    分钟级限流窗口刷新即可恢复）再重试，最多 quota_retry_rounds 次。
+    每次顶层 invoke/stream 都会从 attempt_count=0 开始（独立预算），避免上一调用耗尽后把本实例永久楔死。
     """
 
-    def __init__(self, api_keys: List[str], max_rounds: int = 5, base_backoff: float = 1.0, max_backoff: float = 30.0, **kwargs):
+    def __init__(self, api_keys: List[str], max_rounds: int = 5, base_backoff: float = 1.0, max_backoff: float = 30.0,
+                 quota_wait_seconds: float = _QUOTA_WAIT_SECONDS, quota_retry_rounds: int = _QUOTA_RETRY_ROUNDS,
+                 **kwargs):
         self.api_keys = api_keys
         self.current_index = 0
         self.attempt_count = 0
         self.max_rounds = max_rounds
         self.base_backoff = base_backoff
         self.max_backoff = max_backoff
+        self.quota_wait_seconds = quota_wait_seconds
+        self.quota_retry_rounds = quota_retry_rounds
         self.kwargs = kwargs
         self._tools = None
 
@@ -139,6 +161,7 @@ class RotatingKeyChatOpenAI:
         new_instance = RotatingKeyChatOpenAI(
             api_keys=self.api_keys, max_rounds=self.max_rounds,
             base_backoff=self.base_backoff, max_backoff=self.max_backoff,
+            quota_wait_seconds=self.quota_wait_seconds, quota_retry_rounds=self.quota_retry_rounds,
             **self.kwargs,
         )
         new_instance._tools = tools
@@ -161,7 +184,7 @@ class RotatingKeyChatOpenAI:
         self.current_index = 0
         self.attempt_count += 1
         wait_time = self._backoff_seconds()
-        print(f"[API Key] 所有 {len(self.api_keys)} 个 Key 均已尝试，等待 {wait_time:.1f}s 后重试 (第 {self.attempt_count}/{self.max_rounds} 轮)...")
+        print(f"[API Key] 所有 {len(self.api_keys)} 个 Key 均已尝试，等待 {wait_time:.1f}s 后重试 (第 {self.attempt_count}/{self.max_rounds} 轮)...", flush=True)
         time.sleep(wait_time)
 
     def _is_non_retryable(self, e: Exception) -> bool:
@@ -170,33 +193,63 @@ class RotatingKeyChatOpenAI:
             return True
         return False
 
+    def _is_quota_error(self, e: Exception) -> bool:
+        """是否命中配额/限流（429）：配额耗尽通常数分钟后恢复，等待重试才有意义。"""
+        if isinstance(e, RateLimitError):
+            return True
+        try:
+            msg = str(e).lower()
+        except Exception:
+            return False
+        return "rate limit" in msg or "429" in msg or "速率限制" in msg or "配额" in msg or "quota" in msg or "限制" in msg
+
+    def _quota_wait(self, quota_used: int) -> None:
+        """配额保护：挂起约 1 分钟（带 jitter）后重试——分钟级限流窗口刷新，而不是真没额度。"""
+        import random as _r
+        wait = self.quota_wait_seconds * (1 + _r.random())
+        print(f"[API Key] 分钟级限流（429）：等待 {wait:.0f}s（等分钟窗口刷新）后重试（第 {quota_used}/{self.quota_retry_rounds} 次）…", flush=True)
+        time.sleep(wait)
+
     def invoke(self, messages, **kwargs):
-        last_exception = None
-        while self.attempt_count < self.max_rounds:
-            for i in range(len(self.api_keys)):
-                self.current_index = i
-                try:
-                    client = self._create_client()
-                    # 注意：必须在**调用成功之后**才复位 attempt_count。
-                    # 曾经把它写在 client.invoke 之前，导致每轮进入 for 时都被清零，
-                    # while self.attempt_count < max_rounds 恒为真 → 全部 key 失败后
-                    # 无限退避重试（实测卡住 13 分钟以上，节点永远停在 running）。
-                    resp = client.invoke(messages, **kwargs)
-                    self.attempt_count = 0
-                    return resp
-                except _RETRYABLE as e:
-                    if self._is_non_retryable(e):
-                        raise  # 400 立即抛，不重试
-                    last_exception = e
-                    key_short = self.api_keys[i][:10] + "..." + self.api_keys[i][-4:]
-                    print(f"[API Key] Key {i + 1}/{len(self.api_keys)} ({key_short}) 失败: {type(e).__name__}: {str(e)[:120]}，换下一个")
-                except Exception as e:
-                    # 其他异常（400/编程错误等）立即抛
-                    if self._is_non_retryable(e):
+        # 每次顶层调用独立预算：避免上一调用耗尽 attempt_count 后，本实例被永久楔死
+        # （曾经坑位：all keys 排队 429 → attempt_count 顶到 max_rounds → 后续每次调用
+        #  while 恒假直接抛“无具体异常可用”，连 429 都不报了）。
+        self.attempt_count = 0
+        quota_used = 0
+        while True:
+            last_exception = None
+            while self.attempt_count < self.max_rounds:
+                for i in range(len(self.api_keys)):
+                    self.current_index = i
+                    try:
+                        client = self._create_client()
+                        # 注意：必须在**调用成功之后**才复位 attempt_count。
+                        # 曾经把它写在 client.invoke 之前，导致每轮进入 for 时都被清零，
+                        # while self.attempt_count < max_rounds 恒为真 → 全部 key 失败后
+                        # 无限退避重试（实测卡住 13 分钟以上，节点永远停在 running）。
+                        resp = client.invoke(messages, **kwargs)
+                        self.attempt_count = 0
+                        return resp
+                    except _RETRYABLE as e:
+                        if self._is_non_retryable(e):
+                            raise  # 400 立即抛，不重试
+                        last_exception = e
+                        key_short = self.api_keys[i][:10] + "..." + self.api_keys[i][-4:]
+                        print(f"[API Key] Key {i + 1}/{len(self.api_keys)} ({key_short}) 失败: {type(e).__name__}: {str(e)[:120]}，换下一个", flush=True)
+                    except Exception as e:
+                        # 其他异常（400/编程错误等）立即抛
+                        if self._is_non_retryable(e):
+                            raise
                         raise
-                    raise
-            # 一轮全部失败 → 退避重试（attempt_count += 1，受 max_rounds 约束）
-            self._reset_from_start()
+                # 一轮全部失败 → 退避重试（attempt_count += 1，受 max_rounds 约束）
+                self._reset_from_start()
+            # max_rounds 轮耗尽：若为配额/限流 → 挂起数分钟再整体重试
+            if last_exception is not None and self._is_quota_error(last_exception) and quota_used < self.quota_retry_rounds:
+                quota_used += 1
+                self._quota_wait(quota_used)
+                self.attempt_count = 0
+                continue
+            break
         # openai>=2 的 RateLimitError 等 APIStatusError 子类构造必须携带 response/body，
         # 不能手工 RateLimitError("...")——否则构造时即抛 TypeError。
         # last_exception 为 None 说明 keys 为空或轮换次数已耗尽，抛语义明确的运行时错误。
@@ -210,36 +263,46 @@ class RotatingKeyChatOpenAI:
 
         业界做法：流式重试只重"连接建立阶段"，因为 token 已 yield 后重试会把同一段
         内容推给前端两次。OpenAI Cookbook / Anthropic best practice 均为此模式。
+        命中配额/限流时，建立阶段全部失败则挂起数分钟再整体重试（最多 quota_retry_rounds 次）。
         """
-        last_exception = None
-        for i in range(len(self.api_keys)):
-            self.current_index = i
-            client = self._create_client()
-            stream_method = getattr(client, stream_method_name)
-            try:
-                # 先建立流（__enter__/首次 iter）；失败 → 换 key 重试一次
-                stream_iter = stream_method(messages, **kwargs)
-                # 包一层迭代器：先触发底层 __iter__，如果到首个 token 前出错则抛
-                def _wrapped():
-                    try:
-                        for chunk in stream_iter:
-                            yield chunk
-                    except _RETRYABLE as e:
-                        if self._is_non_retryable(e):
+        self.attempt_count = 0  # 同 invoke：独立预算，防实例被上一调用楔死
+        quota_used = 0
+        while True:
+            last_exception = None
+            for i in range(len(self.api_keys)):
+                self.current_index = i
+                client = self._create_client()
+                stream_method = getattr(client, stream_method_name)
+                try:
+                    # 先建立流（__enter__/首次 iter）；失败 → 换 key 重试一次
+                    stream_iter = stream_method(messages, **kwargs)
+                    # 包一层迭代器：先触发底层 __iter__，如果到首个 token 前出错则抛
+                    def _wrapped():
+                        try:
+                            for chunk in stream_iter:
+                                yield chunk
+                        except _RETRYABLE as e:
+                            if self._is_non_retryable(e):
+                                raise
+                            last_exception = e
+                            key_short = self.api_keys[i][:10] + "..." + self.api_keys[i][-4:]
+                            print(f"[API Key] Stream Key {i + 1}/{len(self.api_keys)} ({key_short}) 中途失败: {type(e).__name__}，不重试（避免 token 重复）", flush=True)
                             raise
-                        last_exception = e
-                        key_short = self.api_keys[i][:10] + "..." + self.api_keys[i][-4:]
-                        print(f"[API Key] Stream Key {i + 1}/{len(self.api_keys)} ({key_short}) 中途失败: {type(e).__name__}，不重试（避免 token 重复）")
+                    self.attempt_count = 0  # 流建立成功即复位轮换计数
+                    return _wrapped()
+                except _RETRYABLE as e:
+                    if self._is_non_retryable(e):
                         raise
-                self.attempt_count = 0  # 流建立成功即复位轮换计数
-                return _wrapped()
-            except _RETRYABLE as e:
-                if self._is_non_retryable(e):
-                    raise
-                last_exception = e
-                key_short = self.api_keys[i][:10] + "..." + self.api_keys[i][-4:]
-                print(f"[API Key] Stream Key {i + 1}/{len(self.api_keys)} ({key_short}) 启动失败: {type(e).__name__}: {str(e)[:120]}，换下一个")
+                    last_exception = e
+                    key_short = self.api_keys[i][:10] + "..." + self.api_keys[i][-4:]
+                    print(f"[API Key] Stream Key {i + 1}/{len(self.api_keys)} ({key_short}) 启动失败: {type(e).__name__}: {str(e)[:120]}，换下一个", flush=True)
+                    continue
+            # 建立阶段全部失败：若为配额/限流 → 挂起数分钟再整体重试
+            if last_exception is not None and self._is_quota_error(last_exception) and quota_used < self.quota_retry_rounds:
+                quota_used += 1
+                self._quota_wait(quota_used)
                 continue
+            break
         if last_exception is not None:
             raise last_exception
         raise RuntimeError(
@@ -271,12 +334,15 @@ def _build_openai_client(**kwargs):
         "model": kwargs.pop("model"),
         "temperature": kwargs.get("temperature", 0),
         "max_tokens": kwargs.get("max_tokens", None),
-        "timeout": kwargs.get("timeout", 30),
+        "timeout": kwargs.get("timeout", _TIMEOUT_DEFAULT),
         "max_retries": kwargs.get("max_retries", 0),  # 重试交给 RotatingKeyChatOpenAI 统一负责
         "base_url": base_url,
     }
     # 任何 key 数（含单 key）都走轮换骨架——单 key 也能享受退避重试保护
-    return RotatingKeyChatOpenAI(api_keys=api_keys, max_rounds=5, **common)
+    return RotatingKeyChatOpenAI(
+        api_keys=api_keys, max_rounds=5,
+        quota_wait_seconds=_QUOTA_WAIT_SECONDS, quota_retry_rounds=_QUOTA_RETRY_ROUNDS,
+        **common)
 
 
 def create_llm(provider: str = "openai_compatible", **kwargs):

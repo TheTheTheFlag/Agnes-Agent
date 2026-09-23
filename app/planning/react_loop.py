@@ -96,6 +96,8 @@ class ReActLoop:
         # 把 max_iterations 跑满也收不了尾（dag_executor.py:79 _run_node 拿到
         # "[自动判定] 未调用..." 才最终收尾，但 LLM 调用次数已经爆炸）。
         no_progress_streak = 0
+        # 「继续执行」引导：最多注入 3 轮逐步升级（_nudge_continue 检测一次后即进入强推循环）
+        self._nudge_used = 0
 
         while iteration < self.max_iterations:
             iteration += 1
@@ -170,6 +172,16 @@ class ReActLoop:
                     except Exception:
                         pass  # 重试失败：保留原空响应，走统一兜底
                 if not tool_calls:
+                    # 用户「好的/开始吧/继续」短促催促 + 上一轮助手正在干工具活 → 注入「继续执行」引导，
+                    # 让模型真的通过工具继续（而不是把"我正在重写..."当最终答复敷衍过去）。
+                    # 最多升 3 级：第 1 步检测到意图后，后续 2 步持续强推（纯文本不得作为最终答复混过去）。
+                    if self._nudge_used < 3 and (self._nudge_used > 0 or (iteration == 1 and self._nudge_continue(messages))):
+                        self._nudge_used += 1
+                        _guide = self._nudge_guide(self._nudge_used)
+                        messages.append(response)
+                        messages.append(SystemMessage(content=_guide))
+                        print(f"[ReAct] 检测到“继续执行”意图，注入强制工具执行引导（第 {self._nudge_used}/3 级）", flush=True)
+                        continue
                     final_answer = self._extract_final_answer(response)
                     break
 
@@ -412,6 +424,59 @@ class ReActLoop:
         if isinstance(raw, list):
             return any(str((x.get("text", "") if isinstance(x, dict) else x) or "").strip() for x in raw)
         return bool(str(raw or "").strip())
+
+    _NUDGE_RE = re.compile(
+        r"(好的|开始吧|开始|继续|继续吧|接着|然后|嗯|行吧|可以|对|就是|再|再来|重新|重来|动手|执行|去做|做吧|搞|整|冲|等|快点|OK|ok)",
+        re.IGNORECASE,
+    )
+    _PROMISE_RE = re.compile(r"(重写|重新(生成|校验|整理|跑)|开始(执行|工作|生成)|正在|我来|重跑|继续|稍后|马上|随即)")
+
+    def _nudge_continue(self, messages):
+        """用户短促催促（如「好的/开始吧/继续」）+ 上一轮助手确在干工具活/给了口头承诺 → 应强制继续实际操作。"""
+        # 找到当前用户消息（回放末尾的 human）
+        idx = len(messages) - 1
+        while idx >= 0 and getattr(messages[idx], "type", "") != "human":
+            idx -= 1
+        if idx < 0:
+            return False
+        utxt = str(getattr(messages[idx], "content", "") or "").strip()
+        if not utxt or len(utxt) > 8:
+            return False
+        if not self._NUDGE_RE.search(utxt):
+            return False
+        # 再往前找最近的 assistant
+        idx -= 1
+        while idx >= 0 and getattr(messages[idx], "type", "") != "ai":
+            idx -= 1
+        if idx < 0:
+            return False
+        prev = messages[idx]
+        if getattr(prev, "tool_calls", None):
+            return True
+        return bool(self._PROMISE_RE.search(str(getattr(prev, "content", "") or "")))
+
+    def _nudge_guide(self, level: int) -> str:
+        """「继续执行」引导文案：分 3 级升级，逐级更强硬。"""
+        if level >= 3:
+            return (
+                "[继续执行·最后提醒] 你已经连续多轮只输出文字而没有调用任何工具。"
+                "本回合的工作必须通过真实工具动作才能推进（read_file 定位目标文件 / execute_command 运行技能脚本复用结果 / write_file 写入或修正 / 再校验）。"
+                "现在请直接调用至少一个工具开始执行，不要再输出计划或承诺；"
+                "若确实无法继续（比如缺少关键输入），请明确说出阻塞原因并结束。"
+            )
+        if level >= 2:
+            return (
+                "[继续执行] 上一条你仍然只输出了文字而没有调用工具。"
+                "用户催促的工作默认必须产生真实工具动作（read_file / execute_command / write_file 等）才算完成。"
+                "请不要输出计划或口头承诺，直接调用工具执行；若确实需要用户提供额外信息，请调用交互工具询问并说明原因。"
+            )
+        return (
+            "[继续执行] 用户仅简短催促（如“好的/开始吧/继续”），要求继续上一步的实际工作。"
+            "请不要再只输出口头承诺：立即通过工具实际操作来推进——"
+            "read_file 定位当前未完成的目标文件 → execute_command 重新运行技能脚本 → write_file 写入/修正 → 再执行校验直到通过。"
+            "全部完成后，用 2–3 句话汇报每个产物文件的路径。"
+            "例外：若你判断确实无需继续操作（例如用户只是在致谢/闲聊），可给出简短说明并直接结束本回合。"
+        )
 
     def _extract_final_answer(self, response):
         # content 可能是 str / list（多模态）/ None，统一转成 str 再处理，避免 TypeError / 空回退
