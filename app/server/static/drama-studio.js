@@ -198,7 +198,7 @@ ${v.artPath ? `art.json（工作区相对路径，供光照/场景/道具对账�
     icon: "🎬",
     name: "出分镜",
     color: "#ff6b6b",
-    desc: "把剧本切成分镜三层结构：段（≤15s）→ 分镜（认领节拍）→ 分镜图（关键帧），每段自带 MiniMax H3 视频提示词，产出 storyboard.json（17 道质量门）。script.json 是硬前提。",
+    desc: "把剧本切成分镜三层结构：段（≤15s）→ 分镜（认领节拍）→ 分镜图（关键帧），每段自带 Agnes 视频模型提示词（如 agnes-video-2.5），产出 storyboard.json（17 道质量门）。script.json 是硬前提。",
     fields: [
       { key: "scriptPath", label: "script.json 路径", type: "path", placeholder: "必填（工作区相对路径），分镜离开剧本没有意义" },
       { key: "scriptText", label: "或：粘贴 script.json 内容", type: "textarea", rows: 5, placeholder: "没有路径文件就整份贴进来，先落到临时文件" },
@@ -211,7 +211,7 @@ ${v.artPath ? `art.json（工作区相对路径，供光照/场景/道具对账�
       const upsNote = ups.length
         ? `可上游（有则用，供提示词禁人名/场景名回显）：${ups.join("；")}`
         : "无额外上游（可直接用脚本自带的场景/角色名）。";
-      return `请使用 novel-storyboard 技能，为这部短剧出分镜（段/分镜/分镜图 + MiniMax H3 视频提示词）。
+      return `请使用 novel-storyboard 技能，为这部短剧出分镜（段/分镜/分镜图 + Agnes 视频模型提示词（如 agnes-video-2.5））。
 项目/剧名：${title}
 一批切 ${v.batch || 3} 集
 ${v.scriptPath ? `script.json（工作区相对路径，先 read_file）：${v.scriptPath}` : `script.json 内容（先落到临时 .txt 再进技能流程）：\n\n${v.scriptText}`}
