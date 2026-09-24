@@ -96,6 +96,13 @@ function drmSrcNote(v, textKey, pathKey) {
   return "";
 }
 
+/* 项目名安全化：标题会拼进交付目录路径（deliverables/小说/<书名>/ 等），
+   必须去除路径分隔符/空白等非法字符，空则回退默认标题（防 `..`、反斜杠逃逸）。 */
+function drmSafeTitle(t, dft) {
+  const s = String(t || "").trim().replace(/[\\/:*?"<>|\s]+/g, "").slice(0, 30);
+  return s || dft;
+}
+
 const _PLATFORM_OPTS = [["起点", "起点中文网"], ["番茄", "番茄小说"], ["晋江", "晋江文学城"], ["知乎", "知乎盐选"], ["刺猬猫", "刺猬猫"], ["不限", "不限平台"]];
 
 /* ————————————————————— 分组一：短剧创作（novel-* 前导技能） ————————————————————— */
@@ -427,6 +434,10 @@ function renderDrmModule(el, moduleKey) {
       </div>
       <div class="drm-desc">${m.desc}</div>
       <div class="drm-fields">
+        <div class="st-block drm-title-block">
+          <div class="st-block-hd"><span>${drmGroupOf(m.key).key === "novel" ? "书名 / 项目名（可选）" : "剧名（可选）"}</span><span class="st-block-tip">${drmGroupOf(m.key).key === "novel" ? "留空用默认「我的新书」" : "留空用默认「我的AI短剧」"}；填了则按此建独立交付目录，多部作品互不覆盖</span></div>
+          <input type="text" class="d-input" id="drm-title-${m.key}" placeholder="${drmGroupOf(m.key).key === "novel" ? "如：重生之都市仙尊" : "如：星际边缘的曙光"}" spellcheck="false">
+        </div>
         ${m.fields.map((f) => (f.type === "radio" ? drmRadioHtml(m.key, f) : drmFieldHtml(m.key, f))).join("")}
       </div>
       <div class="drm-actions">
@@ -442,7 +453,8 @@ function renderDrmModule(el, moduleKey) {
     if (!mod) return;
     if (DRM.run && DRM.run.streaming) { toast("「" + mod.name + "」：当前有模块正在生成中，请先等本轮结束或点「⏹ 停止」", "warn"); return; }
     const group = CREATIVE_GROUPS.find((g) => g.modules.some((x) => x.key === mod.key)) || CREATIVE_GROUPS[0];
-    const title = group.key === "novel" ? SUMERU_TITLE_DFT : DRAMA_TITLE_DFT;
+    const _tEl = $("#drm-title-" + mod.key, box);
+    const title = drmSafeTitle(_tEl ? _tEl.value : "", group.key === "novel" ? SUMERU_TITLE_DFT : DRAMA_TITLE_DFT);
     const v = drmCollect(box, mod.key, mod.fields);
     const msg = mod.build(v, title);
     if (!msg) { toast("请先填写该模块的必填输入（正文粘贴 或 产物路径）", "error"); return; }
