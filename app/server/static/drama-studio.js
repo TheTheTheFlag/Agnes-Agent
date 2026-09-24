@@ -21,13 +21,13 @@ const SUMERU_TITLE_DFT = "我的新书";
 /* 公共说明尾巴（短剧技能指令的收尾约束） */
 function DRAMA_TAIL(title) {
   return `
-要求：严格按该技能的 SKILL.md 逐步执行。先用 read_skill 读取技能说明，再按它的 Step 顺序走：定位输入 → seed/chunk → 逐批生成 → validate → render；所有脚本（node {baseDir}/scripts/*.mjs，零依赖）与产物都放在当前用户自己的工作区 deliverables/短剧/${title}/ 下。validate 必须全绿才 render，报了质量门就就地修正后重跑。出图步骤统一用 Agnes 图片创作台（read_skill agnes-media 后照 SKILL.md 执行）：先写 image.sheet 提示词（必须含当前画风预设的 render 句、全英文、不得出现人名），再执行 python app/skills_builtin/agnes-media/media.py image --prompt "<image.sheet>" --size 2K --ratio 16:9，stdout 出现 FILE= 即成功，把该文件复制到 images/<slug>-sheet.png；平台有 Agnes 出图能力，不允许以"没有出图环境"为由跳过出图。全程用中文汇报，完成后用 2–3 句话列出各产物文件路径。`;
+要求：严格按该技能的 SKILL.md 逐步执行。先用 read_skill 读取技能说明，再按它的 Step 顺序走：定位输入 → seed/chunk → 逐批生成 → validate → render；所有脚本（node {baseDir}/scripts/*.mjs，零依赖）与产物都放在**交付目录绝对路径** data/users/<当前用户>/deliverables/短剧/${title}/ 下（<当前用户> 通常为 Mirror，先 ls data/users/ 确认，等于系统提示词中的交付物目录；文件工具相对路径以用户工作区为基准，shell 命令须先 cd data/users/<当前用户> 或写全 data/users/ 前缀，禁止裸写 deliverables/... 相对路径）。validate 必须全绿才 render，报了质量门就就地修正后重跑。出图步骤统一用 Agnes 图片创作台（read_skill agnes-media 后照 SKILL.md 执行）：先写 image.sheet 提示词（必须含当前画风预设的 render 句、全英文、不得出现人名），再执行 python app/skills_builtin/agnes-media/media.py image --prompt "<image.sheet>" --size 2K --ratio 16:9，stdout 出现 FILE= 即成功，把该文件复制到 images/<slug>-sheet.png；平台有 Agnes 出图能力，不允许以"没有出图环境"为由跳过出图。全程用中文汇报，完成后用 2–3 句话列出各产物文件路径。`;
 }
 
 /* 公共说明尾巴（sumeru 小说写作技能指令的收尾约束） */
 function SUMERU_TAIL(title) {
   return `
-要求：严格按该技能的 SKILL.md 执行。先用 read_skill 读取技能说明，按其 Step 顺序走；先在当前用户自己的工作区建目录 deliverables/小说/${title}/ 作为本次操作的根目录（chapters/、.sumeru/、publish/ 等一律放在其内），全部使用工作区相对路径，不要触碰工作区之外的任何路径；涉及章节级批量操作的步骤，按 SKILL.md 规则使用子 Agent 并行处理（每个子 Agent 最多负责 3 个章节），完成后必须校验章节数与细纲一致。全程用中文汇报，完成后用 2–3 句话列出各产物文件路径。`;
+要求：严格按该技能的 SKILL.md 执行。先用 read_skill 读取技能说明，按其 Step 顺序走；先在**交付目录绝对路径** data/users/<当前用户>/deliverables/小说/${title}/ 建根目录（<当前用户> 通常为 Mirror，先 ls data/users/ 确认，等于系统提示词中的交付物目录；chapters/、.sumeru/、publish/ 等一律放在其内）。文件工具相对路径以用户工作区为基准（deliverables/小说/${title}/ 即该绝对目录）；shell 命令在服务根目录执行，必须先 cd data/users/<当前用户> 或写全 data/users/ 前缀，禁止裸写 mkdir -p deliverables/...（会落到服务根目录，用户看不到）；不要触碰工作区之外的任何路径；涉及章节级批量操作的步骤，按 SKILL.md 规则使用子 Agent 并行处理（每个子 Agent 最多负责 3 个章节），完成后必须校验章节数与细纲一致。全程用中文汇报，完成后用 2–3 句话列出各产物文件路径。`;
 }
 
 /* 字段渲染（id 规则 drm-<模块健>-<字段健>） */

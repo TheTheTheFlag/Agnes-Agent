@@ -8,12 +8,12 @@ type: skill
 
 ## 交付目录约定（先读，全程生效）
 
-本 skill 的**根目录**是用户工作区的 `deliverables/小说/<书名>/`（工作区相对路径），`chapters/`、`.sumeru/`、`publish/` 等一律放在其内。启动消息若已给出书名就用它；没给出就用「我的新书」占位，并在开工前向用户确认。规则：
+本 skill 的**根目录**（绝对路径）= `data/users/<当前用户>/deliverables/小说/<书名>/`（`<当前用户>` 通常为 Mirror，等于系统提示词中的「交付物目录 deliverables_dir」，可 `ls data/users/` 确认），`chapters/`、`.sumeru/`、`publish/` 等一律放在其内。启动消息若已给出书名就用它；没给出就用「我的新书」占位，并在开工前向用户确认。规则：
 
-1. **建根目录**：开工第一步先 `mkdir -p deliverables/小说/<书名>/`，后续所有「当前工作目录」「输出目录」「chapters/」都是指这个根目录，**不做第二选择**——绝不把产物写到别的工作区或系统临时目录。
+1. **建根目录**：开工第一步先在服务根目录下 `mkdir -p data/users/Mirror/deliverables/小说/<书名>/`（先 `ls data/users/` 确认当前用户名，非 Mirror 就换）并 `cd` 进去。**文件工具的相对路径以用户工作区为基准**：`deliverables/小说/<书名>/` 即上面的绝对目录；但 **shell 命令在服务根目录执行**，必须先 `cd data/users/Mirror` 或写全 `data/users/Mirror/deliverables/...` 前缀，禁止裸写 `mkdir -p deliverables/...`（会落到服务根目录，用户看不到）。后续所有「当前工作目录」「输出目录」「chapters/」都是指这个根目录，**不做第二选择**——绝不把产物写到别的工作区、服务根目录的 `deliverables/` 或系统临时目录。
 2. **增量落盘**：写一章存一章（`chapters/`），不攒到最后一次性写;`.sumeru/` 内部数据也同步落盘。
 3. **校验一致**：每完成一批就在根目录下 `ls -l chapters/` 核对章数与细纲（`.sumeru/outline/chapter-outlines.json`）一致、文件非空，全部真实存在才允许汇报完成。
-4. **只写自己的工作区**：全部使用工作区相对路径，禁止触碰 `deliverables/` 之外的路径，禁止读取其它书名/旧项目的章节冒充本作产物。
+4. **只写交付目录**：一切落盘必须是 `data/users/<当前用户>/deliverables/...` 名下（绝对路径、shell 写全 `data/users/` 前缀、或文件工具写 `deliverables/...` 相对路径均可），禁止触碰工作区之外、服务根目录的 `deliverables/` 遗留目录或其它书名的旧项目文件冒充本作产物。
 
 
 ### 触发关键词

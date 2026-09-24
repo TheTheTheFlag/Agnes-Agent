@@ -55,12 +55,26 @@ def _root() -> str:
     return os.path.abspath(str(WORKSPACE_DIR))
 
 
+# 用户承载目录：管理员相对路径遇到这些前缀也按用户工作区解析，
+# 与「普通用户=工作区」语义一致，避免交付物/上传文件落到服务根目录。
+_WORKSPACE_PREFIXES = ("deliverables", "uploads", "lightrag_storage", "skills")
+
+
+def _root_for(path: str) -> str:
+    """按路径挑选解析基准：用户承载目录相对路径优先用户工作区；其余沿用 _root()。"""
+    rel = path.replace("\\", "/").lstrip("./")
+    if not os.path.isabs(path) and rel.split("/", 1)[0].lower() in _WORKSPACE_PREFIXES:
+        return os.path.abspath(str(WORKSPACE_DIR))
+    return _root()
+
+
 def _resolve_path(path: str) -> str:
     """把相对/绝对路径解析为可操作的绝对路径。
 
-    普通用户解析后必须仍处于自己的用户工作区内；管理员不限制目录。
+    普通用户解析后必须仍处于自己的用户工作区内；管理员不限制目录
+    （用户承载目录 deliverables/ uploads/ 等按用户工作区解析，其余以项目根解析）。
     """
-    root = _root()
+    root = _root_for(path)
     p = os.path.abspath(os.path.join(root, path or ""))
     if _is_admin_user():
         return p
@@ -74,7 +88,7 @@ def _resolve_read_path(path: str) -> str:
     （app/skills/）只读放行**——短剧创作等系统级工作台要读技能 SKILL.md 的
     references/ 与脚本；写操作仍由写路径（_resolve_path）严格限定在工作区。
     """
-    root = _root()
+    root = _root_for(path)
     if _is_admin_user():
         return os.path.abspath(os.path.join(root, path or ""))
     p = os.path.abspath(os.path.join(root, path or ""))
@@ -111,9 +125,10 @@ def ls(directory: str = ".", recursive: bool = False) -> str:
     d = _resolve_read_path(directory)
     if not os.path.isdir(d):
         return json.dumps({"error": f"目录不存在: {directory}"}, ensure_ascii=False)
+    relbase = _root_for(directory)
     out = []
     for root, dirs, files in os.walk(d):
-        rel = os.path.relpath(root, _root())
+        rel = os.path.relpath(root, relbase)
         rel = '' if rel == '.' else rel
         for name in sorted(dirs + files):
             full = os.path.join(root, name)

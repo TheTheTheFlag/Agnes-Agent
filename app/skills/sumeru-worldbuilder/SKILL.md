@@ -8,12 +8,12 @@ type: skill
 
 ## 交付目录约定（先读，全程生效）
 
-本 skill 的**根目录**是用户工作区的 `deliverables/小说/<书名>/`（工作区相对路径），`chapters/`、`.sumeru/`、`publish/` 等一律放在其内。启动消息若已给出书名就用它；没给出就用「我的新书」占位，并在开工前向用户确认。规则：
+本 skill 的**根目录**（绝对路径）= `data/users/<当前用户>/deliverables/小说/<书名>/`（`<当前用户>` 通常为 Mirror，等于系统提示词中的「交付物目录 deliverables_dir」，可 `ls data/users/` 确认），`chapters/`、`.sumeru/`、`publish/` 等一律放在其内。启动消息若已给出书名就用它；没给出就用「我的新书」占位，并在开工前向用户确认。规则：
 
-1. **建根目录**：开工第一步先 `mkdir -p deliverables/小说/<书名>/`，后续所有「当前工作目录」「输出目录」「chapters/」都是指这个根目录，**不做第二选择**——绝不把产物写到别的工作区或系统临时目录。
+1. **建根目录**：开工第一步先在服务根目录下 `mkdir -p data/users/Mirror/deliverables/小说/<书名>/`（先 `ls data/users/` 确认当前用户名，非 Mirror 就换）并 `cd` 进去。**文件工具的相对路径以用户工作区为基准**：`deliverables/小说/<书名>/` 即上面的绝对目录；但 **shell 命令在服务根目录执行**，必须先 `cd data/users/Mirror` 或写全 `data/users/Mirror/deliverables/...` 前缀，禁止裸写 `mkdir -p deliverables/...`（会落到服务根目录，用户看不到）。后续所有「当前工作目录」「输出目录」「chapters/」都是指这个根目录，**不做第二选择**——绝不把产物写到别的工作区、服务根目录的 `deliverables/` 或系统临时目录。
 2. **增量落盘**：写一章存一章（`chapters/`），不攒到最后一次性写;`.sumeru/` 内部数据也同步落盘。
 3. **校验一致**：每完成一批就在根目录下 `ls -l chapters/` 核对章数与细纲（`.sumeru/outline/chapter-outlines.json`）一致、文件非空，全部真实存在才允许汇报完成。
-4. **只写自己的工作区**：全部使用工作区相对路径，禁止触碰 `deliverables/` 之外的路径，禁止读取其它书名/旧项目的章节冒充本作产物。
+4. **只写交付目录**：一切落盘必须是 `data/users/<当前用户>/deliverables/...` 名下（绝对路径、shell 写全 `data/users/` 前缀、或文件工具写 `deliverables/...` 相对路径均可），禁止触碰工作区之外、服务根目录的 `deliverables/` 遗留目录或其它书名的旧项目文件冒充本作产物。
 
 
 ### 触发关键词
@@ -243,7 +243,7 @@ flowchart LR
 - **预期篇幅**：短篇（20万字内）/中篇（20-50万字）/长篇（50-100万字）/超长篇（100万字以上），默认中篇
 - **写作风格**：快节奏/均衡/详写/文艺，默认均衡
 - **整体调性**：幽默/严肃/励志/暗黑，默认中立
-- **输出目录**：交付根目录，即 `deliverables/小说/<书名>/`（见头部「交付目录约定」，
+- **输出目录**：交付根目录（绝对路径）= `data/users/Mirror/deliverables/小说/<书名>/`（见头部「交付目录约定」，
    不做 ./output 这类第二选择）
 - **中断恢复**：传入上次的创作会话ID，可从断点恢复
 - **跳过阶段**：跳过指定阶段（topic/outline/write/review/polish/final），适用于续创或团队分工
@@ -295,7 +295,7 @@ flowchart LR
 | `INVALID_GENRE` | 不支持的作品类型 | 传入的 genre 参数不在支持列表中 | 检查类型拼写，支持的类型：玄幻、都市、仙侠、科幻、言情、悬疑、历史、游戏、竞技、军事、武侠、轻小说 |
 | `KEYWORDS_TOO_LONG` | 关键词过长 | keywords 参数超过100字符限制 | 精简关键词，保留最核心的3-5个 |
 | `DEPENDENCY_MISSING` | 缺少依赖技能 | 未安装所需的子技能（topic等） | 运行 `/find-skills ` 查找并安装所有依赖技能 |
-| `OUTPUT_DIR_PERMISSION` | 输出目录无权限 | 交付根目录 `deliverables/小说/<书名>/` 无写入权限 | 确认工作区目录存在且可写，再重跑 |
+| `OUTPUT_DIR_PERMISSION` | 输出目录无权限 | 交付根目录 `data/users/Mirror/deliverables/小说/<书名>/` 无写入权限 | 确认用户工作区目录存在且可写，再重跑 |
 | `INVALID_SESSION_ID` | 无效的会话ID | resume 参数传入的会话ID不存在 | 检查会话ID是否正确，或重新开始创作 |
 | `STAGE_SKIP_CONFLICT` | 阶段跳过冲突 | 跳过的阶段与后续阶段有依赖关系 | 移除对前置阶段的跳过，或提供必要的前置文件 |
 | `CONTENT_GENERATION_FAILED` | 内容生成失败 | 创作过程中遇到内容审核或模型限制 | 调整关键词或风格参数，或分阶段手动确认 |
@@ -304,7 +304,7 @@ flowchart LR
 - **自动重试**：对于临时性网络错误，自动重试3次，间隔5秒
 - **断点保存**：每完成一个阶段自动保存状态，支持从中断点恢复
 - **回滚选项**：对不满意的阶段可选择回滚到上一节点重新开始
-- **错误报告**：生成详细的错误日志文件，位于交付根目录的 `.sumeru/session/error.log`（即 `deliverables/小说/<书名>/.sumeru/session/error.log`）
+- **错误报告**：生成详细的错误日志文件，位于交付根目录的 `.sumeru/session/error.log`（即 `data/users/Mirror/deliverables/小说/<书名>/.sumeru/session/error.log`）
 
 ### 进阶使用场景
 
