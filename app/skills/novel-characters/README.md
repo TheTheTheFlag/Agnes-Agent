@@ -92,6 +92,10 @@ node scripts/novel-characters.mjs seed outline.json > seed.json
 | --- | --- |
 | `realistic` | 半写实厚涂，皮肤有毛孔和肌理，布料有织纹磨损。默认 |
 | `ghibli` | 吉卜力式手绘赛璐璐，等宽墨线、单层柔和阴影、平涂色块 |
+| `pixar3d` | 3D 影视级卡通（皮克斯 / 盲盒潮玩质感），柔和全局光，AI 漫剧主流 |
+| `webtoon` | 韩漫彩漫，半透明光泽上色，现代都市首选 |
+| `shinkai` | 新海诚式电影感日漫，天光体积光，青春情感题材 |
+| `guoman` | 2D 国漫厚涂，古风 / 玄幻顶配质感 |
 
 两个可以组合：`--lang ja --style ghibli`。
 

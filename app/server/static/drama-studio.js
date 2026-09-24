@@ -131,7 +131,7 @@ ${drmSrcNote(v, "srcText", "srcPath")}${DRAMA_TAIL(title)}`;
     color: "#ff9f43",
     desc: "从小说拆出角色表 / 人物画像 / 形象提示词 / 音色提示词（含角色设定图提示词）。有 outline.json 就给出来走 seed，人物清单直接沿用大纲分档。",
     fields: [
-      { key: "style", label: "出图画风", type: "select", default: "realistic", options: [["realistic", "半写实厚涂（默认）"], ["ghibli", "吉卜力手绘赛璐璐"]] },
+      { key: "style", label: "出图画风", type: "select", default: "realistic", options: [["realistic", "半写实厚涂（默认）"], ["ghibli", "吉卜力手绘赛璐璐"], ["pixar3d", "3D影视级卡通（皮克斯/盲盒）"], ["webtoon", "韩漫彩漫（webtoon）"], ["shinkai", "新海诚式电影感日漫"], ["guoman", "2D国漫厚涂（古风顶配）"]] },
       { key: "lang", label: "报告语言", type: "text", default: "中文", placeholder: "中文 / English / 日本語 …" },
       { key: "outlinePath", label: "可选：outline.json 路径", type: "path", placeholder: "有上一模块产物就填，如 deliverables/短剧/xxx/outline.json，会走 seed 沿用角色清单" },
       { key: "srcText", label: "原著正文（粘贴）", type: "textarea", rows: 5, placeholder: "无 outline 时需给原文。粘贴正文或直接给文件路径。" },

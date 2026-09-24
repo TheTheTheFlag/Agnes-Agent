@@ -246,6 +246,58 @@ export const STYLE_PRESETS = {
       'photorealistic, 3d render, hyperrealistic skin texture, visible pores, subsurface scattering, harsh contrast, heavy painterly rendering, muddy or desaturated colours, gritty texture overlay, extra fingers, malformed hands, text, watermark, signature, busy or patterned background',
     tags: ['ghibli-like', 'cel shading', 'hand-painted', 'character sheet', 'flat daylight'],
   },
+
+  pixar3d: {
+    label: { zh: '3D影视级卡通（皮克斯/盲盒）', en: '3D Pixar-style animation', ja: 'ピクサー風3Dアニメ' },
+    render:
+      'Premium 3D animated character render in the style of a mainstream family-movie studio (Pixar/DreamWorks-inspired): plush rounded proportions, oversized expressive eyes, soft global illumination, clean sculpted volumes with a gentle glossy material response',
+    surface:
+      'Skin as smooth soft 3D subsurface material with a gentle porcelain sheen — clean and dimensional but never plastic-waxy; eyes large and luminous with a bright ring-shaped specular highlight and a soft gradient iris; hair as sculpted rounded 3D clumps with clean sheen bands rather than individual strands; clothing as soft 3D cloth with pillowy folds and readable knit or leather texture scaled to the toy-like figure',
+    lighting:
+      'Soft three-point studio lighting that wraps every volume: a warm key light sculpting cheeks and brow, a gentle rim light on the hair silhouette, and a low-contrast fill keeping shadows pillowy; even and clean on the right-zone figures so the model sheet stays readable and cut-out friendly',
+    negative:
+      'photorealistic photography, hyperrealistic skin with pores and blemishes, gritty film grain, harsh flash lighting, uncanny valley proportions, stiff mannequin posing, extra fingers, malformed hands, text, watermark, signature, busy or patterned background',
+    tags: ['3d render', 'pixar-style', 'toy-like', 'character sheet', 'studio lighting'],
+  },
+
+  webtoon: {
+    label: { zh: '韩漫彩漫（webtoon）', en: 'Korean webtoon manhwa', ja: '韓国ウェブトゥーン' },
+    render:
+      'Korean webtoon manhwa illustration with clean confident linework, luminous semi-glazed cell shading, modern fashion-forward character design, bright evocative colouring with soft glowing gradients',
+    surface:
+      'Skin rendered as smooth dewy light-toned gradients with a soft translucent glow — no pores, no dermis texture; eyes large, liquid and magnetic with layered shine highlights, defined lashes and a subtle lower-lid accent; hair in sleek silhouette-clean strands with bright flowing highlight streaks; clothing modern and tailored with crisp seams, glossy satin or leather accents and minimal fabric texture',
+    lighting:
+      'Bright even webtoon lighting like a polished studio portrait: soft ambient fill, gentle rim glow catching hair and shoulders, small sparkle highlights on eyes and jewellery; shadows kept single-tone and soft, no heavy chiaroscuro, backdrop clean and flat',
+    negative:
+      'photorealistic, 3d render, heavy painterly strokes, thick impasto, gritty texture, harsh contrast, muddy desaturated colours, realistic fabric weave, extra fingers, malformed hands, text, watermark, signature, busy or patterned background',
+    tags: ['webtoon', 'manhwa', 'semi-glazed shading', 'clean linework', 'character sheet'],
+  },
+
+  shinkai: {
+    label: { zh: '新海诚式电影感日漫', en: 'Makoto Shinkai-style anime', ja: '新海誠風アニメ' },
+    render:
+      'Cinematic anime illustration in the style of Makoto Shinkai feature films: breathtaking luminous skies, volumetric lens light and soft haze, hyper-detailed scenery behind clean elegant 2D anime character linework',
+    surface:
+      'Skin with clean flat anime shading and a warm natural bloom — perfectly smooth, no texture and no pores; eyes deepened with gradient irises that mirror the sky and light, one small glistening highlight; hair as sleek clean strands with luminous rim streaks catching the environment light; clothing with soft fabric gradients and subtle sheen, everyday wear rendered with loving seasonal detail',
+    lighting:
+      'Golden-hour and blue-hour volumetric light: glowing sunbursts, soft haze, gentle lens flare and light shafts crossing the frame; characters wrapped in warm rim and fill light that sinks them naturally into the luminous scenery, shadows long and soft',
+    negative:
+      'photorealistic, 3d render, flat cheap digital colouring, muddy colours, harsh contrast, over-saturated HDR, gritty film grain, thick impasto strokes, extra fingers, malformed hands, text, watermark, signature, busy cluttered background',
+    tags: ['shinkai-style', 'cinematic', 'volumetric light', 'anime background art', 'character sheet'],
+  },
+
+  guoman: {
+    label: { zh: '2D国漫厚涂（古风顶配）', en: '2D Chinese-anime heavy painterly', ja: '中華風2D厚塗り' },
+    render:
+      'Premium 2D Chinese-animation illustration with refined heavy painterly rendering: flowing elegant linework, layered colour depth with wet-on-wet blending, ornate costume and accessory detail, burnished cinematic colour grading',
+    surface:
+      'Skin with luminous painterly tones and a delicate blush gradient — smooth porcelain, no pores, no dermis texture; eyes long and expressive with refined double-lid detail, shimmering gradient irises and an elegant dagger-shaped shine; hair as dense silky painterly strands with flowing luminous highlights; clothing as sumptuous layered fabric — silk, brocade, layered robes — with gold and jade accents where every fold and embroidery reads intentional',
+    lighting:
+      'Atmospheric cinematic lighting for wuxia and xianxia scenes: warm volumetric beams and gentle haze, a soft rim light tracing robes and hair, diffuse fill with delicate shadows filtering through screens and blinds — moody but never muddy',
+    negative:
+      'photorealistic, 3d render, western cartoon style, chibi proportions, flat cheap digital colouring, harsh contrast, muddy desaturated colours, gritty texture overlay, extra fingers, malformed hands, text, watermark, signature, busy or patterned background',
+    tags: ['chinese anime', '2d', 'heavy painterly', 'hanfu detail', 'character sheet', 'cinematic lighting'],
+  },
 };
 
 export const SUPPORTED_STYLES = Object.keys(STYLE_PRESETS);

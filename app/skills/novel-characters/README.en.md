@@ -86,6 +86,10 @@ Two things never follow the language: **image and TTS prompts stay English** (th
 | --- | --- |
 | `realistic` | Semi-realistic painterly — skin with pores and texture, fabric with weave and wear. Default |
 | `ghibli` | Ghibli-like hand-painted cel — even ink linework, a single soft shadow tone, flat colour |
+| `pixar3d` | 3D movie-grade cartoon (Pixar / blind-box toy look) — soft global illumination, mainstream in AI comic dramas |
+| `webtoon` | Korean webtoon manhwa — semi-glazed luminous shading, go-to for urban romance |
+| `shinkai` | Makoto Shinkai-style cinematic anime — luminous skies, volumetric light |
+| `guoman` | 2D Chinese-anime heavy painterly — premium wuxia / xianxia look |
 
 They combine: `--lang ja --style ghibli`.
 

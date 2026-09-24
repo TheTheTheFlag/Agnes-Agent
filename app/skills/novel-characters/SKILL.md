@@ -5,7 +5,7 @@ description: |
   从小说或短故事里拆出角色表、人物画像、形象提示词、音色提示词，
   并给每个角色出角色设定图（左半身像 + 右全身三视图 + 细节条），产出 JSON + Markdown + 可交互的 report.html。
   报告语言可指定（--lang），默认中文，任意语言都支持；
-  出图风格可指定（--style），默认半写实，也可以出吉卜力动画风。
+  出图风格可指定（--style）：默认半写实厚涂（realistic），另有吉卜力（ghibli）、3D 皮克斯/盲盒（pixar3d）、韩漫 webtoon、新海诚式日漫（shinkai）、2D 国漫厚涂（guoman）可选。
   零依赖、零 API key；出图首选 Agnes 图片创作台（media.py，密钥由账号库自动读取），或 codex 内置 $imagegen（可选）。
   Use when asked to 拆小说角色、分析人物、生成角色卡、character sheets from a novel。
 allowed-tools:
@@ -69,7 +69,7 @@ metadata:
 
 ### Step 0.5 — 确定画风
 
-用户可以指定出图风格：**默认 `realistic`**（半写实厚涂），想要动画质感就用 `ghibli`（吉卜力式手绘赛璐璐）。
+用户可以指定出图风格：**默认 `realistic`**（半写实厚涂）。可用风格见 `references/style-presets.md` 全表：`ghibli`（吉卜力式手绘赛璐璐）、`pixar3d`（3D 影视级卡通/皮克斯/盲盒）、`webtoon`（韩漫彩漫）、`shinkai`（新海诚式电影感日漫）、`guoman`（2D 国漫厚涂）。
 
 ```bash
 node {baseDir}/scripts/novel-characters.mjs styles   # 打印预设的完整内容
@@ -77,7 +77,7 @@ node {baseDir}/scripts/novel-characters.mjs styles   # 打印预设的完整内�
 
 读 `{baseDir}/references/style-presets.md`。**换风格是整套换**——每个预设自带 render / surface / lighting / negative / tags 五块，整块取用，不要混搭。
 
-最容易搞反的是反向提示词：`realistic` 绝不能禁 `photorealistic`，`ghibli` 必须禁。`validate` 会拦这个。
+最容易搞反的是反向提示词：`realistic` 绝不能禁 `photorealistic` / `3d render`；`pixar3d` 绝不能禁 `3d render`（禁写实摄影感即可）；其余 2D/动画类预设必须禁 `photorealistic` / `3d render`。`validate` 会拦这个。
 
 版面规则（16:9 三区、比例、细节让位）**不随风格变**，变的只有渲染质感。
 
