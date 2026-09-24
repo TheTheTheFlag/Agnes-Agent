@@ -133,7 +133,7 @@ ${drmSrcNote(v, "srcText", "srcPath")}${DRAMA_TAIL(title)}`;
     fields: [
       { key: "style", label: "出图画风", type: "select", default: "realistic", options: [["realistic", "半写实厚涂（默认）"], ["ghibli", "吉卜力手绘赛璐璐"], ["pixar3d", "3D影视级卡通（皮克斯/盲盒）"], ["webtoon", "韩漫彩漫（webtoon）"], ["shinkai", "新海诚式电影感日漫"], ["guoman", "2D国漫厚涂（古风顶配）"]] },
       { key: "lang", label: "报告语言", type: "text", default: "中文", placeholder: "中文 / English / 日本語 …" },
-      { key: "outlinePath", label: "可选：outline.json 路径", type: "path", placeholder: "有上一模块产物就填，如 deliverables/短剧/xxx/outline.json，会走 seed 沿用角色清单" },
+      { key: "outlinePath", label: "可选：outline.json 路径", type: "path", placeholder: "有上一模块产物就填，如 deliverables/短剧/<剧名>/outline.json，会走 seed 沿用角色清单" },
       { key: "srcText", label: "原著正文（粘贴）", type: "textarea", rows: 5, placeholder: "无 outline 时需给原文。粘贴正文或直接给文件路径。" },
       { key: "srcPath", label: "或：正文文件路径", type: "path", placeholder: "工作区相对路径" },
     ],
@@ -203,7 +203,7 @@ ${v.artPath ? `art.json（工作区相对路径，供光照/场景/道具对账�
       { key: "scriptPath", label: "script.json 路径", type: "path", placeholder: "必填（工作区相对路径），分镜离开剧本没有意义" },
       { key: "scriptText", label: "或：粘贴 script.json 内容", type: "textarea", rows: 5, placeholder: "没有路径文件就整份贴进来，先落到临时文件" },
       { key: "batch", label: "一批切几集", type: "number", default: 3, min: 1, hint: "跟剧本批次走，默认 ≤3 集" },
-      { key: "upstreams", label: "可选：outline/cast/art 路径", type: "text", placeholder: "逗号分隔，如 deliverables/短剧/xxx/outline.json, .../cast.json, .../art.json" },
+      { key: "upstreams", label: "可选：outline/cast/art 路径", type: "text", placeholder: "逗号分隔，如 deliverables/短剧/<剧名>/outline.json, .../cast.json, .../art.json" },
     ],
     build(v, title) {
       if (!v.scriptPath && !v.scriptText) return "";
@@ -392,19 +392,9 @@ function DrmModule(moduleKey) {
    execute_command 默认不对普通用户开放；仅当在本工作台启动模块（且处于该会话线程内）
    才按「用户×线程」签发限时作用域（2h 保鲜，模块再次启动会续期）。切走工作台/开新会话即失效。
    后台判定见 app/workbench.py，API：/api/workbench/drama。 */
-function drmRenderCmdChip(r) {
-  const chip = $("#drmCmdChip");
-  if (!chip) return;
-  const on = !!(r && r.enabled);
-  chip.className = "drm-cmd-chip" + (on ? " on" : "");
-  chip.textContent = on
-    ? "命令执行（受限）：本会话已开启"
-    : "命令执行（受限）：本会话未开启";
-}
 async function drmSetCmd(enabled) {
   try {
     const r = await apiPost("/api/workbench/drama", { enabled, thread_id: State.threadId });
-    drmRenderCmdChip(r);
     return r;
   } catch (e) {
     console.warn("workbench cmd scope:", e);
@@ -423,6 +413,7 @@ function renderDrmModule(el, moduleKey) {
   const m = DrmModule(moduleKey);
   if (!m) return;
   _drmSel = m.key;
+  drmNavBadges(DRM.navEl);   // 同步流程导航条的 active 高亮
   const box = $("#drmModuleBox", el);
   box.innerHTML = `
     <div class="drm-card" style="--acc:${m.color}">
@@ -433,7 +424,6 @@ function renderDrmModule(el, moduleKey) {
           <div class="drm-name">${m.name}</div>
           <div class="drm-skill">${m.skill} · 内置技能</div>
         </div>
-        <details class="drm-doc"><summary>📖 技能说明</summary><div class="drm-doc-body" data-skill="${m.skill}">加载中…</div></details>
       </div>
       <div class="drm-desc">${m.desc}</div>
       <div class="drm-fields">
@@ -441,22 +431,9 @@ function renderDrmModule(el, moduleKey) {
       </div>
       <div class="drm-actions">
         <button class="d-btn primary drm-run" data-run="${m.key}">🚀 启动 ${m.name}</button>
-        <span class="d-empty">启动后：首页对话页会缩小嵌入到工作台框内（同一个对话页，不新建）→ 智能体中途提问直接在框内输入框作答，产物写入 deliverables/，全程不用跳转</span>
+        <span class="d-empty">启动即开新会话执行，产物自动写入 deliverables/，全程不需跳转。</span>
       </div>
     </div>`;
-
-  /* 技能说明：懒加载对应 SKILL.md */
-  const d = $(".drm-doc", box);
-  if (d) d.addEventListener("toggle", (ev) => {
-    if (!ev.target.open || ev.target.dataset.loaded) return;
-    ev.target.dataset.loaded = "1";
-    const db = $(".drm-doc-body", ev.target);
-    const skill = db.dataset.skill;
-    apiGet(`/api/skills/${encodeURIComponent(skill)}`).then((r) => {
-      const body = (r && (r.body || r.raw)) || "";
-      db.innerHTML = `<pre>${escapeHtml(body.slice(0, 2600))}${body.length > 2600 ? "\n…（已截断，详情请直接与智能体对话查看）" : ""}</pre>`;
-    }).catch((e) => { db.innerHTML = `<div class="d-empty">加载失败：${escapeHtml(e.message || e)}</div>`; });
-  });
 
   /* 启动模块 → 激活本会话受限命令作用域 → 把首页对话页缩小内嵌到工作台 → 直接用首页对话页发起这一轮 */
   const runBtn = $(".drm-run", box);
@@ -465,14 +442,31 @@ function renderDrmModule(el, moduleKey) {
     if (!mod) return;
     if (DRM.run && DRM.run.streaming) { toast("「" + mod.name + "」：当前有模块正在生成中，请先等本轮结束或点「⏹ 停止」", "warn"); return; }
     const group = CREATIVE_GROUPS.find((g) => g.modules.some((x) => x.key === mod.key)) || CREATIVE_GROUPS[0];
-    const titleBox = $("#drmTitle", el);
-    const dft = group.key === "novel" ? SUMERU_TITLE_DFT : DRAMA_TITLE_DFT;
-    const title = (titleBox.value || dft).trim();
+    const title = group.key === "novel" ? SUMERU_TITLE_DFT : DRAMA_TITLE_DFT;
     const v = drmCollect(box, mod.key, mod.fields);
     const msg = mod.build(v, title);
     if (!msg) { toast("请先填写该模块的必填输入（正文粘贴 或 产物路径）", "error"); return; }
     if (typeof sendMessage !== "function") { toast("对话发送器未就绪，请刷新页面", "error"); return; }
-    await drmSetCmd(true);
+    /* 【每步新会话】启动模块前先 /new 开一条全新线程，模块指令发到这条新线程：
+       避免长线程上下文持续累积把 human 消息挤出 LLM 窗口（400 No user query found）。
+       只更新前端 State.threadId 与对话消息区（工作台视图不动）。 */
+    try {
+      const _nk = await apiPost("/api/command", { command: "/new" });
+      if (_nk && _nk.thread_id) {
+        State.threadId = _nk.thread_id;
+        const _inner = messagesInner();
+        if (_inner) _inner.innerHTML = "";
+        if (typeof closeProcGroup === "function") closeProcGroup();
+        if (typeof resetTodoPanel === "function") resetTodoPanel();
+        if (typeof renderWelcome === "function") renderWelcome();
+        if (typeof updateChatTitle === "function") updateChatTitle("新对话");
+        if (typeof refreshApprovalMode === "function") refreshApprovalMode();
+        if (typeof refreshTopbar === "function") refreshTopbar();
+        if (typeof loadThreads === "function") loadThreads().catch(() => {});
+        toast("已为「" + mod.name + "」开启新会话线程（每步独立，避免上下文挤爆）", "success");
+      }
+    } catch (e) { console.warn("drm new session:", e); }
+    await drmSetCmd(true);   // 受限命令作用域按「用户 × 新线程」签发
     drmStartRun(mod, title);
     drmEnterChatView(el, mod, title, false);   // 嵌入首页对话页（不刷新历史，避免与首条启动消息竞态）
     if (DRM.run) DRM.run.streaming = true;
@@ -543,35 +537,67 @@ const DRM = {
   progress: {},     // moduleKey -> {status:'done'|'running', ts}
 };
 
-function drmProgKey() { return "drm:prog:" + ((State && State.threadId) || "default"); }
+function drmProgKey() { return "drm:prog:studio"; }   // 全局键：每步新会话后流水线状态仍跨线程保留（待办面板依赖）
 function drmLoadProgress() { try { DRM.progress = JSON.parse(localStorage.getItem(drmProgKey()) || "{}"); } catch (e) { DRM.progress = {}; } }
 function drmSaveProgress() { try { localStorage.setItem(drmProgKey(), JSON.stringify(DRM.progress)); } catch (e) {} }
-function drmMarkProgress(modKey, status) { DRM.progress[modKey] = { status: status, ts: Date.now() }; drmSaveProgress(); }
-function drmClearProgress(modKey) { if (DRM.progress[modKey]) { delete DRM.progress[modKey]; drmSaveProgress(); } }
+function drmMarkProgress(modKey, status) { DRM.progress[modKey] = { status: status, ts: Date.now() }; drmSaveProgress(); drmTodoRefresh(); }
+function drmClearProgress(modKey) { if (DRM.progress[modKey]) { delete DRM.progress[modKey]; drmSaveProgress(); drmTodoRefresh(); } }
+
+/* ————————————————————— 流水线待办面板 —————————————————————
+   把两大创作流水线（短剧 5 步 / 小说 7 步）渲染成待办清单：
+   每步一个条目，状态由 DRM.progress 驱动（todo/running/done/stopped/err），
+   点击可跳到对应模块表单。数据存 localStorage（全局 key，跨线程保留）。 */
+function drmTodoHtml() {
+  const _K = {
+    done:    ["done", "✓", "已完成"],
+    running: ["run", "◔", "执行中"],
+    stopped: ["stop", "⏹", "已停止"],
+    err:     ["err", "✕", "已出错"],
+    todo:    ["todo", "○", "待办"],
+  };
+  const step = (idx, m) => {
+    const p = DRM.progress[m.key];
+    const st = (p && _K[p.status]) ? _K[p.status] : _K.todo;
+    const [cls, ico, tip] = st;
+    const active = (m.key === _drmSel) ? " active" : "";
+    return `<button class="drm-todo-step ${cls}${active}" data-mod="${m.key}" data-st="${p ? p.status : "todo"}" title="${m.name}：${tip}" style="--acc:${m.color}"><span class="drm-todo-ico">${m.icon}</span><span class="drm-todo-st">${ico}</span><span class="drm-todo-name">${m.name}</span></button>`;
+  };
+  const chain = (mods) => mods.map((m, i) => `${step(i, m)}${i < mods.length - 1 ? '<b class="drm-todo-arrow">→</b>' : ""}`).join("");
+  const doneCount = (mods) => mods.filter((m) => DRM.progress[m.key] && DRM.progress[m.key].status === "done").length;
+  const grp = (label, mods) => {
+    const dc = doneCount(mods);
+    const pct = mods.length ? Math.round(dc / mods.length * 100) : 0;
+    return `
+    <div class="drm-todo-grp">
+      <div class="drm-todo-grp-hd"><span>${label}</span><i>${dc}/${mods.length} · ${pct}%</i></div>
+      <div class="drm-todo-progress"><div class="drm-todo-progress-fill" style="width:${pct}%"></div></div>
+      <div class="drm-todo-chain">${chain(mods)}</div>
+    </div>`;
+  };
+  return `
+    <div class="drm-todo" id="drmTodo">
+      ${grp("短剧", DRAMA_MODULES)}
+      ${grp("小说", SUMERU_MODULES)}
+    </div>`;
+}
+
+function drmTodoRefresh() {
+  const host = document.getElementById("drmTodoHost");
+  if (!host) return;
+  host.innerHTML = drmTodoHtml();
+  // 点击条目 → 跳到对应模块表单（执行中不允许切换）
+  $$(".drm-todo-step", host).forEach((b) => b.addEventListener("click", () => {
+    if (DRM.run && DRM.run.streaming) { toast("当前有模块正在生成中，请先等本轮结束或点「⏹ 停止」", "warn"); return; }
+    renderDrmModule(DRM.rootEl, b.dataset.mod);
+    $$(".drm-todo-step", host).forEach((x) => x.classList.toggle("active", x.dataset.mod === b.dataset.mod));
+  }));
+}
+window.drmTodoRefresh = drmTodoRefresh;
 
 function drmNavBadges(el) {
   if (!el) return;
-  const _K = { done: ["done", "✓", "已完成"], running: ["run", "◔", "执行中"], stopped: ["stop", "⏹", "已停止"], err: ["err", "✕", "已出错"] };
-  $$(".drm-nav-item", el).forEach((b) => {
-    const mk = b.dataset.mod;
-    const bg = b.querySelector(".drm-nav-badge");
-    if (bg) bg.remove();
-    const p = DRM.progress[mk];
-    if (p && _K[p.status]) {
-      const [cls, ico, tip] = _K[p.status];
-      const s = document.createElement("b");
-      s.className = "drm-nav-badge " + cls;
-      s.textContent = ico;
-      s.title = tip;
-      b.appendChild(s);
-    }
-  });
-}
-
-function drmNavStatusOf(modKey) {
-  const _K = { done: `<b class="drm-nav-badge done">✓</b>`, running: `<b class="drm-nav-badge run">◔</b>`, stopped: `<b class="drm-nav-badge stop">⏹</b>`, err: `<b class="drm-nav-badge err">✕</b>` };
-  const p = DRM.progress[modKey];
-  return (p && _K[p.status]) || "";
+  // 流程条即导航：同步各步骤按钮的 active 高亮
+  $$(".drm-todo-step", el).forEach((b) => b.classList.toggle("active", b.dataset.mod === _drmSel));
 }
 
 function drmGroupOf(modKey) { return CREATIVE_GROUPS.find((g) => g.modules.some((x) => x.key === modKey)) || CREATIVE_GROUPS[0]; }
@@ -726,19 +752,7 @@ function drmEnterChatView(el, mod, title, refresh) {
   }
 }
 
-/* 不启动任何模块，直接把首页对话页嵌入工作台（自由对话 / 查看历史） */
-function drmOpenChat() {
-  if (DRM.embedded) { toast("已在对话区", "info"); return; }
-  const titleEl = document.getElementById("drmTitle");
-  const title = ((titleEl && titleEl.value.trim()) || SUMERU_TITLE_DFT);
-  DRM.run = null;
-  drmEnterChatView(DRM.rootEl, {
-    key: "chat", icon: "💬", name: "工作台对话", skill: "自由对话",
-    color: "#38bdf8", metaLabel: "创作工作台",
-  }, title, true);
-  if (DRM.navEl) $$(".drm-nav-item", DRM.navEl).forEach((x) => x.classList.remove("active"));
-  drmBanner("ok", "💬 已进入工作台对话区（未启动模块）。直接在框内自由提问；或点左侧模块 →「🚀 启动」开始一轮创作。");
-}
+/* 不启动任何模块，直接把首页对话页嵌入工作台（自由对话 / 查看历史）——已移除「💬 对话区」入口 */
 
 /* 返回模块选择：把对话页移回首页原位（关闭工作台后在首页可继续看对话），工作表回到表单 */
 function drmBackToModules() {
@@ -749,7 +763,7 @@ function drmBackToModules() {
   if (DRM.rootEl) {
     renderDrmModule(DRM.rootEl, saved);
     drmNavBadges(DRM.navEl);
-    $$(".drm-nav-item", DRM.rootEl).forEach((x) => x.classList.toggle("active", x.dataset.mod === saved));
+    $$(".drm-todo-step", DRM.rootEl).forEach((x) => x.classList.toggle("active", x.dataset.mod === saved));
   }
 }/* ————————————————————— 渲染工作台 ————————————————————— */
 async function renderDramaStudioTab(el) {
@@ -758,32 +772,12 @@ async function renderDramaStudioTab(el) {
     <div class="st drm">
       <div class="st-head">
         <div class="st-head-title">🎭 创作工作台</div>
-        <div class="st-head-hint">系统级功能 · 左侧选择模块 → 右侧填表 → 启动后，首页对话页会缩小嵌入到右侧框内执行（同一个对话页，不新建）：提问、审批、进度、交付就地展示，不用跳转；产物落在你自己工作区的 deliverables/ 下（短剧 → deliverables/短剧/，小说 → deliverables/小说/）</div>
+        <div class="st-head-hint">任选一条流水线，点步骤 → 填表 →「🚀 启动」→ 在框内对话完成创作；产物自动落到 deliverables/ 对应目录。</div>
       </div>
 
-<div class="drm-toolbar">
-          <div class="drm-title-row">
-            <span class="drm-title-lbl">项目 / 剧名（或书名）</span>
-            <input class="d-input drm-title-input" id="drmTitle" placeholder="${DRAMA_TITLE_DFT}" value="" spellcheck="false">
-            <button class="d-btn ghost drm-chat-btn drm-toolbar-ops" id="drmOpenChatBtn" title="不启动模块，直接把首页对话页嵌入工作台，自由对话/查看历史">💬 对话区</button>
-          </div>
-        <div class="drm-pipeline">
-          <span class="drm-pipe-grp">短剧：${DRAMA_MODULES.map((m) => `<span class="drm-pipe"><i>${m.icon}</i>${m.name}</span>`).join('<b>→</b>')}</span>
-          <span class="drm-pipe-grp">小说：${(() => { const _lead = SUMERU_MODULES[0]; const _rest = SUMERU_MODULES.slice(1); const _chip = (m) => `<span class="drm-pipe"><i>${m.icon}</i>${m.name}</span>`; return _chip(_lead) + "<b>=</b>" + _rest.map(_chip).join("<b>→</b>"); })()}</span>
-        </div>
-        <div class="drm-cmd-chip" id="drmCmdChip">命令执行（受限）…</div>
-      </div>
-
-      <div class="drm-note">上一个模块的产物路径，回填到下一个模块的“路径”输入框即可串联；第二批继续时，只需再点一次「启动」并说明“继续”，会沿用上一批的会话与目录。</div>
+      <div id="drmTodoHost"></div>
 
       <div class="drm-body">
-        <nav class="drm-nav" id="drmNav">
-          ${CREATIVE_GROUPS.map((g) => `
-            <div class="drm-nav-grp">
-              <div class="drm-nav-grp-hd"><span>${g.label}</span><i>${g.note.replace(" · ", " / ")}</i></div>
-              ${g.modules.map((m) => `<button class="drm-nav-item" data-mod="${m.key}" style="--acc:${m.color}"><span class="drm-nav-ic">${m.icon}</span><span class="drm-nav-name">${m.name}</span>${drmNavStatusOf(m.key)}</button>`).join("")}
-            </div>`).join("")}
-        </nav>
         <section class="drm-module" id="drmModuleBox"></section>
       </div>
     </div>`;
@@ -791,25 +785,7 @@ async function renderDramaStudioTab(el) {
   DRM.rootEl = el;
   DRM.navEl = el;
   drmNavBadges(el);
-
-  /* 左侧 Tab：切换模块 → 重渲染右侧表单（执行中阻挡，避免脱离会话视图） */
-  $$(".drm-nav-item", el).forEach((b) => b.addEventListener("click", () => {
-    if (DRM.run && DRM.run.streaming) {
-      toast("「" + (b.dataset.mod || "") + "」：当前有模块正在生成中，请先等本轮结束或点「⏹ 停止」", "warn");
-      return;
-    }
-    renderDrmModule(el, b.dataset.mod);
-    $$(".drm-nav-item", el).forEach((x) => x.classList.toggle("active", x.dataset.mod === b.dataset.mod));
-  }));
-
-  /* 命令作用域状态：进工作台先查一次 */
-  apiGet("/api/workbench/drama").then(drmRenderCmdChip).catch(() => {});
-
-  /* 顶部「💬 对话区」：不启动模块，直接嵌入首页对话页自由对话 */
-  $("#drmOpenChatBtn", el).addEventListener("click", () => {
-    if (DRM.run && DRM.run.streaming) { toast("当前有模块正在生成中，请先等本轮结束或点「⏹ 停止」", "warn"); return; }
-    drmOpenChat();
-  });
+  drmTodoRefresh();   // 渲染流程导航条（状态追踪 + 模块切换）
 
   /* 若存在进行中的创作会话，恢复「内嵌首页对话页」视图（消息以 DB 为准刷新到框内） */
   if (DRM.run) {
@@ -817,11 +793,10 @@ async function renderDramaStudioTab(el) {
     if (m) {
       DRM.run.streaming = false;
       drmEnterChatView(el, m, DRM.run.title, true);
-      $$(".drm-nav-item", el).forEach((x) => x.classList.toggle("active", x.dataset.mod === m.key));
+      $$(".drm-todo-step", el).forEach((x) => x.classList.toggle("active", x.dataset.mod === m.key));
       return;
     }
   }
   renderDrmModule(el, _drmSel);
-  const first = $(".drm-nav-item", el);
-  if (first) first.classList.add("active");
+  drmNavBadges(el);   // 同步流程条高亮（_drmSel 已更新）
 }
