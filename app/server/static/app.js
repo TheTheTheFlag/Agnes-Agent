@@ -423,7 +423,11 @@ async function loadKbOptions(force) {
       }
     }
   } catch (e) {
-    _kbCache = [{ thread_id: "__global__", name: "全局图谱", kind: "global", description: "跨会话共享的对话知识" }];
+    // 失败只在从未成功过时给兜底（全局图谱），避免把失败缓存固化、
+    // 导致后续真实列表永远不加载（打开选择器只见"全局图谱"）
+    if (!_kbCache) {
+      _kbCache = [{ thread_id: "__global__", name: "全局图谱", kind: "global", description: "跨会话共享的对话知识" }];
+    }
   }
   return _kbCache;
 }
@@ -473,6 +477,8 @@ async function toggleKbMenu() {
   const opening = menu.classList.contains("hidden");
   if (opening) {
     menu.classList.remove("hidden");
+    // 加载占位：网络慢时菜单不再是"空白 div"
+    menu.innerHTML = `<div class="kb-loading" style="padding:14px 12px;font-size:12px;color:var(--text-dim,#888)">正在加载知识库…</div>`;
     await loadKbOptions(false);
     renderKbMenu();
     $("#btnKbSel").classList.add("active");
@@ -3460,6 +3466,8 @@ async function init() {
     renderWelcome();
   }
   refreshTopbar();
+  // 预加载知识库列表（后台拉取，打开"选择检索知识库"时即有内容，不出现空白）
+  loadKbOptions(true).catch(() => {});
 
   // UI
   initDrawer();

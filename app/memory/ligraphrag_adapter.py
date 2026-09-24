@@ -1962,7 +1962,21 @@ def kb_list() -> list:
         ns = _kb_resolve_ns(tid)
         ws = _workspace_dir(tid, ns=ns)
         docs = _read_json_if_exists(os.path.join(ws, "kv_store_doc_status.json"))
-        chunks = _read_json_if_exists(os.path.join(ws, "kv_store_text_chunks.json"))
+        # 大文件轻量计数：chunk 数由 doc_status 各文档的 chunks_count 求和，
+        # 避免 json.load 巨大的 kv_store_text_chunks.json（实测可达 200MB，读一次 3-4 秒，
+        # 直接导致 /api/kb/list 拖到 ~6 秒、前端知识库选择器打开时长期空白）。
+        chunk_count = sum(int((rec or {}).get("chunks_count") or 0) for rec in docs.values())
+        if chunk_count == 0 and docs:
+            # 兜底：个别库缺 chunks_count 字段时，逐行扫顶层 key（文件为 indent=2 格式化）
+            _p = os.path.join(ws, "kv_store_text_chunks.json")
+            if os.path.isfile(_p):
+                try:
+                    with open(_p, "rb") as _f:
+                        chunk_count = sum(
+                            1 for _line in _f
+                            if _line.startswith(b'  "') and b'":' in _line[:200])
+                except Exception:
+                    chunk_count = 0
         entities = _read_json_if_exists(os.path.join(ws, "kv_store_full_entities.json"))
         relations = _read_json_if_exists(os.path.join(ws, "kv_store_full_relations.json"))
         meta = kb_meta(tid)
@@ -1975,7 +1989,7 @@ def kb_list() -> list:
             "name": meta.get("name") or tid[:13],
             "description": meta.get("description") or "",
             "doc_count": len(docs),
-            "chunk_count": len(chunks),
+            "chunk_count": chunk_count,
             "entity_count": len(entities),
             "relation_count": len(relations),
             "status_counts": st_counts,

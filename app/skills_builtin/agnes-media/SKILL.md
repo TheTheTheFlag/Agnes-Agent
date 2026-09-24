@@ -21,8 +21,8 @@ config:
   model_image_default: agnes-image-2.5-flash
   model_image_legacy: agnes-image-2.0-flash
   model_video: agnes-video-v2.0
-  image_size_default: "1K"
-  image_ratio_default: "1:1"
+  image_size_default: "2K"
+  image_ratio_default: "16:9"
   video_duration_default: 5
 ---
 
@@ -41,7 +41,7 @@ config:
 ## 快速上手
 
 ```bash
-# 文生图（默认 1K，1:1）
+# 文生图（默认 2K，16:9）
 python <skill_dir>/media.py image --prompt "一个穿和服撑伞的少女站在樱花树下，电影级光影，写实风格" --size 2K --ratio 3:4
 
 # 图生图（本地路径或 URL 均可，自动转 Data URI；多张参考图重复传 --ref）
@@ -64,8 +64,8 @@ python <skill_dir>/media.py video --prompt "在两张关键帧之间平滑转场
 |------|------|
 | `--prompt` | 描述。文生图结构：`[主体]+[场景/环境]+[风格]+[光照]+[构图]+[质量]`；图生图：`[改变]+[新风格]+[增删元素]+[保留元素]` |
 | `--model` | 默认 `agnes-image-2.5-flash`；用户明确要旧版/2.0 时用 `agnes-image-2.0-flash` |
-| `--size` | `1K`/`2K`/`3K`/`4K`（默认 1K）。高清海报/壁纸用 2K-4K |
-| `--ratio` | `1:1 3:4 4:3 16:9 9:16 2:3 3:2 21:9`（默认 1:1）。竖屏头像 3:4、短视频封面 9:16 |
+| `--size` | `1K`/`2K`/`3K`/`4K`（默认 2K）。高清海报/壁纸用 3K-4K，普通配图 1K 更快 |
+| `--ratio` | `1:1 3:4 4:3 16:9 9:16 2:3 3:2 21:9`（默认 16:9）。竖屏头像 3:4、短视频封面 9:16 |
 | `--ref` | 参考图（URL **或本地路径**），可重复传多张 = 多图合成；脚本自动把本地文件转 Data URI |
 | `--format` | `url`（默认）或 `b64_json` |
 | `--extra` | 附加参数 JSON（合并进 extra_body） |
@@ -119,7 +119,7 @@ python <skill_dir>/media.py video --prompt "在两张关键帧之间平滑转场
 
 1. **成功即停**：`media.py` 的 stdout 出现 `FILE=`（本地文件）与 `URL=` 即为生成完成。此时**立即停止调用任何工具**，把文件/链接展示给用户并结束回复。不要为了"多生成几张/确认效果"再次执行相同或相似命令，也不要再去 `ls`、`read_file` 反复确认——系统会自动拦截重复成功命令。
 2. 若确需再多张不同图片：**修改参数**（prompt / size / seed / --extra）后发一条新命令，而不是原样重跑。
-3. **默认 `--size 1K`**：1K 生成较快（约几十秒内）。`2K`/`4K` 单张耗时更长，可能超过命令执行上限（约 60 秒）而超时——确需大图时，给 `execute_command` 显式传较长 `timeout`（如 180 秒）并耐心等待；若仍超时，改回 1K 或换更短 prompt。
+3. **默认 `--size 2K`**：2K 单张约 1 分钟内可出。`4K` 单张耗时更长，可能超过命令执行上限（约 60 秒）而超时——确需 4K 时，给 `execute_command` 显式传较长 `timeout`（如 180 秒）并耐心等待；若仍超时，改回 2K 或换更短 prompt。
 4. **Windows 环境命令**：本机 `execute_command` 走 Windows cmd——用 `dir` / `type` / `echo`，**不要用** `ls` / `cat` / `pwd` / `grep` / `rm` / `mv`（会报"不是内部或外部命令"）。需要看文件就用 `type`，列目录就用 `dir`（或 `python -c "import os;print(os.listdir('...'))"`）。
 
 ## 避坑清单（来自线上事故复盘）

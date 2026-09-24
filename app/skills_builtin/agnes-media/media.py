@@ -56,7 +56,7 @@ IMAGE_SIZES = ("1K", "2K", "3K", "4K")
 IMAGE_RATIOS = ("1:1", "3:4", "4:3", "16:9", "9:16", "2:3", "3:2", "21:9")
 VIDEO_PRESETS = {3: 81, 5: 121, 10: 241, 18: 441}  # @24fps 的 num_frames
 
-IMG_RATIO_DEFAULT = "1:1"
+IMG_RATIO_DEFAULT = "16:9"
 
 # 统一超时：全部请求/任务等待按 5 分钟（300s）执行
 HTTP_TIMEOUT = 300
@@ -315,7 +315,7 @@ def add_common_image_args(p):
     p.add_argument("--prompt", required=True, help="图像描述 / 编辑指令")
     p.add_argument("--model", default=MODEL_IMAGE_DEFAULT,
                    help=f"模型（默认 {MODEL_IMAGE_DEFAULT}；旧版 {MODEL_IMAGE_LEGACY}）")
-    p.add_argument("--size", default="1K", choices=IMAGE_SIZES, help="输出尺寸档位（默认 1K）")
+    p.add_argument("--size", default="2K", choices=IMAGE_SIZES, help="输出尺寸档位（默认 2K）")
     p.add_argument("--ratio", default=IMG_RATIO_DEFAULT, choices=IMAGE_RATIOS,
                    help=f"宽高比（默认 {IMG_RATIO_DEFAULT}）")
     p.add_argument("--ref", action="append", dest="refs", default=[],
