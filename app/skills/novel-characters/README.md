@@ -8,9 +8,9 @@
 
 - **角色表** — 谁出场了，主角还是龙套，跨章节的不同称呼归并到同一个人
 - **人物画像** — 性别、年龄、身份、外貌、性情、动机、人物弧光、关系网，每条附**原文逐字引文**
-- **形象提示词** — 半写实厚涂路线，双语出图 prompt + negative prompt + 风格标签，直接喂 Midjourney / SD / GPT-Image
+- **形象提示词** — 多画风预设（默认真人写实），双语出图 prompt + negative prompt + 风格标签，直接喂 Midjourney / SD / GPT-Image
 - **音色提示词** — 音色、音高、语速、口音、情绪，双语 voice-design prompt，直接喂 Qwen3-TTS / ElevenLabs Voice Design
-- **角色设定图** — **每个角色一张**：16:9 分三区，左侧约 34% 证件照式半身像（面部基准）、右上全身三视图、右下关键细节特写条。**画风可选**：默认半写实厚涂，也可以出吉卜力动画风。白底方便抠图，走 codex 内置出图（可选）
+- **角色设定图** — **每个角色一张**：16:9 分三区，左侧约 34% 证件照式半身像（面部基准）、右上全身三视图、右下关键细节特写条。**画风可选**：默认真人写实，11 种预设见 `references/style-presets.md`，也可以出吉卜力动画风。白底方便抠图，走 codex 内置出图（可选）
 - **关系图谱** — 报告里的一个全景视图：谁跟谁有关系、是什么关系，一眼看完。悬停一个人亮出他的全部关系，点一下跳到那个人的详情
 
 产出 `cast.json` + Markdown + 一个双击就能开的 `report.html`。
@@ -82,7 +82,7 @@ node scripts/novel-characters.mjs seed outline.json > seed.json
 
 ### 出图风格
 
-默认 `realistic`（半写实厚涂）。想要动画质感：
+默认 `photoreal`（真人写实）。想要别的画风：
 
 ```
 /novel-characters ./book.txt --style ghibli
@@ -90,12 +90,17 @@ node scripts/novel-characters.mjs seed outline.json > seed.json
 
 | id | 说明 |
 | --- | --- |
-| `realistic` | 半写实厚涂，皮肤有毛孔和肌理，布料有织纹磨损。默认 |
+| `photoreal` | 真人写实·超写实国风，8K 高清纹理、自然光、布料褶皱。默认 |
+| `inkwash` | 水墨风，留白与晕染、纸面肌理 |
+| `guofeng` | 国风厚涂，古典服饰与堆色，古风 / 玄幻顶配 |
+| `cyberpunk` | 赛博朋克，霓虹雨夜、高对比、冷青品红 |
+| `photography` | 写实摄影，RAW 质感、电影调色、自然肌肤 |
 | `ghibli` | 吉卜力式手绘赛璐璐，等宽墨线、单层柔和阴影、平涂色块 |
-| `pixar3d` | 3D 影视级卡通（皮克斯 / 盲盒潮玩质感），柔和全局光，AI 漫剧主流 |
+| `pixar3d` | 3D 影视级卡通（皮克斯 / 盲盒潮玩），柔和全局光 |
+| `disney3d` | 迪士尼式 3D 动画，光泽大眼、温暖家庭片质感 |
 | `webtoon` | 韩漫彩漫，半透明光泽上色，现代都市首选 |
-| `shinkai` | 新海诚式电影感日漫，天光体积光，青春情感题材 |
-| `guoman` | 2D 国漫厚涂，古风 / 玄幻顶配质感 |
+| `shinkai` | 新海诚式电影感日漫，天光体积光、青春情感题材 |
+| `chibi` | Q 版萌系，大头小身、干净粗线、可爱配色 |
 
 两个可以组合：`--lang ja --style ghibli`。
 
@@ -125,7 +130,7 @@ node scripts/novel-characters.mjs styles ghibli   # 看某一个的完整内容
 顶栏的「导出 JSON」下载的**就是 `cast.json` 本身的形状**，不是另一套导出格式：
 
 ```json
-{ "source": "…", "lang": "zh", "style": "realistic", "summary": "…", "characters": [ … ] }
+{ "source": "…", "lang": "zh", "style": "photoreal", "summary": "…", "characters": [ … ] }
 ```
 
 所以外部工具改完可以**直接喂回 `render` 重新出报告**，也能过 `validate`。角色卡里的 `sheetImage`（`images/<slug>-sheet.png`）一并带出，拿得到哪张图对应哪个人。
@@ -153,7 +158,7 @@ node scripts/novel-characters.mjs styles ghibli   # 看某一个的完整内容
 | `evidence` 必须是原文**逐字连续**片段 | 防编造。被「他说」断开的对白不许拼接 |
 | 出图 prompt **不许出现人名** | 图像模型对人名偏见极重，会画成它记忆里的角色 |
 | 字段**语言分工** | 人类字段跟随 `--lang`、出图和 TTS 提示词永远英文，模型会漂 |
-| **风格与反向提示词匹配** | `realistic` 不能禁 `photorealistic`、`ghibli` 必须禁，搞反整批图就废 |
+| **风格与反向提示词匹配** | `real` 类（如 `photoreal`）不能禁 `photorealistic` / `3d render`、2D/3D 类按 `class` 必须禁写实，搞反整批图就废 |
 | 结构 + 枚举 | `importance` 只能是那四个值 |
 
 这四条不是拍脑袋定的——是模型输出真的违反过、被校验脚本当场抓住才立起来的。
@@ -195,7 +200,7 @@ references/
   schema.md              角色卡结构 + 字段语言归属
   sheet.md               角色设定图出图的 codex 调用契约
   report-style.md        report.html 的设计约定
-  style-presets.md       出图风格预设（realistic / ghibli）
+  style-presets.md       出图风格预设（11 种，默认 photoreal）
 examples/
   渡口.txt                自带短故事，4 个角色
   渡口-cast.json          产出，同时是校验自检夹具

@@ -138,7 +138,7 @@ ${drmSrcNote(v, "srcText", "srcPath")}${DRAMA_TAIL(title)}`;
     color: "#ff9f43",
     desc: "从小说拆出角色表 / 人物画像 / 形象提示词 / 音色提示词（含角色设定图提示词）。有 outline.json 就给出来走 seed，人物清单直接沿用大纲分档。",
     fields: [
-      { key: "style", label: "出图画风", type: "select", default: "realistic", options: [["realistic", "半写实厚涂（默认）"], ["ghibli", "吉卜力手绘赛璐璐"], ["pixar3d", "3D影视级卡通（皮克斯/盲盒）"], ["webtoon", "韩漫彩漫（webtoon）"], ["shinkai", "新海诚式电影感日漫"], ["guoman", "2D国漫厚涂（古风顶配）"]] },
+      { key: "style", label: "出图画风", type: "select", default: "photoreal", options: [["photoreal", "真人写实（默认）"], ["inkwash", "水墨风（Ink Wash）"], ["guofeng", "国风厚涂（Guofeng）"], ["cyberpunk", "赛博朋克（Cyberpunk）"], ["photography", "写实摄影（Photorealistic）"], ["ghibli", "吉卜力手绘（Studio Ghibli）"], ["pixar3d", "皮克斯3D（Pixar）"], ["disney3d", "迪士尼3D（Disney）"], ["webtoon", "韩漫（Webtoon）"], ["shinkai", "新海诚日漫（Shinkai）"], ["chibi", "Q版（Chibi）"]] },
       { key: "lang", label: "报告语言", type: "text", default: "中文", placeholder: "中文 / English / 日本語 …" },
       { key: "outlinePath", label: "可选：outline.json 路径", type: "path", placeholder: "有上一模块产物就填，如 deliverables/短剧/<剧名>/outline.json，会走 seed 沿用角色清单" },
       { key: "srcText", label: "原著正文（粘贴）", type: "textarea", rows: 5, placeholder: "无 outline 时需给原文。粘贴正文或直接给文件路径。" },
@@ -148,7 +148,7 @@ ${drmSrcNote(v, "srcText", "srcPath")}${DRAMA_TAIL(title)}`;
       if (!v.srcPath && !v.srcText && !v.outlinePath) return "";
       return `请使用 novel-characters 技能，为这部短剧拆角色设定。
 项目/剧名：${title}
-出图画风：${v.style || "realistic"}　报告语言：${v.lang || "中文"}
+出图画风：${v.style || "photoreal"}　报告语言：${v.lang || "中文"}
 ${v.outlinePath ? `已有的 outline.json（工作区相对路径，先 read_file 并 seed）：${v.outlinePath}` : ""}
 ${drmSrcNote(v, "srcText", "srcPath")}${DRAMA_TAIL(title)}`;
     },

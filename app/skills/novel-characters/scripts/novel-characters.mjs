@@ -213,38 +213,91 @@ export const DEFAULT_LANG = 'zh';
  * 生成角色卡时整块取用，不要混搭。
  */
 
-export const DEFAULT_STYLE = 'realistic';
+export const DEFAULT_STYLE = 'photoreal';
 
 export const STYLE_PRESETS = {
-  realistic: {
-    label: { zh: '半写实厚涂', en: 'Semi-realistic painterly', ja: '半写実・厚塗り' },
+  photoreal: {
+    label: { zh: '真人写实·超写实国风', en: 'Photorealistic hyper-real (Guofeng)', ja: '写実・超写実' },
     render:
-      'Semi-realistic character illustration, painterly rendering with soft blended edges and visible brush texture, anatomically grounded',
+      'Photorealistic, hyper-realistic, 8K HD texture, natural soft light, realistic fabric folds and weave, artistic realism, stunning visual impact',
     surface:
-      'Skin with visible pores and uneven tone, faint capillaries at the nostrils and ear rims, subtle subsurface scattering; eyes with a wet specular highlight, moist lower lid, visible iris fibres and a limbal ring; eyelids and eyebrows slightly asymmetric — no two sides identical; individual flyaway hair strands breaking the silhouette. Fabric with a visible weave, wear and shine at elbows, cuffs and knees, cloth falling with real weight and self-shadowing in the folds',
-    // 设定表要平光才好抠图，写实要方向光才有体积——分区解决
+      'Hyper-detailed skin with visible pores, fine vellus hair and natural uneven tone, subtle subsurface scattering along the nose and ear rims; eyes with a crisp wet specular highlight, moist lower lid, visible iris fibres and a soft limbal ring; naturally asymmetric eyelids and brows; individual flyaway hair strands breaking the silhouette. Fabric with a clearly readable weave, natural drape and weight, soft self-shadowing and realistic wrinkles where cloth bends',
     lighting:
-      'LIGHTING IN THE LEFT ZONE ONLY: a soft directional key light from the upper left with gentle falloff, subtle ambient occlusion under the chin, in the eye sockets and where the collar meets the neck, giving the head real volume. LIGHTING IN THE RIGHT ZONES: flat even orthographic lighting with no directional key and no cast shadows, so the figures stay measurable and cleanly cut out',
-    // 注意：这里绝不能禁 photorealistic
+      'LIGHTING IN THE LEFT ZONE ONLY: natural soft daylight, a gentle directional key from the upper left with smooth falloff, subtle ambient occlusion under the chin, in the eye sockets and where the collar meets the neck, giving the head real volume. LIGHTING IN THE RIGHT ZONES: flat even orthographic lighting with no directional key and no cast shadows, so the figures stay measurable and cleanly cut out',
     negative:
-      'plastic or waxy skin, over-smoothed airbrushed complexion, poreless doll face, perfectly symmetrical face, dead flat eyes without specular highlight, helmet-like hair with no loose strands, flat untextured fabric with no weave or wear, stiff mannequin posing, extra fingers, malformed hands, text, watermark, signature, busy or patterned background, harsh cast shadows on the backdrop',
-    tags: ['semi-realistic', 'painterly', 'character sheet', 'subsurface skin', 'directional key light'],
+      'plastic or waxy skin, over-smoothed airbrushed complexion, poreless doll face, perfectly symmetrical face, dead flat eyes without specular highlight, helmet-like hair, flat untextured fabric, anime or cartoon rendering, stiff mannequin posing, extra fingers, malformed hands, text, watermark, signature, busy or patterned background',
+    tags: ['photorealistic', 'hyper-realistic', '8k texture', 'natural skin', 'character sheet'],
+    class: 'real',
+  },
+
+  inkwash: {
+    label: { zh: '水墨风（Ink Wash）', en: 'Chinese ink wash (shuimo)', ja: '水墨画' },
+    render:
+      'Chinese ink wash painting (shuimo), minimalist brush strokes, paper texture, generous negative space, poetic atmosphere, soft wet-on-wet blending',
+    surface:
+      'Characters rendered in clean ink washes: soft graded ink tones with visible rice-paper grain, minimal interior detail, sparse deliberate brush lines; no pores, no subsurface rendering; hair in a few calm ink strokes, clothing as loose flowing wash shapes with the paper showing through',
+    lighting:
+      'Flat, even, paper-like lighting across the whole sheet — one soft ink-grey wash tone; no dramatic key light, no cast shadows, so the figures stay cleanly cut out',
+    negative:
+      'photorealistic, 3d render, heavy painterly impasto, saturated glossy colours, gritty texture overlay, visible brushwork with thick paint, extra fingers, malformed hands, text, watermark, signature, busy or patterned background',
+    tags: ['ink wash', 'shuimo', 'minimal brush strokes', 'paper texture', 'character sheet'],
+    class: '2d',
+  },
+
+  guofeng: {
+    label: { zh: '国风厚涂（Guofeng）', en: 'Chinese guofeng heavy painterly', ja: '中華風厚塗り' },
+    render:
+      'Chinese guofeng 2D digital painting, thick paint brushwork, ink-touched background, rich layered colour, elegant hanfu costume and ornament detail',
+    surface:
+      'Luminous painterly skin with a soft blush gradient — smooth porcelain, no pores, no dermis texture; expressive eyes with refined double-lid detail and shimmering gradient irises; hair as dense silky painterly strands with flowing highlights; clothing as sumptuous layered silk and brocade with gold and jade accents, every fold and embroidery intentional',
+    lighting:
+      'Atmospheric cinematic lighting for wuxia / xianxia scenes: warm volumetric beams with a soft rim light tracing hair and robes, diffuse fill, delicate shadows filtering through screens and blinds — moody but never muddy',
+    negative:
+      'photorealistic, 3d render, western cartoon style, chibi proportions, flat cheap digital colouring, harsh contrast, gritty texture overlay, extra fingers, malformed hands, text, watermark, signature, busy or patterned background',
+    tags: ['guofeng', 'chinese 2d', 'heavy painterly', 'hanfu detail', 'character sheet'],
+    class: '2d',
+  },
+
+  cyberpunk: {
+    label: { zh: '赛博朋克（Cyberpunk）', en: 'Cyberpunk neon', ja: 'サイバーパンク' },
+    render:
+      'Cyberpunk cinematic illustration, neon lights, rainy futuristic city, high contrast, wet street reflections, cold cyan and magenta key tones',
+    surface:
+      'Sleek luminous skin with subtle neon rim light and wet-slick sheen; sharp expressive eyes catching neon reflections; styled hair with clean luminous streaks; clothing with technical fabric detail, glossy rain-wet texture and glowing accents',
+    lighting:
+      'Night-time neon lighting: strong cyan and magenta key / rim contrast, glowing sign illumination, wet reflections on skin and fabric, deep shadows with high contrast but readable detail',
+    negative:
+      'flat cell-shaded anime, watercolour wash, soft pastel palette, plastic doll skin, daytime bright lighting, extra fingers, malformed hands, text, watermark, signature, busy or cluttered background',
+    tags: ['cyberpunk', 'neon', 'cinematic', 'high contrast', 'character sheet'],
+    class: 'real',
+  },
+
+  photography: {
+    label: { zh: '写实摄影（Photorealistic）', en: 'Photorealistic photography', ja: 'フォトリアリスティック' },
+    render:
+      'RAW photography, cinematic color grading, natural skin texture, realistic fabric folds, natural soft quality light',
+    surface:
+      'True-to-life skin with visible pores, natural uneven tone, fine vellus hair and subtle subsurface scattering; eyes with a wet specular highlight, moist lower lid, visible iris fibres and a limbal ring; asymmetric eyelids and brows; individual flyaway hair strands. Fabric with a clearly readable weave, natural drape and realistic fold shadows',
+    lighting:
+      'LIGHTING IN THE LEFT ZONE ONLY: soft natural window light with gentle falloff and subtle ambient occlusion under the chin, in the eye sockets and at the collar. LIGHTING IN THE RIGHT ZONES: flat even orthographic lighting with no directional key and no cast shadows, so the figures stay measurable and cleanly cut out',
+    negative:
+      'plastic or waxy skin, over-smoothed airbrushed complexion, poreless doll face, perfectly symmetrical face, dead flat eyes, helmet-like hair, flat untextured fabric, anime or cartoon rendering, heavy painterly strokes, extra fingers, malformed hands, text, watermark, signature, busy or patterned background',
+    tags: ['photorealistic', 'raw photography', 'cinematic grading', 'natural skin', 'character sheet'],
+    class: 'real',
   },
 
   ghibli: {
     label: { zh: '吉卜力动画', en: 'Ghibli-like animation', ja: 'ジブリ風アニメ' },
     render:
       'Hand-painted anime cel illustration in the manner of classic Studio Ghibli feature animation: clean confident ink linework of even weight, simple flat cel shading with a single soft shadow tone, gentle rounded forms, warm naturalistic palette, watercolour-like softness',
-    // 写实那套的表面细节在这里全是反效果，整块换掉
     surface:
       'Skin as clean flat tone with one soft shadow shape and a warm blush at the cheeks and nose — no pores, no skin texture, no subsurface detail; large clear expressive eyes with a simple round highlight and flat iris colour; hair drawn as grouped strands and clumps with clean silhouettes rather than individual hairs; clothing in simple flat colour with a few decisive fold lines, no fabric weave and no micro-texture',
-    // 平光就是这个风格本身的一部分，不需要分区
     lighting:
       'Even, gentle daylight across the whole sheet with a single soft shadow tone; no dramatic key light, no ambient occlusion, no cast shadows — the flat lighting is part of the style and keeps the figures cleanly cut out',
-    // 这里反过来，必须禁写实
     negative:
       'photorealistic, 3d render, hyperrealistic skin texture, visible pores, subsurface scattering, harsh contrast, heavy painterly rendering, muddy or desaturated colours, gritty texture overlay, extra fingers, malformed hands, text, watermark, signature, busy or patterned background',
     tags: ['ghibli-like', 'cel shading', 'hand-painted', 'character sheet', 'flat daylight'],
+    class: '2d',
   },
 
   pixar3d: {
@@ -258,6 +311,21 @@ export const STYLE_PRESETS = {
     negative:
       'photorealistic photography, hyperrealistic skin with pores and blemishes, gritty film grain, harsh flash lighting, uncanny valley proportions, stiff mannequin posing, extra fingers, malformed hands, text, watermark, signature, busy or patterned background',
     tags: ['3d render', 'pixar-style', 'toy-like', 'character sheet', 'studio lighting'],
+    class: '3d',
+  },
+
+  disney3d: {
+    label: { zh: '迪士尼3D（Disney）', en: 'Disney-style 3D animation', ja: 'ディズニー風3D' },
+    render:
+      'Disney-style premium 3D animation render: glossy expressive eyes, warm family-film look, soft rounded volumes, confident clean silhouette, subtle subsurface material',
+    surface:
+      'Smooth soft 3D skin with a gentle sheen and a warm blush — clean and dimensional, never waxy; large luminous eyes with a bright ring-shaped highlight and a soft gradient iris; hair as sculpted 3D clumps with clean sheen bands; clothing as soft 3D cloth with pillowy folds and delicate sewn detail',
+    lighting:
+      'Soft warm three-point studio lighting: a gentle key light wrapping the cheeks, a soft rim light on the hair, a low-contrast fill keeping shadows pillowy; even and clean on the right-zone figures so the model sheet stays readable and cut-out friendly',
+    negative:
+      'photorealistic photography, gritty film grain, harsh flash lighting, uncanny valley proportions, cel-shaded anime, stiff mannequin posing, extra fingers, malformed hands, text, watermark, signature, busy or patterned background',
+    tags: ['3d render', 'disney-style', 'glossy eyes', 'character sheet', 'family-film look'],
+    class: '3d',
   },
 
   webtoon: {
@@ -271,6 +339,7 @@ export const STYLE_PRESETS = {
     negative:
       'photorealistic, 3d render, heavy painterly strokes, thick impasto, gritty texture, harsh contrast, muddy desaturated colours, realistic fabric weave, extra fingers, malformed hands, text, watermark, signature, busy or patterned background',
     tags: ['webtoon', 'manhwa', 'semi-glazed shading', 'clean linework', 'character sheet'],
+    class: '2d',
   },
 
   shinkai: {
@@ -284,19 +353,21 @@ export const STYLE_PRESETS = {
     negative:
       'photorealistic, 3d render, flat cheap digital colouring, muddy colours, harsh contrast, over-saturated HDR, gritty film grain, thick impasto strokes, extra fingers, malformed hands, text, watermark, signature, busy cluttered background',
     tags: ['shinkai-style', 'cinematic', 'volumetric light', 'anime background art', 'character sheet'],
+    class: '2d',
   },
 
-  guoman: {
-    label: { zh: '2D国漫厚涂（古风顶配）', en: '2D Chinese-anime heavy painterly', ja: '中華風2D厚塗り' },
+  chibi: {
+    label: { zh: 'Q版（Chibi）', en: 'Chibi', ja: 'ちびキャラ' },
     render:
-      'Premium 2D Chinese-animation illustration with refined heavy painterly rendering: flowing elegant linework, layered colour depth with wet-on-wet blending, ornate costume and accessory detail, burnished cinematic colour grading',
+      'Chibi character design, big head small body, adorable, clean bold outline, cute proportions, playful pastel palette',
     surface:
-      'Skin with luminous painterly tones and a delicate blush gradient — smooth porcelain, no pores, no dermis texture; eyes long and expressive with refined double-lid detail, shimmering gradient irises and an elegant dagger-shaped shine; hair as dense silky painterly strands with flowing luminous highlights; clothing as sumptuous layered fabric — silk, brocade, layered robes — with gold and jade accents where every fold and embroidery reads intentional',
+      'Smooth simple chibi skin with soft blush dots — no pores, no texture; large sparkling eyes with big round highlights; hair in simple cute shapes with clean outlines; clothing in flat bold colours with minimal detail',
     lighting:
-      'Atmospheric cinematic lighting for wuxia and xianxia scenes: warm volumetric beams and gentle haze, a soft rim light tracing robes and hair, diffuse fill with delicate shadows filtering through screens and blinds — moody but never muddy',
+      'Bright even flat lighting with single-tone soft shadows; no dramatic key light, no heavy shading, backdrop clean and flat',
     negative:
-      'photorealistic, 3d render, western cartoon style, chibi proportions, flat cheap digital colouring, harsh contrast, muddy desaturated colours, gritty texture overlay, extra fingers, malformed hands, text, watermark, signature, busy or patterned background',
-    tags: ['chinese anime', '2d', 'heavy painterly', 'hanfu detail', 'character sheet', 'cinematic lighting'],
+      'photorealistic, 3d render, realistic proportions, entire-body realistic anatomy, heavy painterly strokes, gritty texture, extra fingers, malformed hands, text, watermark, signature, busy or patterned background',
+    tags: ['chibi', 'cute', 'big head small body', 'clean outline', 'character sheet'],
+    class: '2d',
   },
 };
 
@@ -777,14 +848,18 @@ export function validateCast(characters, sourceText, lang = DEFAULT_LANG, style 
     // 两个预设的反向提示词几乎是相反的，搞反了整批图都毁。
     if (image && SUPPORTED_STYLES.includes(style)) {
       const neg = typeof image.negativePrompt === 'string' ? image.negativePrompt : '';
-      const bansRealism = /photorealistic|3d render/i.test(neg);
-      if (style === 'realistic' && bansRealism) {
-        at(name, 'style=realistic 却在 negativePrompt 里禁 photorealistic／3d render——自相矛盾');
-      }
-      if (style === 'ghibli' && !bansRealism) {
-        at(name, 'style=ghibli 的 negativePrompt 必须禁 photorealistic／3d render');
-      }
       const preset = stylePreset(style);
+      const bansRealism = /photorealistic|3d render/i.test(neg);
+      const bans3d = /3d render/i.test(neg);
+      if (preset.class === 'real' && bansRealism) {
+        at(name, `style=${style}（写实类）却在 negativePrompt 里禁 photorealistic／3d render——自相矛盾`);
+      }
+      if (preset.class === '3d' && bans3d) {
+        at(name, `style=${style}（3D类）绝不能禁 3d render——它本身就是 3D`);
+      }
+      if (preset.class === '2d' && !bansRealism) {
+        at(name, `style=${style}（2D/动画类）的 negativePrompt 必须禁 photorealistic／3d render`);
+      }
       if (typeof image.sheet === 'string' && !image.sheet.includes(preset.render)) {
         at(name, `image.sheet 里没有 style=${style} 的渲染句，画风会飘`);
       }

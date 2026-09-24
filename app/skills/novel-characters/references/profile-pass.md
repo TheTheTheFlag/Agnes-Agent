@@ -46,7 +46,7 @@
 5. `image.prompt` 是**单张表现性插画**（不是技术图，可以放开打光）：四分之三视角半身、纯中性背景、柔和方向主光 + 冷调补光、浅景深、面部最实。
 
    **画风走半写实厚涂，不要写「扁平矢量卡通」。** 实测「扁平矢量卡通」这句会让模型跟自己拧巴——同一批角色出来有的偏动画、有的偏写实。用这一档：
-   `Semi-realistic character illustration, painterly rendering with soft blended edges and visible brush texture, anatomically grounded`
+   `Photorealistic, hyper-realistic, 8K HD texture, natural soft light, realistic fabric folds and weave, artistic realism, stunning visual impact`
 
    **真实感来自不完美，不是细节量。** 皮肤和五官要写具体：可见毛孔、肤色不匀、鼻翼耳缘的细微毛细血管、耳缘透光；眼睛要有湿润高光、下眼睑水光、虹膜纤维；**眼睑和眉毛左右略不对称**；发际线有细碎碎发破开轮廓。老年角色收益最大：老年斑、皮肤松弛，**皱纹要顺着表情肌走**（法令纹、鱼尾纹、抬头纹），不是随机刻线。
 

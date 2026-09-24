@@ -8,7 +8,7 @@ Feed it a novel or a short story, and get a complete design bible for every char
 
 - **Cast list** — who appears, how central they are, with every name a character is called by folded into one person
 - **Profile** — gender, age, standing, appearance, temperament, motivation, arc, relationships, each backed by **verbatim quotes from the source**
-- **Design prompts** — semi-realistic painterly direction, bilingual image prompt + negative prompt + style tags, ready for Midjourney / SD / GPT-Image
+- **Design prompts** — multi-style presets (photorealistic default), bilingual image prompt + negative prompt + style tags, ready for Midjourney / SD / GPT-Image
 - **Voice prompts** — timbre, pitch, pace, accent, emotion, plus a voice-design prompt for Qwen3-TTS / ElevenLabs Voice Design
 - **A character model sheet** — **one per character**: a 16:9 image in three zones: an ID-photo-style bust on the left (~34%, the reference for the face design), a full-body turnaround top-right, and a strip of key-detail close-ups bottom-right. White background for clean cut-out, generated through codex's built-in image tool (optional)
 - **Relationship map** — a whole-cast view inside the report: who is tied to whom, and how. Hover a character to light up every link they are part of, click to jump to their profile
@@ -76,7 +76,7 @@ Two things never follow the language: **image and TTS prompts stay English** (th
 
 ### Image style
 
-`realistic` by default (semi-realistic painterly). For an animation look:
+`photoreal` by default (photorealistic hyper-real, guofeng-flavoured). For an animation / stylised look:
 
 ```
 /novel-characters ./book.txt --style ghibli
@@ -84,12 +84,17 @@ Two things never follow the language: **image and TTS prompts stay English** (th
 
 | id | What it is |
 | --- | --- |
-| `realistic` | Semi-realistic painterly — skin with pores and texture, fabric with weave and wear. Default |
+| `photoreal` | Photorealistic hyper-real (guofeng) — 8K HD texture, natural light, fabric folds. Default |
+| `inkwash` | Chinese ink wash (shuimo) — minimalist brush strokes, paper texture, negative space |
+| `guofeng` | Chinese guofeng 2D heavy painterly — premium wuxia / xianxia look |
+| `cyberpunk` | Cyberpunk neon — rainy night city, high contrast, cold cyan / magenta |
+| `photography` | RAW photography — cinematic color grading, natural skin texture |
 | `ghibli` | Ghibli-like hand-painted cel — even ink linework, a single soft shadow tone, flat colour |
-| `pixar3d` | 3D movie-grade cartoon (Pixar / blind-box toy look) — soft global illumination, mainstream in AI comic dramas |
+| `pixar3d` | 3D movie-grade cartoon (Pixar / blind-box toy look) — soft global illumination |
+| `disney3d` | Disney-style 3D — glossy expressive eyes, warm family-film look |
 | `webtoon` | Korean webtoon manhwa — semi-glazed luminous shading, go-to for urban romance |
 | `shinkai` | Makoto Shinkai-style cinematic anime — luminous skies, volumetric light |
-| `guoman` | 2D Chinese-anime heavy painterly — premium wuxia / xianxia look |
+| `chibi` | Chibi — big head small body, clean bold outline, cute palette |
 
 They combine: `--lang ja --style ghibli`.
 
@@ -118,7 +123,7 @@ The circular layout is computed in Node and written straight into inline SVG —
 The **Export JSON** button in the top bar downloads exactly the `cast.json` shape — not some separate export format:
 
 ```json
-{ "source": "…", "lang": "zh", "style": "realistic", "summary": "…", "characters": [ … ] }
+{ "source": "…", "lang": "zh", "style": "photoreal", "summary": "…", "characters": [ … ] }
 ```
 
 So an external tool can edit it and **feed it straight back into `render`**, and it still passes `validate`. Each character keeps its `sheetImage` path (`images/<slug>-sheet.png`), so you know which sheet belongs to whom.
@@ -146,7 +151,7 @@ Four hard rules, all checked deterministically by a script rather than trusted t
 | `evidence` must be a **verbatim, contiguous** span of the source | Stops invention. Dialogue split by a narration beat may not be stitched back together |
 | Image prompts must **not contain character names** | Image models bias hard on names and will draw the character they remember instead of yours |
 | **Language split** per field | Human-readable fields follow `--lang`, image and TTS prompts are always English — the model drifts otherwise |
-| **Style matches its negative prompt** | `realistic` must not ban `photorealistic`, `ghibli` must — get it backwards and the whole batch is wasted |
+| **Style matches its negative prompt** | `real`-class presets (e.g. `photoreal`) must not ban `photorealistic` / `3d render`; 2D/3D classes must per their `class` — get it backwards and the whole batch is wasted |
 | Structure and enums | `importance` is one of exactly four values |
 
 None of these were written up front. Each one exists because real model output violated it and the validator caught it.

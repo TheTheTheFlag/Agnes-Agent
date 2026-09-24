@@ -215,7 +215,7 @@ eq(
 
   ok(seeded.characters.length === outline.characters.length, 'seed 出的角色数跟大纲一致');
   ok(seeded.source === outline.source, 'source 从大纲继承');
-  ok(seeded.style === 'realistic', '画风取默认值，大纲里没有这个信息');
+  ok(seeded.style === 'photoreal', '画风取默认值，大纲里没有这个信息');
   ok(seeded.summary === '', 'summary 留空——那是读完原文才写得出来的');
 
   // 分档映射：大纲拍板的轻重，这一层不推翻
@@ -499,7 +499,7 @@ eq(round.style, 'ghibli', '导出带画风');
 eq(round.summary, DOC.summary, '导出带故事摘要');
 eq(round.characters.length, CAST.length, '导出带全部角色');
 eq(JSON.stringify(round.characters), JSON.stringify(CAST), '角色卡原样导出，没有丢字段');
-eq(validateCast(round.characters, SOURCE, 'zh', 'realistic').length, 0, '导出的数据能直接喂回 validate 并通过');
+eq(validateCast(round.characters, SOURCE, 'zh', 'photoreal').length, 0, '导出的数据能直接喂回 validate 并通过');
 ok(validateCast(round.characters, SOURCE, 'zh', 'ghibli').length > 0, '喂回去的确实是真数据——画风说反了照样报错');
 
 // ⚠️ 正文里一个 </script 就能把数据块提前截断
@@ -706,8 +706,8 @@ ok(
 
 /* ---------------- 画风预设 ---------------- */
 
-for (const id of ['realistic', 'ghibli']) ok(SUPPORTED_STYLES.includes(id), `内置 ${id} 预设`);
-eq(stylePreset('nope').render, STYLE_PRESETS.realistic.render, '未知风格退回默认');
+for (const id of ['photoreal', 'ghibli', 'inkwash', 'cyberpunk', 'chibi']) ok(SUPPORTED_STYLES.includes(id), `内置 ${id} 预设`);
+eq(stylePreset('nope').render, STYLE_PRESETS.photoreal.render, '未知风格退回默认');
 // 每个预设都要五块齐全，缺一块就会跟另一个预设混搭出四不像
 for (const [id, p] of Object.entries(STYLE_PRESETS)) {
   for (const k of ['render', 'surface', 'lighting', 'negative', 'tags']) {
@@ -716,12 +716,14 @@ for (const [id, p] of Object.entries(STYLE_PRESETS)) {
   ok(p.label.zh && p.label.en && p.label.ja, `${id} 预设有三语标签`);
 }
 // 这是整件事最容易搞反的地方：两个预设的反向提示词几乎相反
-ok(!/photorealistic|3d render/i.test(STYLE_PRESETS.realistic.negative), 'realistic 不禁写实');
+ok(!/photorealistic|3d render/i.test(STYLE_PRESETS.photoreal.negative), 'photoreal 不禁写实');
+ok(/no pores/i.test(STYLE_PRESETS.inkwash.surface), 'inkwash 平涂无毛孔');
+ok(/neon/i.test(STYLE_PRESETS.cyberpunk.render), 'cyberpunk 霓虹句');
 ok(/photorealistic/i.test(STYLE_PRESETS.ghibli.negative), 'ghibli 必须禁写实');
 // 写实的表面细节在吉卜力里是反效果，两边不能是同一段
-ok(/visible pores/i.test(STYLE_PRESETS.realistic.surface), 'realistic 要毛孔');
+ok(/visible pores/i.test(STYLE_PRESETS.photoreal.surface), 'photoreal 要毛孔');
 ok(/no pores/i.test(STYLE_PRESETS.ghibli.surface), 'ghibli 明确不要毛孔');
-ok(STYLE_PRESETS.realistic.surface !== STYLE_PRESETS.ghibli.surface, '两个预设的表面处理不同');
+ok(STYLE_PRESETS.photoreal.surface !== STYLE_PRESETS.ghibli.surface, '两个预设的表面处理不同');
 
 // 校验器要能抓住风格与反向提示词搞反
 const wrongStyle = clone();
@@ -732,35 +734,35 @@ ok(
 const ghibliish = clone();
 for (const c of ghibliish) c.image.negativePrompt = STYLE_PRESETS.ghibli.negative;
 ok(
-  validateCast(ghibliish, SOURCE, 'zh', 'realistic').some((x) => x.includes('自相矛盾')),
-  'realistic 却禁 photorealistic 会报错',
+  validateCast(ghibliish, SOURCE, 'zh', 'photoreal').some((x) => x.includes('自相矛盾')),
+  'photoreal 却禁 photorealistic 会报错',
 );
-eq(validateCast(CAST, SOURCE, 'zh', 'realistic').length, 0, '样例按 realistic 校验通过');
+eq(validateCast(CAST, SOURCE, 'zh', 'photoreal').length, 0, '样例按 photoreal 校验通过');
 
 // 同剧角色画风必须一致——模型曾按各自服装/年龄写出四套画风，同框像四个画师
 // 样例已统一，应通过；故意改掉一个角色的 image.style 必须报错；仅空白差异不算不一致
-eq(validateCast(CAST, SOURCE, 'zh', 'realistic').length, 0, '样例四个角色画风统一，校验通过');
+eq(validateCast(CAST, SOURCE, 'zh', 'photoreal').length, 0, '样例四个角色画风统一，校验通过');
 {
   const split = clone();
   split[1].image.style = '吉卜力动画风，明快平涂';
   ok(
-    validateCast(split, SOURCE, 'zh', 'realistic').some((x) => x.includes('画风不一致')),
+    validateCast(split, SOURCE, 'zh', 'photoreal').some((x) => x.includes('画风不一致')),
     '同剧角色 image.style 不一致会报错',
   );
 }
 {
   const ws = clone();
   ws[0].image.style = '  半写实厚涂插画，冷调低饱和民国配色，晨雾柔光  ';
-  eq(validateCast(ws, SOURCE, 'zh', 'realistic').length, 0, 'image.style 仅空白差异不算不一致');
+  eq(validateCast(ws, SOURCE, 'zh', 'photoreal').length, 0, 'image.style 仅空白差异不算不一致');
 }
 
 // 同批角色的提示词不许雷同——模型套同一个模板，两个年龄性别接近的角色会出成同一个人（issue #9）
-eq(validateCast(CAST, SOURCE, 'zh', 'realistic').length, 0, '样例四个角色的提示词差异够大，不误拦');
+eq(validateCast(CAST, SOURCE, 'zh', 'photoreal').length, 0, '样例四个角色的提示词差异够大，不误拦');
 {
   const dup = clone();
   dup[1].image.prompt = dup[0].image.prompt;
   ok(
-    validateCast(dup, SOURCE, 'zh', 'realistic').some((x) => x.includes('出图提示词雷同')),
+    validateCast(dup, SOURCE, 'zh', 'photoreal').some((x) => x.includes('出图提示词雷同')),
     '两个角色的出图提示词完全相同会报错',
   );
 }
@@ -771,7 +773,7 @@ eq(validateCast(CAST, SOURCE, 'zh', 'realistic').length, 0, '样例四个角色�
     .replace(/nineteen-year-old/g, 'twenty-two-year-old')
     .replace(/navy-blue/g, 'dark green');
   ok(
-    validateCast(near, SOURCE, 'zh', 'realistic').some((x) => x.includes('出图提示词雷同')),
+    validateCast(near, SOURCE, 'zh', 'photoreal').some((x) => x.includes('出图提示词雷同')),
     '只改几个词的出图提示词照样被拦',
   );
 }
@@ -779,7 +781,7 @@ eq(validateCast(CAST, SOURCE, 'zh', 'realistic').length, 0, '样例四个角色�
   const dupVoice = clone();
   dupVoice[1].voice.prompt = dupVoice[0].voice.prompt;
   ok(
-    validateCast(dupVoice, SOURCE, 'zh', 'realistic').some((x) => x.includes('音色提示词雷同')),
+    validateCast(dupVoice, SOURCE, 'zh', 'photoreal').some((x) => x.includes('音色提示词雷同')),
     '两个角色的音色提示词相同也会报错',
   );
 }
@@ -788,7 +790,7 @@ eq(validateCast(CAST, SOURCE, 'zh', 'realistic').length, 0, '样例四个角色�
   const dupSheet = clone();
   dupSheet[1].image.sheet = dupSheet[0].image.sheet;
   ok(
-    !validateCast(dupSheet, SOURCE, 'zh', 'realistic').some((x) => x.includes('雷同')),
+    !validateCast(dupSheet, SOURCE, 'zh', 'photoreal').some((x) => x.includes('雷同')),
     'image.sheet 相同不报错——它的固定排版文本占比太高，设门必然误拦',
   );
 }
@@ -798,7 +800,7 @@ eq(validateCast(CAST, SOURCE, 'zh', 'realistic').length, 0, '样例四个角色�
   tiny[0].image.prompt = 'a man';
   tiny[1].image.prompt = 'a man';
   ok(
-    !validateCast(tiny, SOURCE, 'zh', 'realistic').some((x) => x.includes('出图提示词雷同')),
+    !validateCast(tiny, SOURCE, 'zh', 'photoreal').some((x) => x.includes('出图提示词雷同')),
     '词数太少的提示词不参与雷同判定',
   );
 }
@@ -820,7 +822,7 @@ ok(
   '不再用扁平矢量卡通',
 );
 ok(
-  CAST.every((c) => /Semi-realistic character illustration, painterly rendering/.test(c.image.sheet)),
+  CAST.every((c) => /Photorealistic, hyper-realistic/.test(c.image.sheet)),
   '画风统一到半写实厚涂',
 );
 // 真实感来自不完美
