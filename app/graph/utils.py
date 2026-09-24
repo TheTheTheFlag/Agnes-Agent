@@ -196,7 +196,16 @@ def trim_history_by_turns(messages, max_tokens, keep_recent=KEEP_RECENT):
     result = [m for b in blocks for m in b]
     if count_tokens(result) > max_tokens:
         result = truncate_oversized_messages(result, max_tokens)
-    return sanitize_messages(result)
+    result = sanitize_messages(result)
+    # 上游网关 400「No user query found in messages.」补丁：
+    # 裁剪可能把人类指令所在回合块整块裁掉，导致请求无 user 消息。
+    # 兜底补回原始 messages 里最后一条 human，保证请求合法。
+    if not any(getattr(m, "type", "") == "human" for m in result):
+        for _m in reversed(messages):
+            if type(_m).__name__ == "HumanMessage" or getattr(_m, "type", "") == "human":
+                result = [_m] + result
+                break
+    return result
 
 
 _TRUNCAT_OVER_NOTE = "\n...[内容过大，已截断；如需完整内容，请用 read_file 的 offset/limit 分页读取或改用针对性工具]"

@@ -732,7 +732,16 @@ class ReActLoop:
                 f"任务目标与最近几轮内容保持不变，请基于现有信息继续，不要假设被移除内容仍可引用。"
             )
         )
-        return head + [summary] + tail
+        kept = head + [summary] + tail
+        # 上游网关 400「No user query found in messages.」补丁：
+        # 压缩只保系统头+尾窗，而 human 指令通常在 index=1，工具轮次一多就被挤出尾窗，
+        # 模型输入因此没有任何 user 消息。保证窗口内存在最后一条 human（原样插回系统区后）。
+        if not any(getattr(m, "type", "") == "human" for m in kept):
+            for _m in reversed(messages):
+                if getattr(_m, "type", "") == "human":
+                    kept = head + [_m, summary] + tail
+                    break
+        return kept
 
     def _execute_tool(self, tool_name, params, tools, state, tool_id=None):
         # 参数完整性前置检查：模型/gateway 偶尔只带 path 漏 content（或完全空参数），
