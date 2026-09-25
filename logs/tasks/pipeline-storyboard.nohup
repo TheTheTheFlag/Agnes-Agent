@@ -1,2 +1,5 @@
 [06:25:47] ===== pipeline_storyboard START=1 END=60 2026年 09月 26日 星期六 06:25:47 CST =====
 [06:25:47] == 前置 T5：角色设定图用新基线全部重出 ==
+[06:47:17] T5 -> [2026-09-26 06:47:17] FINAL status=done info=null
+[06:47:22] T5 后 cast 落盘检查: OK
+[06:47:22] == 前置 合并：script-b01..b20 → 美人图-script.json ==
