@@ -86,7 +86,7 @@ python <skill_dir>/media.py video --prompt "在两张关键帧之间平滑转场
 | `--width`/`--height` | 会被标准化到 480p/720p/1080p；竖向 9:16 内容可用 `--width 672 --height 1152` 之类后看 `metadata.size_mapping` |
 | `--seed` | 固定种子可复现 |
 | `--negative-prompt` | 反向提示词 |
-| `--interval` / `--timeout` | 轮询间隔（默认 8s）/ 最大等待（默认 300s，即 5 分钟） |
+| `--interval` / `--timeout` | 轮询间隔（默认 8s）/ 最大等待（默认 300s；视频批次脚本可设至 99 小时 = 356400s，避免长生成被掐断） |
 
 **耗时提示**：5 秒视频通常需 1-3 分钟轮询，属正常；若轮询超时，用 `fetch` 续查不要重新创建任务。
 

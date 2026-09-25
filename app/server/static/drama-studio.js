@@ -1,14 +1,12 @@
 /* ============================================================================
    短剧创作工作台（系统级 · 左侧模块 Tab 列表）
    ----------------------------------------------------------------------------
-   不绑定任何账号：所有 12 个创作技能已作为系统内置技能安装（app/skills/），
-   任何账号都能看到并使用：
-     · 短剧创作 5 个：novel-outline / novel-characters / novel-art /
-                      novel-script / novel-storyboard（前导技能流水线）
-     · 小说创作 7 个：sumeru-topic / sumeru-worldbuilder / sumeru-outline /
-                      sumeru-write / sumeru-review / sumeru-polish /
-                      sumeru-finalize（xindoo/sumeru 技能族）
-   布局：左侧 = 模块 Tab 列表（分组），右侧 = 当前模块的表单卡。
+   不绑定任何账号：创作技能已作为系统内置技能安装（app/skills/），
+   任何账号都能看到并使用，统一收在「短剧创作」一个分组：
+     · 短剧创作（7 个，小说创作排第一）：sumeru-worldbuilder（小说创作）/
+       novel-outline / novel-characters / novel-art / novel-script /
+       novel-storyboard / agnes-media(出视频)
+   布局：左侧 = 模块 Tab 列表（单分组），右侧 = 当前模块的表单卡。
    点击模块「启动」→ 激活本会话受限命令作用域 → 收集参数组指令 → 切回对话，
    由当前会话的智能体按对应 SKILL.md 流水线执行。
    依赖 app.js 全局工具：$ / $$ / apiGet / apiPost / escapeHtml / toast /
@@ -225,6 +223,27 @@ ${v.scriptPath ? `script.json（工作区相对路径，先 read_file）：${v.s
 ${upsNote}${DRAMA_TAIL(title)}`;
     },
   },
+  {
+    key: "video",
+    skill: "agnes-media",
+    icon: "🎥",
+    name: "出视频",
+    color: "#e84393",
+    desc: "把 storyboard.json 里每一段的 h3Prompt 用 Agnes 视频模型逐段出视频片段（agnes-media video，按段秒数×24fps 换算帧数），再用 ffmpeg 拼成整集，落到 deliverables/短剧/<剧名>/videos/。storyboard.json 是硬前提。",
+    fields: [
+      { key: "storyboardPath", label: "storyboard.json 路径", type: "path", placeholder: "必填（工作区相对路径），视频逐段从分镜的 h3Prompt 出" },
+      { key: "storyboardText", label: "或：粘贴 storyboard.json 内容", type: "textarea", rows: 5, placeholder: "没有路径文件就整份贴进来，先落到临时文件" },
+      { key: "eps", label: "出哪些集（可选）", type: "text", placeholder: "如 1-3 / 1,4,7 / 留空=全部（默认先出 1–3 集样片）" },
+    ],
+    build(v, title) {
+      if (!v.storyboardPath && !v.storyboardText) return "";
+      return `请使用 agnes-media 技能，为这部短剧出整集视频（输入 storyboard.json → 逐段用 h3Prompt 出视频片段 → ffmpeg 拼集）。
+项目/剧名：${title}
+${v.storyboardPath ? `storyboard.json（工作区相对路径，先 read_file）：${v.storyboardPath}` : `storyboard.json 内容（先落到临时文件再进技能流程）：\n\n${v.storyboardText}`}
+范围：${v.eps ? `仅 ${v.eps} 集` : "全部集（先出 1–3 集样片给用户确认规格，再批量）"}
+要求：严格按该技能的 SKILL.md 逐步执行。先用 read_skill agnes-media 读取技能说明，再执行 python app/skills_builtin/agnes-media/media.py video --prompt "<逐字取该段 h3Prompt>" --frames <该段秒数×24 换算并取最近的 8n+1，上限 441> --fps 24 --ratio 3:2，默认走参数缺省的画面比例；stdout 出现 FILE= 即成功，把每个片段复制到 data/users/<当前用户>/deliverables/短剧/${title}/videos/ 下按帧序命名；一集各段齐了再用 ffmpeg -f concat -safe 0 拼成 videos/<集号>/E<集号>.mp4。出图之前的既有交付不受影响；每集完成后用 2–3 句话汇报片段数量 + 是否拼集成功。全程用中文汇报。`;
+    },
+  },
 ];
 
 /* ————————————————————— 分组二：小说创作（xindoo/sumeru 技能族） ————————————————————— */
@@ -233,7 +252,7 @@ const SUMERU_MODULES = [
     key: "s_world",
     skill: "sumeru-worldbuilder",
     icon: "🌍",
-    name: "全流程构建",
+    name: "小说创作",
     color: "#a06bff",
     desc: "网文创作一站式主控：自动编排 选题 → 大纲 → 章节撰写 → 逻辑审查 → 内容润色 → 完稿校验 完整链路，统一的 .sumeru/session/ 工作记忆，从 0 到 1 完成一部作品。",
     fields: [
@@ -252,138 +271,12 @@ ${v.needs || "（无特定创意，请 AI 自主构想一个完整故事。）"}
 ${SUMERU_TAIL(title)}`;
     },
   },
-  {
-    key: "s_topic",
-    skill: "sumeru-topic",
-    icon: "💡",
-    name: "选题策划",
-    color: "#5ab0ff",
-    desc: "网文选题策划：市场热点分析 → 生成 3–5 套选题方案（金手指设计 / 核心卖点 / 爽点模式 / 情绪价值曲线）→ 可行性评估与推荐。输出选题策划报告.md，options.json 供下游复用。",
-    fields: [
-      { key: "genre", label: "题材倾向", type: "text", placeholder: "如：玄幻 / 都市脑洞 / 悬疑无限流" },
-      { key: "keywords", label: "关键词（逗号分隔）", type: "text", placeholder: "如：废柴逆袭, 系统流, 穿越" },
-      { key: "platform", label: "目标平台", type: "select", default: "不限", options: _PLATFORM_OPTS },
-      { key: "audience", label: "目标读者", type: "select", default: "男频", options: [["男频", "男频"], ["女频", "女频"], ["不限", "不限"]] },
-      { key: "count", label: "选题数量", type: "number", default: 3, min: 1 },
-      { key: "extra", label: "其他要求（可选）", type: "textarea", rows: 3, placeholder: "如：偏好系统流 / 不要末世题材 / 想写轻松搞笑风…" },
-    ],
-    build(v, title) {
-      const kw = v.keywords ? `关键词：${v.keywords}` : "";
-      return `请使用 sumeru-topic 技能，做一次网文选题策划。
-书名/项目名：${title}
-题材倾向：${v.genre || "（未提供，由 AI 按市场热点拟定）"}　${kw ? `\n${kw}` : ""}
-目标平台：${v.platform || "不限"}　目标读者：${v.audience || "男频"}
-生成 ${v.count || 3} 套选题方案（含金手指设计、核心卖点、受众定位、爽点模式、开篇建议），输出选题策划报告.md 并做可行性评估与最终推荐。
-${v.extra ? `其他要求：\n${v.extra}\n` : ""}${SUMERU_TAIL(title)}`;
-    },
-  },
-  {
-    key: "s_outline",
-    skill: "sumeru-outline",
-    icon: "📐",
-    name: "大纲细纲",
-    color: "#45d6b5",
-    desc: "小说大纲设计：世界观设定 / 人物设定卡 / 分卷大纲 / 爽点排布 / 强制合规检查，并为全本生成完整章节细纲 chapter-outlines.json（细纲驱动下游写作）。",
-    fields: [
-      { key: "topicPath", label: "可选：已有选题 options.json 路径", type: "path", placeholder: "有 sumeru-topic 产物就填，复用选题数据（工作区相对路径）" },
-      { key: "genre", label: "题材", type: "text", placeholder: "如：玄幻 / 都市 / 悬疑" },
-      { key: "chapters", label: "目标章节数", type: "number", default: 60, min: 1, hint: "含分卷大纲与完整章节细纲" },
-      { key: "settings", label: "已有设定 / 要求（可选）", type: "textarea", rows: 4, placeholder: "如：力量体系怎么设计、主角金手指、想避开的套路、人设倾向…" },
-    ],
-    build(v, title) {
-      return `请使用 sumeru-outline 技能，为《${title}》（题材：${v.genre || "待定"}）设计完整大纲：世界观设定、人物设定卡、分卷大纲、爽点排布，并生成全本 ${v.chapters || 60} 章的完整章节细纲（chapter-outlines.json）。
-${v.topicPath ? `复用已有选题数据（options.json，工作区相对路径，先 read_file）：${v.topicPath}\n` : ""}
-${v.settings ? `已有设定/要求：\n${v.settings}\n` : ""}${SUMERU_TAIL(title)}`;
-    },
-  },
-  {
-    key: "s_write",
-    skill: "sumeru-write",
-    icon: "✍️",
-    name: "章节撰写",
-    color: "#ffb04f",
-    desc: "网文章节创作：细纲驱动批量生成 / 续写 / 重写 / 扩写多模式，自动适配网文节奏，批量时子 Agent 并行（每 Agent ≤3 章），保持人物与剧情一致性。",
-    fields: [
-      { key: "mode", label: "模式", type: "select", default: "细纲驱动批量", options: [["细纲驱动批量", "细纲驱动批量（若工作目录内有 chapter-outlines.json 自动启用）"], ["续写", "续写后续章节"], ["重写", "重写指定章节"], ["扩写", "扩写章节内容"]] },
-      { key: "chapters", label: "本批章节数", type: "number", default: 1, min: 1, hint: "细纲驱动时按 3 章/Agent 自动并行" },
-      { key: "startFrom", label: "起始章节", type: "number", default: 1, min: 1 },
-      { key: "chapterLen", label: "每章字数", type: "number", default: 4500, min: 1000, hint: "默认 4000–5000 字/章" },
-      { key: "notes", label: "写作要求（可选）", type: "textarea", rows: 3, placeholder: "如：紧张感拉满、每章结尾留钩子、对话要自然…" },
-    ],
-    build(v, title) {
-      return `请使用 sumeru-write 技能，为《${title}》撰写章节（模式：${v.mode || "细纲驱动批量"}）。
-从第 ${v.startFrom || 1} 章起，写 ${v.chapters || 1} 章，每章约 ${v.chapterLen || 4500} 字；细纲驱动时自动读取操作根目录下的 chapter-outlines.json（有则自动启用、章节数与细纲对齐）。
-${v.notes ? `写作要求：\n${v.notes}\n` : ""}${SUMERU_TAIL(title)}`;
-    },
-  },
-  {
-    key: "s_review",
-    skill: "sumeru-review",
-    icon: "🔍",
-    name: "逻辑审查",
-    color: "#ff7c7c",
-    desc: "小说逻辑 / 一致性审查：全量信息底稿检查（时间线冲突、设定崩塌、OOC、重复情节、信息泄露、伏笔悬线）+ 章节级审查，输出剧情审查报告.md；严重问题可自动修订大纲并重写章节（自动备份原稿）。",
-    fields: [
-      { key: "chaptersPath", label: "章节目录（可选）", type: "path", placeholder: "工作区相对路径，默认 deliverables/小说/<书名>/chapters/" },
-      { key: "scope", label: "审查范围", type: "select", default: "全部章节", options: [["全部章节", "全部章节"], ["指定区间", "仅审查指定章节区间"]] },
-      { key: "range", label: "区间", type: "text", placeholder: "如 1-20（审查范围=指定区间时生效）" },
-      { key: "autoFix", label: "严重问题处理", type: "radio", default: "auto", options: [["auto", "自动修订大纲并重写问题章节（推荐）"], ["report", "仅生成报告，人工处理"]] },
-      { key: "focus", label: "侧重（可选）", type: "text", placeholder: "如：时间线 / OOC / 伏笔回收 / 设定一致性" },
-    ],
-    build(v, title) {
-      const range = v.range ? `（区间：${v.range}）` : "";
-      return `请使用 sumeru-review 技能，对《${title}》做逻辑与一致性审查。
-审查范围：${v.scope || "全部章节"}${range}
-${v.chaptersPath ? `章节目录（工作区相对路径，先 read_file 确认）：${v.chaptersPath}\n` : ""}
-${v.focus ? `侧重：${v.focus}\n` : ""}严重问题处理：${v.autoFix === "auto" ? "自动修订大纲并重写严重问题章节（修改前备份到 .sumeru/write/original/），轻量问题直接在 chapters/ 修正" : "仅生成报告，不在 chapters/ 直接修改"}
-审查后输出剧情审查报告.md（含全量底线问题清单，见 .sumeru/review/）。${SUMERU_TAIL(title)}`;
-    },
-  },
-  {
-    key: "s_polish",
-    skill: "sumeru-polish",
-    icon: "✨",
-    name: "内容润色",
-    color: "#ff8ac2",
-    desc: "小说情感润色：轻度 / 中度 / 重度三级润色 + 多文风选择，专注文本内容层优化（节奏提速、爽点强化、对话自然化、细节丰满），直接修改 chapters/（修改前自动备份）。",
-    fields: [
-      { key: "level", label: "润色等级", type: "select", default: "中度润色", options: [["轻度润色", "轻度润色（优化句式措辞，保留约 80% 原表达）"], ["中度润色", "中度润色（重构节奏结构，优化场景视角）"], ["重度润色", "重度润色（逐句打磨，追求极致阅读体验）"]] },
-      { key: "style", label: "文风", type: "select", default: "保持原风格", options: [["保持原风格", "保持原风格"], ["简洁爽快", "简洁爽快（短句、快节奏、情绪直接）"], ["精品文学", "精品文学（句式精美、注重氛围）"], ["垂文婉约", "垂文婉约"], ["现实向", "现实向"], ["资讯流", "资讯流"], ["科幻未来", "科幻未来"]] },
-      { key: "chaptersPath", label: "章节目录（可选）", type: "path", placeholder: "工作区相对路径，默认 deliverables/小说/<书名>/chapters/" },
-      { key: "focus", label: "侧重", type: "select", default: "全面优化", options: [["全面优化", "全面优化"], ["节奏提速", "节奏提速（删废笔、压缩铺垫、提速 30%-50%）"], ["爽点强化", "爽点强化（铺垫、爆发、细节放大、收尾四段式）"], ["对话自然化", "对话自然化"], ["细节丰满", "细节丰满"]] },
-    ],
-    build(v, title) {
-      return `请使用 sumeru-polish 技能，对《${title}》进行内容润色。
-润色等级：${v.level || "中度润色"}　文风：${v.style || "保持原风格"}　侧重：${v.focus || "全面优化"}
-${v.chaptersPath ? `章节目录（工作区相对路径，先 read_file 确认）：${v.chaptersPath}\n` : ""}
-润色结果直接修改 chapters/，修改前自动备份原稿到 .sumeru/write/original/。${SUMERU_TAIL(title)}`;
-    },
-  },
-  {
-    key: "s_finalize",
-    skill: "sumeru-finalize",
-    icon: "✅",
-    name: "完稿校验",
-    color: "#5fd68a",
-    desc: "小说终审与完稿打包：全量校对（错别字 / 标点 / 语法 / 敏感违规排查）+ 格式规范统一（章节标题、排版），按目标平台输出规则整理出版 publish/ 完整作品包。",
-    fields: [
-      { key: "chaptersPath", label: "章节目录（可选）", type: "path", placeholder: "工作区相对路径，默认 deliverables/小说/<书名>/chapters/" },
-      { key: "platform", label: "目标平台", type: "select", default: "多平台通用", options: [["多平台通用", "多平台通用"], ["起点", "起点"], ["番茄", "番茄"], ["晋江", "晋江"], ["知乎", "知乎盐选"]] },
-      { key: "autoFormat", label: "排版", type: "radio", default: "format", options: [["format", "按平台格式统一编排（推荐）"], ["plain", "仅校对，保持现有排版"]] },
-    ],
-    build(v, title) {
-      return `请使用 sumeru-finalize 技能，对《${title}》全书做终审与收尾。
-${v.chaptersPath ? `章节目录（工作区相对路径，先 read_file 确认）：${v.chaptersPath}\n` : ""}
-目标平台排版：${v.platform || "多平台通用"}　排版方式：${v.autoFormat === "format" ? "按平台格式统一编排" : "仅校对、保持现有排版"}
-执行全量终审（错别字、标点、语法、内容合规与敏感词排查），完成后输出 publish/ 完整作品包与全书统计。${SUMERU_TAIL(title)}`;
-    },
-  },
 ];
 
-/* ————————————————————— 分组定义（左侧 Tab 列表） ————————————————————— */
+/* ————————————————————— 分组定义（左侧 Tab） —————————————————————
+   已合并：小说创作（s_world）并入「短剧创作」分组，排在第一位。 */
 const CREATIVE_GROUPS = [
-  { key: "drama", label: "短剧创作", note: "系统级 · novel-* 前导技能", modules: DRAMA_MODULES },
-  { key: "novel", label: "小说创作", note: "系统级 · xindoo/sumeru 技能", modules: SUMERU_MODULES },
+  { key: "drama", label: "短剧创作", note: "系统级 · 小说创作 + novel-* 前导 + agnes-media", modules: SUMERU_MODULES.concat(DRAMA_MODULES) },
 ];
 
 /* 用（skillKey, moduleKey）唯一标识一个模块 */
@@ -435,8 +328,8 @@ function renderDrmModule(el, moduleKey) {
       <div class="drm-desc">${m.desc}</div>
       <div class="drm-fields">
         <div class="st-block drm-title-block">
-          <div class="st-block-hd"><span>${drmGroupOf(m.key).key === "novel" ? "书名 / 项目名（可选）" : "剧名（可选）"}</span><span class="st-block-tip">${drmGroupOf(m.key).key === "novel" ? "留空用默认「我的新书」" : "留空用默认「我的AI短剧」"}；填了则按此建独立交付目录，多部作品互不覆盖</span></div>
-          <input type="text" class="d-input" id="drm-title-${m.key}" placeholder="${drmGroupOf(m.key).key === "novel" ? "如：重生之都市仙尊" : "如：星际边缘的曙光"}" spellcheck="false">
+          <div class="st-block-hd"><span>${m.key === "s_world" ? "书名 / 项目名（可选）" : "剧名（可选）"}</span><span class="st-block-tip">${m.key === "s_world" ? "留空用默认「我的新书」" : "留空用默认「我的AI短剧」"}；填了则按此建独立交付目录，多部作品互不覆盖</span></div>
+          <input type="text" class="d-input" id="drm-title-${m.key}" placeholder="${m.key === "s_world" ? "如：重生之都市仙尊" : "如：星际边缘的曙光"}" spellcheck="false">
         </div>
         ${m.fields.map((f) => (f.type === "radio" ? drmRadioHtml(m.key, f) : drmFieldHtml(m.key, f))).join("")}
       </div>
@@ -454,7 +347,7 @@ function renderDrmModule(el, moduleKey) {
     if (DRM.run && DRM.run.streaming) { toast("「" + mod.name + "」：当前有模块正在生成中，请先等本轮结束或点「⏹ 停止」", "warn"); return; }
     const group = CREATIVE_GROUPS.find((g) => g.modules.some((x) => x.key === mod.key)) || CREATIVE_GROUPS[0];
     const _tEl = $("#drm-title-" + mod.key, box);
-    const title = drmSafeTitle(_tEl ? _tEl.value : "", group.key === "novel" ? SUMERU_TITLE_DFT : DRAMA_TITLE_DFT);
+    const title = drmSafeTitle(_tEl ? _tEl.value : "", mod.key === "s_world" ? SUMERU_TITLE_DFT : DRAMA_TITLE_DFT);
     const v = drmCollect(box, mod.key, mod.fields);
     const msg = mod.build(v, title);
     if (!msg) { toast("请先填写该模块的必填输入（正文粘贴 或 产物路径）", "error"); return; }
@@ -480,18 +373,18 @@ function renderDrmModule(el, moduleKey) {
     } catch (e) { console.warn("drm new session:", e); }
     await drmSetCmd(true);   // 受限命令作用域按「用户 × 新线程」签发
     drmStartRun(mod, title);
-    drmEnterChatView(el, mod, title, false);   // 嵌入首页对话页（不刷新历史，避免与首条启动消息竞态）
-    if (DRM.run) DRM.run.streaming = true;
-    drmSetLive(true, "◔ 执行中");
+    DRM.run.streaming = true;
+    /* 【点击启动 → 直接跳转到主页对话页面】不把 #chat 内嵌进工作台框内；
+       关掉创作工作台，返回主页对话页从首条启动消息开始看完整生成流程。 */
+    if (typeof closeStudioView === "function") closeStudioView();
     try {
-      const _sent = await sendMessage(msg);           // 复用首页对话页自己的流式渲染（token/工具/审批/待办全在框内）
+      const _sent = await sendMessage(msg);           // 在主页对话页发起并流式渲染（token/工具/审批/待办全在页内）
       if (_sent === false && DRM.run) {
         // 上一轮还挂着（State.streaming 未复位）：本轮实际没发出去——回滚待命态，避免 ◔ 永久残影
         DRM.run.streaming = false;
-        drmClearProgress(DRM.run.moduleKey);
-        drmNavBadges(DRM.navEl);
-        drmSetLive(false, "● 等待回复");
-        drmBanner("warn", "🍃 上一轮对话仍处于执行中，本轮未启动：请先「⏹ 停止」或等它结束");
+        if (DRM.embedded) { drmClearProgress(DRM.run.moduleKey); drmNavBadges(DRM.navEl); drmSetLive(false, "● 等待回复"); }
+        if (typeof openStudioView === "function") openStudioView("drama");
+        toast("🍃 上一轮对话仍处于执行中，本轮未启动：请先「⏹ 停止」或等它结束", "warn");
       }
     } catch (e) {
       console.warn("drm launch:", e);
@@ -555,6 +448,205 @@ function drmSaveProgress() { try { localStorage.setItem(drmProgKey(), JSON.strin
 function drmMarkProgress(modKey, status) { DRM.progress[modKey] = { status: status, ts: Date.now() }; drmSaveProgress(); drmTodoRefresh(); }
 function drmClearProgress(modKey) { if (DRM.progress[modKey]) { delete DRM.progress[modKey]; drmSaveProgress(); drmTodoRefresh(); } }
 
+/* ————— 交付物筛选框：输入作品名 → 各环节交付物 ————— */
+/* ————— 右栏双模式切换 —————
+   form  = 平时：当前环节创作表单（默认）
+   preview = 搜索命中后：HTML/MD 交付物整页渲染
+   进入 preview 时把「短剧创作」整体收起：隐藏环节导航 + 顶栏提示 + 表单，
+   页面变为纯交付物浏览器，左栏只剩搜索卡；返回创作时全部恢复。 */
+function drmSetRightMode(mode) {
+  const form = document.getElementById("drmModuleBox");
+  const prev = document.getElementById("drmRenderBox");
+  if (!form || !prev) return;
+  const isPrev = mode === "preview";
+  form.style.display = isPrev ? "none" : "";
+  prev.style.display = isPrev ? "" : "none";
+  /* 搜索交付物后隐藏「短剧创作」：环节导航收起，顶栏提示收起 */
+  const todo = document.getElementById("drmTodoHost");
+  if (todo) todo.style.display = isPrev ? "none" : "";
+  const root = form.closest ? form.closest(".st.drm") : null;
+  if (root) {
+    const head = root.querySelector(".st-head");
+    if (head) head.style.display = isPrev ? "none" : "";
+  }
+  const back = document.getElementById("drmRenderForm");
+  if (back) back.onclick = () => { drmSetRightMode("form"); };
+}
+
+/* ————— 交付物筛选（短剧→HTML 交付物 / 小说→各目录 MD 文件 → 点击渲染到右侧大区） —————
+   查询 tree 后：短剧保留 .html/.htm，小说保留 .md（chapters 等）；按「创作顺序」分组列条目；
+   点条目 → drmRenderHtml 在右栏整页渲染（HTML 相对图片路径自动改写为绝对 API 路径）。
+   命中后自动把右栏从「创作表单」切到「浏览」模式。 */
+let _drmDelivList = [];        // 当前作品的交付物 [{path,name,size,label,idx}]
+let _drmDelivKw = "";          // 当前查询的作品名
+let _drmLastHtml = "";         // 最近一次改写后的 HTML 内容（「新窗口打开」用 Blob 复用）
+
+/* 相对资源路径 → 绝对 /api/deliverables/view?path=<dir>/<rel>（修复 HTML 内图片不显示） */
+function rewriteDelivHtml(html, dir) {
+  if (!dir) return html;
+  const toAbs = (rel) => {
+    rel = rel.trim();
+    if (!rel) return rel;
+    if (/^(https?:)?\/\//i.test(rel) || rel.startsWith("#") || rel.startsWith("data:") || rel.startsWith("blob:") || rel.startsWith("/")) return rel;
+    return "/api/deliverables/view?path=" + encodeURIComponent(dir + "/" + rel);
+  };
+  return html
+    .replace(/(\ssrc\s*=\s*["'])([^"']+)(["'])/gi, (m, a, v, c) => a + toAbs(v) + c)
+    .replace(/(\shref\s*=\s*["'])([^"']+)(["'])/gi, (m, a, v, c) => a + toAbs(v) + c)
+    .replace(/(\ssrcset\s*=\s*["'])([^"']+)(["'])/gi, (m, a, v, c) => a + v.split(",").map((s) => { const [p, w] = s.trim().split(/\s+/); return toAbs(p) + (w ? " " + w : ""); }).join(", ") + c);
+}
+
+function drmDelivRefresh(el) {
+  const host = document.getElementById("drmDelivFilter");
+  if (!host) return;
+  /* 短剧 HTML 交付物（report.html 为拆角色产出；其余按文件名前缀归环节） */
+  const DRAMA_KW = [
+    { re: /outline/i,                           label: "🧩 改编大纲", idx: 2 },
+    { re: /(^|\/)report\.html$/i,               label: "👥 拆角色",   idx: 3 },
+    { re: /cast|character/i,                    label: "👥 拆角色",   idx: 3 },
+    { re: /art/i,                               label: "🎨 美术设定", idx: 4 },
+    { re: /script/i,                            label: "📜 写剧本",   idx: 5 },
+    { re: /storyboard/i,                        label: "🎬 出分镜",   idx: 6 },
+    { re: /video|\.mp4|\.webm/i,                label: "🎥 出视频",   idx: 7 },
+    { re: /image|\.png|\.jpg/i,                 label: "🖼 出图",     idx: 8 },
+  ];
+  /* 小说 MD 交付物：chapters 章节 / 大纲 / 报告说明（排在短剧各环节之前） */
+  const NOVEL_KW = [
+    { re: /大纲/i,                              label: "📖 小说大纲", idx: 0 },
+    { re: /chapters\//i,                        label: "📑 小说章节", idx: 1 },
+    { re: /完稿|报告|策划/i,                    label: "📝 报告",     idx: 9 },
+    { re: /README/i,                            label: "📄 说明",     idx: 9 },
+  ];
+  host.innerHTML = `
+    <div class="drm-deliv">
+      <div class="drm-deliv-hd">
+        <span class="drm-deliv-title">📦 交付物</span>
+        <input type="text" id="drmDelivKw" class="d-input" placeholder="作品名，如：渊核" />
+        <button class="d-btn sm" id="drmDelivGo">🔎 查看</button>
+      </div>
+      <div id="drmDelivOut" class="drm-deliv-out"></div>
+    </div>`;
+  const kw = $("#drmDelivKw", host);
+  const go = $("#drmDelivGo", host);
+  const out = $("#drmDelivOut", host);
+
+  const paint = async () => {
+    const q = (kw.value || "").trim();
+    if (!q) { out.innerHTML = `<div class="d-empty">请输入作品名，如「渊核」</div>`; return; }
+    out.innerHTML = `<div class="d-empty">检索「${q}」的交付物…</div>`;
+    /* 两个分支都查：短剧保留 HTML 交付物；小说保留目录/章节 MD。同名作品（如 短剧/渊核 + 小说/渊核）合并展示 */
+    let kept = [];
+    for (const b of ["短剧", "小说"]) {
+      try {
+        const r = await apiGet(`/api/deliverables/tree?path=${encodeURIComponent(b + "/" + q)}`);
+        if (r && Array.isArray(r.files) && r.files.length) {
+          const batch = b === "小说"
+            ? r.files.filter((f) => /\.md$/i.test(f.path))
+            : r.files.filter((f) => /\.(html?|htm)$/i.test(f.path));
+          kept = kept.concat(batch);
+        }
+      } catch (e) { /* 试试下一个分支 */ }
+    }
+    if (!kept.length) {
+      out.innerHTML = `<div class="d-empty">「${q}」暂无交付物（已查 短剧/${q} 的 HTML 与 小说/${q} 的 MD）</div>`;
+      _drmDelivList = []; _drmDelivKw = q; _drmLastHtml = "";
+      drmSetRightMode("form");   // 无命中 → 右栏维持创作表单
+      return;
+    }
+    const KW = (p) => (/\.md$/i.test(p) ? NOVEL_KW : DRAMA_KW);
+    _drmDelivList = kept.map((f) => {
+      const m = KW(f.path).find((x) => x.re.test(f.path));
+      return { path: f.path, name: f.path.split("/").pop(), size: f.size, label: m ? m.label : "📎 其他", idx: m ? m.idx : 99 };
+    });
+    _drmDelivKw = q;
+
+    const grp = (label, idx) => {
+      const items = _drmDelivList.filter((x) => x.label === label);
+      if (!items.length) return "";
+      return `<div class="drm-deliv-grp">
+        <div class="drm-deliv-grp-hd"><span>${label}</span><i>${items.length}</i></div>
+        ${items.map((f) => `<button class="drm-deliv-item" data-path="${escapeHtml(f.path)}" title="${escapeHtml(f.path)}">
+          <span class="dv-name">${escapeHtml(f.name)}</span>
+          <span class="dv-size">${(f.size / 1024).toFixed(1)}KB</span>
+        </button>`).join("")}
+      </div>`;
+    };
+    /* 按创作顺序排：idx 升序，其余（📎 其他）垫底 */
+    const labels = [...new Set(_drmDelivList.map((x) => x.label))];
+    labels.sort((a, b) => {
+      const ia = _drmDelivList.find((x) => x.label === a).idx;
+      const ib = _drmDelivList.find((x) => x.label === b).idx;
+      return ia - ib;
+    });
+    out.innerHTML = labels.map((l) => grp(l)).join("");
+    $$(".drm-deliv-item", out).forEach((b) => b.addEventListener("click", () => {
+      $$(".drm-deliv-item", out).forEach((x) => x.classList.remove("active"));
+      b.classList.add("active");
+      drmSetRightMode("preview");   // 点条目 → 切浏览模式并渲染
+      drmRenderHtml(b.dataset.path);
+    }));
+    /* 默认渲染第一份交付物（右栏切预览） */
+    const first = out.querySelector(".drm-deliv-item");
+    if (first) { first.classList.add("active"); drmSetRightMode("preview"); drmRenderHtml(first.dataset.path); }
+  };
+  go.addEventListener("click", paint);
+  kw.addEventListener("keydown", (e) => { if (e.key === "Enter") paint(); });
+}
+
+/* ————— 右栏整页渲染交付物（HTML 相对图片路径改写为绝对 API 路径；MD 直接转义预览） ————— */
+async function drmRenderHtml(path) {
+  const frame = document.getElementById("drmRenderFrame");
+  const meta = document.getElementById("drmRenderMeta");
+  const open = document.getElementById("drmRenderOpen");
+  if (!frame) return;
+  const abs = "/api/deliverables/view?path=" + encodeURIComponent(path);
+  if (meta) meta.textContent = path;
+  frame.innerHTML = `<div class="d-empty" style="padding:48px 20px;text-align:center">加载中…</div>`;
+  try {
+    const r = await fetch(abs, { credentials: "include" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const txt = await r.text();
+    const dir = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
+    /* MD：服务端 view 已返回 <pre> 转义文本，直接用；HTML：改写相对资源为绝对 API 路径 */
+    const html = /\.md$/i.test(path) ? txt : rewriteDelivHtml(txt, dir);
+    _drmLastHtml = html;
+    frame.innerHTML = "";
+    const iframe = document.createElement("iframe");
+    iframe.className = "drm-render-frame-iframe";
+    iframe.srcdoc = html;
+    frame.appendChild(iframe);
+    if (open) {
+      open.style.display = "";
+      open.href = "#";
+      open.onclick = (e) => {
+        e.preventDefault();
+        const u = URL.createObjectURL(new Blob([html], { type: "text/html;charset=utf-8" }));
+        window.open(u, "_blank");
+        setTimeout(() => URL.revokeObjectURL(u), 60000);
+      };
+    }
+  } catch (e) {
+    frame.innerHTML = `<div class="d-empty">加载失败：${escapeHtml((e && e.message) || e)}</div>`;
+  }
+}
+
+/* 环节导航联动：切到某环节时自动渲染该环节对应的 HTML（按文件名关键词） */
+function drmRenderForModule(modKey) {
+  if (!_drmDelivList.length) return;
+  const kwMap = {
+    outline: /outline/i, chars: /cast|character/i, art: /art/i,
+    script: /script/i, storyboard: /storyboard/i, video: /video/i, s_world: /outline/i,
+  };
+  const re = kwMap[modKey];
+  if (!re) return;
+  const hit = _drmDelivList.find((x) => re.test(x.path));
+  if (hit) {
+    drmRenderHtml(hit.path);
+    const out = document.getElementById("drmDelivOut");
+    if (out) $$(".drm-deliv-item", out).forEach((x) => x.classList.toggle("active", x.dataset.path === hit.path));
+  }
+}
+
 /* ————————————————————— 流水线待办面板 —————————————————————
    把两大创作流水线（短剧 5 步 / 小说 7 步）渲染成待办清单：
    每步一个条目，状态由 DRM.progress 驱动（todo/running/done/stopped/err），
@@ -570,26 +662,19 @@ function drmTodoHtml() {
   const step = (idx, m) => {
     const p = DRM.progress[m.key];
     const st = (p && _K[p.status]) ? _K[p.status] : _K.todo;
-    const [cls, ico, tip] = st;
+    const [cls] = st;
     const active = (m.key === _drmSel) ? " active" : "";
-    return `<button class="drm-todo-step ${cls}${active}" data-mod="${m.key}" data-st="${p ? p.status : "todo"}" title="${m.name}：${tip}" style="--acc:${m.color}"><span class="drm-todo-ico">${m.icon}</span><span class="drm-todo-st">${ico}</span><span class="drm-todo-name">${m.name}</span></button>`;
+    return `<button class="drm-todo-step ${cls}${active}" data-mod="${m.key}" data-st="${p ? p.status : "todo"}" title="${m.name}" style="--acc:${m.color}"><span class="drm-todo-ico">${m.icon}</span><span class="drm-todo-name">${m.name}</span></button>`;
   };
   const chain = (mods) => mods.map((m, i) => `${step(i, m)}${i < mods.length - 1 ? '<b class="drm-todo-arrow">→</b>' : ""}`).join("");
-  const doneCount = (mods) => mods.filter((m) => DRM.progress[m.key] && DRM.progress[m.key].status === "done").length;
-  const grp = (label, mods) => {
-    const dc = doneCount(mods);
-    const pct = mods.length ? Math.round(dc / mods.length * 100) : 0;
-    return `
+  const grp = (label, mods) => `
     <div class="drm-todo-grp">
-      <div class="drm-todo-grp-hd"><span>${label}</span><i>${dc}/${mods.length} · ${pct}%</i></div>
-      <div class="drm-todo-progress"><div class="drm-todo-progress-fill" style="width:${pct}%"></div></div>
+      <div class="drm-todo-grp-hd"><span>${label}</span></div>
       <div class="drm-todo-chain">${chain(mods)}</div>
     </div>`;
-  };
   return `
     <div class="drm-todo" id="drmTodo">
-      ${grp("短剧", DRAMA_MODULES)}
-      ${grp("小说", SUMERU_MODULES)}
+      ${grp("短剧创作", CREATIVE_GROUPS[0].modules)}
     </div>`;
 }
 
@@ -597,9 +682,10 @@ function drmTodoRefresh() {
   const host = document.getElementById("drmTodoHost");
   if (!host) return;
   host.innerHTML = drmTodoHtml();
-  // 点击条目 → 跳到对应模块表单（执行中不允许切换）
+  // 点击条目 → 跳到对应模块表单（执行中不允许切换）；右栏回到「创作表单」模式
   $$(".drm-todo-step", host).forEach((b) => b.addEventListener("click", () => {
     if (DRM.run && DRM.run.streaming) { toast("当前有模块正在生成中，请先等本轮结束或点「⏹ 停止」", "warn"); return; }
+    drmSetRightMode("form");   // 点环节导航 = 创作动作 → 右栏回表单
     renderDrmModule(DRM.rootEl, b.dataset.mod);
     $$(".drm-todo-step", host).forEach((x) => x.classList.toggle("active", x.dataset.mod === b.dataset.mod));
   }));
@@ -613,7 +699,7 @@ function drmNavBadges(el) {
 }
 
 function drmGroupOf(modKey) { return CREATIVE_GROUPS.find((g) => g.modules.some((x) => x.key === modKey)) || CREATIVE_GROUPS[0]; }
-function drmDeliverDir(modKey) { const g = drmGroupOf(modKey); return g.key === "novel" ? "deliverables/小说/" : "deliverables/短剧/"; }
+function drmDeliverDir(modKey) { return modKey === "s_world" ? "deliverables/小说/" : "deliverables/短剧/"; }
 
 function drmStartRun(mod, title) {
   DRM.run = { moduleKey: mod.key, skill: mod.skill, title: title || "", threadId: (State && State.threadId) || "default", streaming: false };
@@ -714,9 +800,11 @@ function drmLastAssistantText() {
   return t ? (t.innerText || "") : "";
 }
 
-/* 回合结算：done（事件） / error（事件） / readSSE 读完（兜底）三路中先到者生效，_settled 去重 */
+/* 回合结算：done（事件） / error（事件） / readSSE 读完（兜底）三路中先到者生效，_settled 去重
+   启动模块后即跳回主页对话页（不内嵌），因此不要求 DRM.embedded；仅校验是本模块线程。 */
 function drmSettleTurn() {
-  if (!DRM.run || !DRM.embedded) return;
+  if (!DRM.run) return;
+  if (State && State.threadId && DRM.run.threadId && DRM.run.threadId !== State.threadId) return;   // 已切到别的线程，不误标
   DRM.run.streaming = false;
   drmSetLive(false, "● 等待回复");
   const last = drmLastAssistantText();
@@ -729,7 +817,7 @@ function drmSettleTurn() {
   drmMarkProgress(DRM.run.moduleKey, "done");
   drmNavBadges(DRM.navEl);
   const m = DrmModule(DRM.run.moduleKey);
-  drmBanner("ok", `✅ 「${m ? m.name : ""}」本轮创作已完成 · 交付已写入 ${drmDeliverDir(DRM.run.moduleKey)}。可继续在此追问完善，或点「📋 返回模块选择」`);
+  if (DRM.embedded) drmBanner("ok", `✅ 「${m ? m.name : ""}」本轮创作已完成 · 交付已写入 ${drmDeliverDir(DRM.run.moduleKey)}。可继续在此追问完善，或点「📋 返回模块选择」`);
 }
 window.drmOnTurnDone = function () {
   if (DRM._settled) return;
@@ -777,27 +865,50 @@ function drmBackToModules() {
     drmNavBadges(DRM.navEl);
     $$(".drm-todo-step", DRM.rootEl).forEach((x) => x.classList.toggle("active", x.dataset.mod === saved));
   }
-}/* ————————————————————— 渲染工作台 ————————————————————— */
+}/* ————————————————————— 渲染工作台（图片创作式双栏布局 · 右栏双模式） —————————————————————
+   左栏（窄）：交付物搜索（输入作品名→查 HTML） + 环节导航
+   右栏（宽）：平时 = 当前环节创作表单；搜索命中后 = HTML 交付物整页渲染（可返回创作）
+   ============================================================================ */
 async function renderDramaStudioTab(el) {
   drmLoadProgress();
   el.innerHTML = `
     <div class="st drm">
       <div class="st-head">
-        <div class="st-head-title">🎭 创作工作台</div>
-        <div class="st-head-hint">任选一条流水线，点步骤 → 填表 →「🚀 启动」→ 在框内对话完成创作；产物自动落到 deliverables/ 对应目录。</div>
+        <div class="st-head-title">🎭 短剧创作</div>
+        <div class="st-head-hint">左栏：选环节填表启动（点「🚀 启动」自动跳主页对话页执行）；输入作品名浏览交付物：短剧=各环节 HTML，小说=目录/章节 MD。</div>
       </div>
-
-      <div id="drmTodoHost"></div>
-
-      <div class="drm-body">
-        <section class="drm-module" id="drmModuleBox"></section>
+      <div class="st-cols">
+        <section class="st-left">
+          <div id="drmDelivFilter"></div>
+          <div id="drmTodoHost"></div>
+        </section>
+        <section class="st-right">
+          <div id="drmModuleBox"></div>
+          <div id="drmRenderBox" class="drm-render" style="display:none">
+            <div class="drm-render-bar">
+              <span class="drm-render-title">📄 交付物预览</span>
+              <span class="drm-render-meta" id="drmRenderMeta">未选择</span>
+              <div style="flex:1"></div>
+              <button class="d-btn sm" id="drmRenderForm">✎ 返回创作</button>
+              <a class="d-btn sm" id="drmRenderOpen" target="_blank" rel="noopener" style="display:none">↗ 新窗口打开</a>
+            </div>
+            <div id="drmRenderFrame" class="drm-render-frame">
+              <div class="d-empty" style="padding:64px 20px;text-align:center">
+                左侧输入作品名（如 <b>渊核</b>）→ 这里整页渲染交付物<br>
+                短剧：role 各环节 HTML（<code>storyboard-report.html / art-report.html …</code>）<br>
+                小说：目录 MD（<code>题目大纲 / chapters/章节</code>）
+              </div>
+            </div>
+          </div>
+        </section>
       </div>
     </div>`;
 
   DRM.rootEl = el;
   DRM.navEl = el;
   drmNavBadges(el);
-  drmTodoRefresh();   // 渲染流程导航条（状态追踪 + 模块切换）
+  drmDelivRefresh(el);   // 交付物筛选（只列 HTML，点击渲染到右侧）
+  drmTodoRefresh();   // 环节导航（状态追踪 + 模块切换 + 联动渲染）
 
   /* 若存在进行中的创作会话，恢复「内嵌首页对话页」视图（消息以 DB 为准刷新到框内） */
   if (DRM.run) {

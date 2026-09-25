@@ -42,33 +42,97 @@ async def api_deliverables():
 
 
 @router.get("/api/deliverables/preview")
-async def api_deliverables_preview(name: str = ""):
-    """预览交付物文件内容（文本）。"""
+async def api_deliverables_preview(name: str = "", path: str = ""):
+    """预览交付物文件内容（文本）。name 为根下的文件名；path 为相对根目录的子路径（如 短剧/渊核/script.json）。"""
     import os as _os
     from app.config import DELIVERABLES_DIR
-    safe = _os.path.basename(name)  # 防路径穿越
-    p = _os.path.join(str(DELIVERABLES_DIR), safe)
+    rel = path.strip("/\\") if path.strip("/\\") else _os.path.basename(name)
+    root = str(DELIVERABLES_DIR)
+    p = _os.path.normpath(_os.path.join(root, rel))
+    if not p.startswith(root):  # 防路径穿越
+        return JSONResponse({"error": "非法路径"}, status_code=400)
     if not _os.path.isfile(p):
         return JSONResponse({"error": "文件不存在"}, status_code=404)
     try:
         with open(p, 'r', encoding='utf-8', errors='replace') as f:
             content = f.read(5000)
-        return {"name": safe, "content": content}
+        return {"name": rel, "content": content}
     except Exception as e:
-        return {"name": safe, "content": f"[读取失败] {e}"}
+        return {"name": rel, "content": f"[读取失败] {e}"}
 
 
 @router.get("/api/deliverables/download")
-async def api_deliverables_download(name: str = ""):
-    """下载交付物文件。"""
+async def api_deliverables_download(name: str = "", path: str = ""):
+    """下载交付物文件。name 为根下的文件名；path 为相对根目录的子路径（如 短剧/渊核/script.json）。"""
     import os as _os
     from fastapi.responses import FileResponse
     from app.config import DELIVERABLES_DIR
-    safe = _os.path.basename(name)  # 防路径穿越
-    p = _os.path.join(str(DELIVERABLES_DIR), safe)
+    rel = path.strip("/\\") if path.strip("/\\") else _os.path.basename(name)
+    root = str(DELIVERABLES_DIR)
+    p = _os.path.normpath(_os.path.join(root, rel))
+    if not p.startswith(root):  # 防路径穿越
+        return JSONResponse({"error": "非法路径"}, status_code=400)
     if not _os.path.isfile(p):
         return JSONResponse({"error": "文件不存在"}, status_code=404)
-    return FileResponse(p, filename=safe)
+    return FileResponse(p, filename=_os.path.basename(p))
+
+
+@router.get("/api/deliverables/view")
+async def api_deliverables_view(name: str = "", path: str = ""):
+    """内嵌渲染交付物（iframe 用，不触发下载）。html/md 返回原文，图片直接回源文件。"""
+    import os as _os
+    from fastapi.responses import FileResponse, HTMLResponse
+    from app.config import DELIVERABLES_DIR
+    rel = path.strip("/\\") if path.strip("/\\") else _os.path.basename(name)
+    root = str(DELIVERABLES_DIR)
+    p = _os.path.normpath(_os.path.join(root, rel))
+    if not p.startswith(root):  # 防路径穿越
+        return JSONResponse({"error": "非法路径"}, status_code=400)
+    if not _os.path.isfile(p):
+        return JSONResponse({"error": "文件不存在"}, status_code=404)
+    low = rel.lower()
+    if low.endswith((".html", ".htm", ".md", ".txt")):
+        try:
+            with open(p, 'r', encoding='utf-8', errors='replace') as f:
+                content = f.read()
+        except Exception as e:
+            return JSONResponse({"error": f"[读取失败] {e}"}, status_code=500)
+        if low.endswith((".html", ".htm")):
+            return HTMLResponse(content)
+        return HTMLResponse("<pre style='white-space:pre-wrap;word-break:break-all;font-size:12px'>"
+                             + _pre_escape(content) + "</pre>")
+    if low.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4", ".webm")):
+        return FileResponse(p, media_type="application/octet-stream")
+    return FileResponse(p, media_type="application/octet-stream")
+
+
+def _pre_escape(t: str) -> str:
+    import html as _html
+    return _html.escape(t)
+
+
+@router.get("/api/deliverables/tree")
+async def api_deliverables_tree(path: str = ""):
+    """递归列出交付物目录树。path 为相对根目录的子路径（如 短剧/渊核/），返回 {files:[{path,name,size}]}。"""
+    import os as _os
+    from app.config import DELIVERABLES_DIR
+    root = str(DELIVERABLES_DIR)
+    rel = path.strip("/\\")
+    base = _os.path.normpath(_os.path.join(root, rel))
+    if not base.startswith(root) or not _os.path.isdir(base):
+        return JSONResponse({"error": "目录不存在"}, status_code=404)
+    files = []
+    for dirpath, dirnames, filenames in _os.walk(base):
+        dirnames.sort()
+        for fn in sorted(filenames):
+            fp = _os.path.join(dirpath, fn)
+            relp = _os.path.relpath(fp, root).replace("\\", "/")
+            try:
+                size = _os.path.getsize(fp)
+            except Exception:
+                size = 0
+            files.append({"path": relp, "name": fn, "size": size})
+    return {"files": files, "dir": rel}
 
 
 @router.get("/api/git/log")
