@@ -136,27 +136,34 @@ for i in $(seq "$START" "$END"); do
 
 工作目录：data/users/Mirror/deliverables/短剧/美人图/
 先 read_skill 读 app/skills/novel-storyboard/SKILL.md，再读 references/storyboard-pass.md、schema.md、frame.md、h3-prompt.md，照它们做。
-上游：美人图-script.json（60 集完整剧本）、outline.json、cast.json（角色设定图）、art.json（场景/道具设定图）、images/（设定图）。
+上游：美人图-script.json（60 集完整剧本，台词已按短剧节奏拆 ≤18 字）、outline.json、cast.json（角色设定图）、art.json、images/。
 
 本任务是「单集闭环」：只做第 $i 集，分镜 → 出图全部完成后再交，不要做其它集。
+★ 机械门放心交给 sb_fix_auto：段打包/段号、h3Prompt 对齐行/切点时刻/<d> 块/字段序、景别/风格/运镜短语、人物道具对账、同框拆解、时长对齐 都会自动修。你只要保证「创作内容」到位：
 1) seed：node app/skills/novel-storyboard/scripts/novel-storyboard.mjs seed 美人图-script.json --eps $i > data/users/Mirror/deliverables/短剧/美人图/${fn}
-2) 切镜：按 storyboard-pass.md 把第 $i 集切成段与分镜（段≤15s、每切2-5s、节拍全覆盖、台词装得下），每段写完整 h3Prompt（对齐指令与切点时刻由分镜秒数推导，台词逐字进 <d>）；删掉 seedScenes。
-3) 校验（不能跳）：
-   cd . && node app/skills/novel-storyboard/scripts/novel-storyboard.mjs validate ${fn} --script 美人图-script.json --outline outline.json --cast cast.json --art art.json
-   有违规逐条修，重跑直到全绿。
-4) 出图（本集全部段，一次出齐）：按 SKILL.md Step 4 与 frame.md，逐段逐镜调 agnes-media image 出分镜图到 <段号>/f<切序>.png：
+2) 切镜：按 storyboard-pass.md 把第 $i 集切成段与分镜（段≤15s、每切2-5s、节拍全覆盖——每场节拍按序连续认领，可多切共认领相邻拍；单切内台词合起来 ≤5 秒装得下）；
+   每段写 h3Prompt 的创作部分：integrated_multimodal_description 逐镜英文画面（写清机位/景别/主体/动作/氛围）、overall_soundscape（英文）、non_diegetic_music（英文）；删掉 seedScenes。
+3) 校验行（供你自查，非最终裁判）：cd . && node app/skills/novel-storyboard/scripts/novel-storyboard.mjs validate ${fn} --script 美人图-script.json --outline outline.json --cast cast.json --art art.json
+   结构类红黄先不管（sb_fix_auto 会修）；重点自查：节拍覆盖率、切内台词 ≤5s、frame 英文且含景别短语与 cinematic film still、h3Prompt 正文英文无中文人名。
+4) 出图（本集全部段，一次出齐）：按 SKILL.md Step 4 与 frame.md，逐段逐镜调 agnes-media image 出分镜图到 <segmentId>/f<切序>.png：
    - 挂场景/角色/道具设定图当 --ref（画面里有谁挂谁）；提示词 = 英文 frame 提示词 + 光影/质感/氛围词 + 固定质量尾锚 + 收尾句 No text, no watermark, no borders
    - 每段至少 f1.png，多格全出；缺图的段在汇报里点名
-5) 汇报：第 $i 集共几段几镜、validate 各门结果、每段 f*.png 路径。
+5) 汇报：第 $i 集共几段几镜、每段 f*.png 路径、以及你写好的创作部分清单。
 不渲染 HTML 报告，不要碰其它集文件。
 EOF
     if ! wait_server; then exit 1; fi
     acc=$(dispatch_wait "$TOOLSDIR/msg-sb-e${e}.txt" "$LOGDIR/sb-e${e}.log" 10800)
     log "第 $i 集 分镜任务 -> $acc"
-    # 修复循环
+    # 修复循环（sb_fix_auto 机械补全 + 模型修复创作内容）
     fix=0
     while [ "$vr" -ne 0 ] && [ "$fix" -lt 3 ]; do
       fix=$((fix+1))
+      # 机械补全先行
+      if [ -s "$D/$fn" ]; then
+        node "$TOOLSDIR/sb_fix_auto.mjs" "$D/$fn" --script "$D/美人图-script.json" --outline "$D/outline.json" --cast "$D/cast.json" --art "$D/art.json" >> "$LOGDIR/sb-e${e}.fixauto" 2>&1
+        FIXRC=$?
+        log "  sb_fix_auto exit=$FIXRC -> $(tail -2 "$LOGDIR/sb-e${e}.fixauto" | tr '\n' ' ' | cut -c1-160)"
+      fi
       if [ ! -s "$D/$fn" ]; then
         acc=$(dispatch_wait "$TOOLSDIR/msg-sb-e${e}.txt" "$LOGDIR/sb-e${e}-r${fix}.log" 10800)
       else
@@ -164,18 +171,22 @@ EOF
 【自动化任务 T3｜分镜第 $i 集修复】
 
 工作目录：data/users/Mirror/deliverables/短剧/美人图/
-目标文件：${fn}（先 read_file 读现状；缺图段先补图）
+目标文件：${fn}（先 read_file 读现状；缺图段先补图；结构门已由 sb_fix_auto 自动修好，别再改结构）
 刚跑的 validate 未全绿，输出（末尾 80 行）：
 
 $(tail -80 "$vlog")
 
-逐条修复（节拍覆盖、秒数、h3Prompt 对齐指令/切点/台词 <d>、景别短语、风格统一等），修完重跑 validate 直到全绿。完成后汇报。
+只修「创作/内容」问题：节拍覆盖率、切内台词装载、frame 英文与景别/风格短语、h3Prompt 正文英文与画面/音景/配乐描述、缺图出图。修完重跑 validate 自查直到你确认无内容问题。完成后汇报。
 EOF
         acc=$(dispatch_wait "$TOOLSDIR/msg-sb-e${e}-fix${fix}.txt" "$LOGDIR/sb-e${e}-fix${fix}.log" 10800)
       fi
       log "  -> fix#$fix $acc"
       if ! wait_server; then exit 1; fi
       sleep 5
+      # 修复后再机械补全一次 + 校验
+      if [ -s "$D/$fn" ]; then
+        node "$TOOLSDIR/sb_fix_auto.mjs" "$D/$fn" --script "$D/美人图-script.json" --outline "$D/outline.json" --cast "$D/cast.json" --art "$D/art.json" >> "$LOGDIR/sb-e${e}.fixauto" 2>&1
+      fi
       vr=$(val_sb "$fn" "$vlog")
       log "  validate exit=$vr"
     done

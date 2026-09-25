@@ -9,3 +9,5 @@
 [07:02:58] 第 1 集 分镜任务 -> [2026-09-26 07:02:50] FINAL status=done info=null
 [07:14:29]   -> fix#1 [2026-09-26 07:14:01] FINAL status=done info=null
 [07:14:34]   validate exit=1
+[07:28:04]   -> fix#2 [2026-09-26 07:27:59] FINAL status=done info=null
+[07:28:10]   validate exit=1

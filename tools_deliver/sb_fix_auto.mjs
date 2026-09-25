@@ -1,9 +1,7 @@
 #!/usr/bin/env node
-// sb_fix_auto.mjs — storyboard 机械补全器（对标 fix_script_auto 之于剧本）
-// 作用：把模型提供的创作内容（切分 beats/seconds/size/camera/frame/画面描述）保留，
-//       机械重建所有可由结构推导的门：段号、h3Prompt 对齐行/切点时刻/<d> 块/字段序、
-//       景别/风格/运镜短语、人物道具对账、同框拆解、段长/集长/台词装载。
-// 用法: node sb_fix_auto.mjs <storyboard.json> --script <script.json> [--cast x.json --art x.json --outline x.json]
+// sb_fix_auto.mjs v2 — storyboard 机械补全器
+// v2 新增：① 切内台词 >4.8s 自动切拆分句（多行合并场景）② --map 节拍重对齐（配合 split_lines.py）
+// 用法: node sb_fix_auto.mjs <sb.json> --script <script.json> [--map <map.json>] [--cast --art --outline]
 import { readFileSync, writeFileSync } from 'fs';
 import { basename } from 'path';
 
@@ -12,7 +10,7 @@ const mod = await import('file://' + MJS);
 const {
   H3_TOKENS, SHOT_SIZES, CAMERA_MOVES, DEFAULT_STYLE, STYLE_PRESETS,
   cutStarts, h3CutTime, h3AlignmentLine, segSeconds, expandScript,
-  gateReport, paramsOf, validateStoryboard,
+  gateReport, paramsOf,
 } = mod;
 
 const argv = process.argv.slice(2);
@@ -23,7 +21,7 @@ const flag = (name, fallback = null) => {
 const boardPath = argv.find((a) => !a.startsWith('-'));
 const scriptPath = flag('--script');
 if (!boardPath || !scriptPath) {
-  console.error('用法: sb_fix_auto.mjs <sb.json> --script <script.json> [--cast --art --outline]');
+  console.error('用法: sb_fix_auto.mjs <sb.json> --script <script.json> [--map --cast --art --outline]');
   process.exit(2);
 }
 const btn = basename(boardPath);
@@ -35,6 +33,7 @@ const board = read(boardPath);
 const script = read(scriptPath);
 if (!board) { console.log(`E_NOBOARD ${btn}`); process.exit(1); }
 if (!script) { console.log(`E_NOSCRIPT ${btn}`); process.exit(1); }
+const beatMap = read(flag('--map'));
 
 const params = paramsOf(board);
 const lang = board.promptLang ?? 'en';
@@ -43,7 +42,6 @@ const styleId = board.style ?? DEFAULT_STYLE;
 const style = STYLE_PRESETS[styleId] ?? STYLE_PRESETS[DEFAULT_STYLE];
 const expanded = expandScript(script);
 
-// 禁名清单（英文正文之外不得出现角色名）
 const banned = new Set();
 const cast = read(flag('--cast'));
 const outline = read(flag('--outline'));
@@ -65,8 +63,9 @@ const cleanEn = (s) => stripBanned(stripCJK(String(s ?? ''))).replace(/\s+/g, ' 
 const SEC = params.minCutSeconds ?? 2;
 const SEC_MAX = params.maxCutSeconds ?? 5;
 const SEG_MAX = params.maxSegmentSeconds ?? 15;
+const DIALOG_LIMIT = SEC_MAX - 0.2; // 切内台词上限（留 0.2s 余量）
 
-const fixes = { ids: 0, pack: 0, h3: 0, cut: 0, frame: 0, ref: 0, crowd: 0, dur: 0, dlg: 0 };
+const fixes = { ids: 0, pack: 0, h3: 0, cut: 0, frame: 0, ref: 0, crowd: 0, dur: 0, dlg: 0, split: 0, map: 0 };
 const warns = [];
 
 for (const ep of board.episodes ?? []) {
@@ -74,20 +73,26 @@ for (const ep of board.episodes ?? []) {
   const label = `E${String(ep.ep).padStart(2, '0')}`;
   if (!sEp) { warns.push(`${label} 不在剧本（跳过）`); continue; }
 
-  // ---- 1) 段打包：切点顺序保持，按 15s 上限重装，段号重编 ----
+  // ---- 0) 节拍重对齐（split_lines 后） ----
+  const emap = beatMap ? beatMap[String(ep.ep)] ?? beatMap[ep.ep] : null;
+  for (const seg of ep.segments ?? []) {
+    const smap = emap ? emap[String(seg.sceneIndex)] ?? emap[seg.sceneIndex] : null;
+    if (!smap) continue;
+    for (const cut of seg.cuts ?? []) {
+      const [f, t] = cut.beats ?? [];
+      if (!Number.isInteger(f) || !Number.isInteger(t)) continue;
+      const nf = smap[f]?.[0] ?? f;
+      const nt = smap[t]?.[1] ?? t;
+      if (nf !== f || nt !== t) { cut.beats = [nf, nt]; fixes.map++; }
+    }
+  }
+
+  // ---- 1) 段打包：切序保持，15s 上限重装，段号重编 ----
   const rawSegs = ep.segments ?? [];
   const packed = [];
-  for (let si = 0; si < rawSegs.length; si++) {
-    const seg = rawSegs[si];
-    const scene = sEp.scenes[(seg.sceneIndex ?? 1) - 1];
-    // 把该段所有切按 order 排好（模型切序必须已是认领顺序）
-    const order = [...Array(seg.cuts?.length ?? 0).keys()];
+  for (const seg of rawSegs) {
     let cur = null;
-    for (const ci of order) {
-      const cut = seg.cuts[ci];
-      if (cut && (segSeconds({ cuts: [cut] }) > SEG_MAX || (cut.seconds ?? 0) > SEG_MAX)) {
-        cut.seconds = SEG_MAX;
-      }
+    for (const cut of seg.cuts ?? []) {
       if (!cur) {
         cur = { id: '', sceneIndex: seg.sceneIndex ?? 1, cuts: [], h3Prompt: null };
         packed.push(cur);
@@ -100,49 +105,87 @@ for (const ep of board.episodes ?? []) {
       cur.cuts.push(cut);
     }
   }
-  // 空段兜底：整场无分镜时留一个空段（切留空，交给模型/汇报点名）
   if (packed.length === 0) {
     packed.push({ id: '', sceneIndex: 1, cuts: [], h3Prompt: null });
-    warns.push(`${label} 没有任何分镜切（生成骨架但 cuts 空，模型必须补）`);
+    warns.push(`${label} 没有任何分镜切（骨架空，模型必须补）`);
   }
-  packed.forEach((seg, i) => {
-    seg.id = `${label}-${String(i + 1).padStart(2, '0')}`;
-    fixes.ids++;
-  });
+  packed.forEach((seg, i) => { seg.id = `${label}-${String(i + 1).padStart(2, '0')}`; fixes.ids++; });
 
-  // ---- 2) 每段：切修正 + h3Prompt 重建 ----
+  // ---- 2) 每段：切修正（含切拆分句）+ h3Prompt 重建 ----
   for (const seg of packed) {
     const scene = sEp.scenes[(seg.sceneIndex ?? 1) - 1];
-    const cuts = seg.cuts;
-    // 2a) cut 级机械修正
-    for (const cut of cuts) {
+    // 2a) 切拆分句：认领区间台词 > 4.8s 时按行边界拆成多个切
+    if (scene) {
+      const src = seg.cuts;
+      const out = [];
+      for (const cut of src) {
+        const [from, to] = cut.beats ?? [];
+        if (!Number.isInteger(from) || !Number.isInteger(to) || from > to) { out.push(cut); continue; }
+        const beats = scene.beats.slice(from - 1, to);
+        let dlg = 0;
+        for (const b of beats) if (b.kind === 'line') dlg += b.seconds;
+        if (dlg > DIALOG_LIMIT && beats.length > 1) {
+          // 逐拍累积，超限即闭合
+          let lo = from;
+          let acc = 0;
+          for (let bi = from; bi <= to; bi++) {
+            const b = scene.beats[bi - 1];
+            if (b.kind === 'line') acc += b.seconds;
+            const next = bi < to ? scene.beats[bi] : null;
+            const nextIsLine = next?.kind === 'line';
+            const overflow = acc > DIALOG_LIMIT && lo < bi;
+            const atEnd = bi === to;
+            if (overflow || (!nextIsLine && acc > 0) || atEnd) {
+              const d2 = scene.beats.slice(lo - 1, bi).filter((x) => x.kind === 'line').reduce((n, x) => n + x.seconds, 0);
+              const nc = { ...cut };
+              nc.beats = [lo, bi];
+              nc.seconds = Math.min(SEC_MAX, Math.max(SEC, Math.round((Math.max(d2, 1.0) + 0.3) * 10) / 10));
+              out.push(nc);
+              fixes.split++;
+              lo = bi + 1; acc = 0;
+            }
+          }
+          if (lo <= to) {
+            const d2 = scene.beats.slice(lo - 1, to).filter((x) => x.kind === 'line').reduce((n, x) => n + x.seconds, 0);
+            const nc = { ...cut };
+            nc.beats = [lo, to];
+            nc.seconds = Math.min(SEC_MAX, Math.max(SEC, Math.round((Math.max(d2, 1.0) + 0.3) * 10) / 10));
+            out.push(nc);
+          }
+        } else if (dlg > SEC_MAX) {
+          warns.push(`${seg.id} 单拍台词 ${dlg.toFixed(1)}s 仍超上限（需剧本再拆）`);
+          out.push(cut);
+        } else {
+          out.push(cut);
+        }
+      }
+      seg.cuts = out;
+    }
+
+    // 2b) 切级机械修正
+    for (const cut of seg.cuts) {
       const [from, to] = cut.beats ?? [];
-      // 台词装载：line 秒数总和 ≤ cut.seconds（≤5）
       let dlg = 0;
       if (scene && Number.isInteger(from) && Number.isInteger(to)) {
         for (const b of scene.beats.slice(from - 1, to)) if (b.kind === 'line') dlg += b.seconds;
       }
-      if (dlg > 0 && dlg > (cut.seconds ?? 0)) {
-        const t = Math.min(SEG_MAX, SEC_MAX, Math.ceil((dlg + 0.05) * 10) / 10);
-        if (t > (cut.seconds ?? 0)) { cut.seconds = t; fixes.dlg++; }
-        if (dlg > cut.seconds) warns.push(`${seg.id} 台词 ${dlg.toFixed(1)}s 超切秒上限`);
+      if (dlg > (cut.seconds ?? 0) && dlg <= SEC_MAX) {
+        cut.seconds = Math.min(SEC_MAX, Math.max(SEC, Math.round((dlg + 0.3) * 10) / 10));
+        fixes.dlg++;
       }
       if (!(cut.seconds >= SEC) || cut.seconds > SEC_MAX) {
-        if (cuts.length === 1 && scene) cut.seconds = SEG_MAX; else cut.seconds = Math.min(SEC_MAX, Math.max(SEC, cut.seconds ?? SEC));
+        cut.seconds = Math.min(SEC_MAX, Math.max(SEC, cut.seconds ?? SEC));
       }
-      // 人物/道具对账：只留剧本该场有的
       if (scene) {
         const cset = new Set(scene.characters);
         cut.characters = (cut.characters ?? []).filter((c) => cset.has(c));
         const pset = new Set(scene.props);
         cut.props = (cut.props ?? []).filter((p) => pset.has(p));
         fixes.ref++;
-        // 同框 ≤3，超了强制补拆解说明
         if ((cut.characters?.length ?? 0) > 3 && !String(cut.note ?? seg.note ?? '').trim()) {
           cut.note = `同框 ${cut.characters.length} 人拆解：焦点给 ${cut.characters[0]}，其余为背景群像`;
           fixes.crowd++;
         }
-        // 景别短语 + 风格短语 + 全英文无禁名
         const sz = SHOT_SIZES[cut.size];
         let fr = cleanEn(cut.frame);
         if (sz && !fr.toLowerCase().includes(sz.phrase)) fr = `${fr}, ${sz.phrase}`;
@@ -152,18 +195,23 @@ for (const ep of board.episodes ?? []) {
         fixes.frame++;
       }
     }
-    // 2b) h3Prompt 重建（结构全部推导，正文尽量保留模型的英文描述）
+    // 补充切级修正计数
+    fixes.cut += seg.cuts.length;
+
+    // 2c) h3Prompt 重建
     if (!scene) { seg.h3Prompt = ''; continue; }
-    const starts = cutStarts(cuts);
-    const wantLine = h3AlignmentLine(cuts, lang);
+    const starts = cutStarts(seg.cuts);
+    const wantLine = h3AlignmentLine(seg.cuts, lang);
     const oldH3 = String(seg.h3Prompt ?? '');
-    const oldBody = oldH3.slice(oldH3.indexOf(tk.fields[0]) >= 0 ? oldH3.indexOf(tk.fields[0]) + tk.fields[0].length : 0,
-                              oldH3.indexOf(tk.fields[1]) >= 0 ? oldH3.indexOf(tk.fields[1]) : undefined);
+    const f0 = oldH3.indexOf(tk.fields[0]);
+    const f1 = oldH3.indexOf(tk.fields[1]);
+    const f2 = oldH3.indexOf(tk.fields[2]);
+    const oldBody = oldH3.slice(f0 >= 0 ? f0 + tk.fields[0].length : 0, f1 >= 0 ? f1 : undefined);
     const oldSound = extField(oldH3, tk.fields[1], tk.fields[2]);
     const oldMusic = extField(oldH3, tk.fields[2], null);
     const shotTexts = [];
-    for (let k = 1; k <= cuts.length; k++) {
-      const cut = cuts[k - 1];
+    for (let k = 1; k <= seg.cuts.length; k++) {
+      const cut = seg.cuts[k - 1];
       const sz = SHOT_SIZES[cut.size] ?? {};
       let desc = cleanEn(extShotText(oldBody, k));
       if (!desc) desc = cleanEn(cut.frame).replace(/, cinematic film still/g, '').replace(/, (extreme wide|wide|medium|close|extreme close)-?up? shot/g, '');
@@ -171,15 +219,13 @@ for (const ep of board.episodes ?? []) {
       desc = desc.replace(/^[,.\s]+|[,.\s]+$/g, '');
       shotTexts.push(`[Shot ${k}] At ${h3CutTime(starts[k - 1])}, ${cut.camera ?? 'Static Shot'}, ${sz.phrase ?? cut.size}: ${desc}`);
     }
-    // <d> 台词块：认领节拍里的 line 逐字进 <d>[说话人] 台词</d>
     const dBlocks = [];
     const dlgSet = new Set();
-    for (const cut of cuts) {
+    for (const cut of seg.cuts) {
       const [from, to] = cut.beats ?? [];
       if (!Number.isInteger(from) || !Number.isInteger(to)) continue;
       for (const b of scene.beats.slice(from - 1, to)) {
-        if (b.kind !== 'line') continue;
-        if (dlgSet.has(b.n)) continue;
+        if (b.kind !== 'line' || dlgSet.has(b.n)) continue;
         dlgSet.add(b.n);
         dBlocks.push(`<d>[${b.speaker ?? '?'}] ${b.text}</d>`);
       }
@@ -198,14 +244,13 @@ for (const ep of board.episodes ?? []) {
     fixes.h3++;
   }
 
-  // ---- 3) 每集时长对齐目标 ±15%（调非对白切秒数） ----
+  // ---- 3) 每集时长对齐 ----
   const target = sEp.targetSeconds ?? 120;
   const tol = params.tolerance ?? 0.15;
   const lo = target * (1 - tol), hi = target * (1 + tol);
   let total = packed.reduce((n, s) => n + segSeconds(s), 0);
   let guard = 0;
   while ((total < lo || total > hi) && guard++ < 60) {
-    // 找可调切
     let cand = null;
     outer:
     for (let si = packed.length - 1; si >= 0; si--) {
@@ -214,7 +259,7 @@ for (const ep of board.episodes ?? []) {
         const c = cuts[ci];
         const [from, to] = c.beats ?? [];
         let dlg = 0;
-        if (scene2(packed[si], sEp) && Number.isInteger(from) && Number.isInteger(to)) {
+        if (Number.isInteger(from) && Number.isInteger(to)) {
           const sc = sEp.scenes[(packed[si].sceneIndex ?? 1) - 1];
           for (const b of sc.beats.slice(from - 1, to)) if (b.kind === 'line') dlg += b.seconds;
         }
@@ -223,7 +268,7 @@ for (const ep of board.episodes ?? []) {
     }
     if (!cand) { warns.push(`${label} 无对白切可调，时长 ${total.toFixed(1)}s 不在 [${lo.toFixed(0)},${hi.toFixed(0)}]`); break; }
     if (total < lo) {
-      const add = Math.min(SEG_MAX - segSeconds({ cuts: cand.seg.cuts.slice(0, -1) }) - cand.cut.seconds, SEG_MAX - cand.cut.seconds, SEC_MAX - cand.cut.seconds);
+      const add = Math.min(SEC_MAX - cand.cut.seconds, SEG_MAX - segSeconds({ cuts: cand.seg.cuts.slice(0, -1) }) - cand.cut.seconds);
       if (add <= 0) break;
       cand.cut.seconds = Math.round((cand.cut.seconds + add) * 10) / 10;
       fixes.dur++;
@@ -238,17 +283,15 @@ for (const ep of board.episodes ?? []) {
   ep.segments = packed;
 }
 
-// ---- 4) 保存 + 汇总 ----
 writeFileSync(boardPath, JSON.stringify(board, null, 2), 'utf8');
 const gates = gateReport(board, { script, cast, outline, art: read(flag('--art')) });
 const green = gates.filter((g) => g.ok).length;
-console.log(`FIXED ids=${fixes.ids} pack=${fixes.pack} h3=${fixes.h3} cut=${fixes.cut} frame=${fixes.frame} ref=${fixes.ref} crowd=${fixes.crowd} dur=${fixes.dur} dlg=${fixes.dlg}`);
+console.log(`FIXED ids=${fixes.ids} pack=${fixes.pack} h3=${fixes.h3} cut=${fixes.cut} frame=${fixes.frame} ref=${fixes.ref} crowd=${fixes.crowd} dur=${fixes.dur} dlg=${fixes.dlg} split=${fixes.split} map=${fixes.map}`);
 console.log(`GATES ${green}/${gates.length} 绿`);
 for (const g of gates) if (!g.ok) console.log(`  ✗ ${g.label}${g.detail ? `（${String(g.detail).slice(0, 300)}）` : ''}`);
-for (const w of warns.slice(0, 8)) console.log(`  WARN ${w}`);
+for (const w of warns.slice(0, 10)) console.log(`  WARN ${w}`);
 process.exit(gates.every((g) => g.ok) ? 0 : 1);
 
-// ---- 工具函数 ----
 function extField(h3, field, nextField) {
   const a = h3.indexOf(field);
   if (a < 0) return '';
@@ -264,4 +307,3 @@ function extShotText(body, k) {
   s = s.replace(/At \d{2}:\d{2}\.\d{3},/g, ' ').replace(/^[,\s:]+/, '');
   return s;
 }
-function scene2(seg, sEp) { return sEp.scenes[(seg.sceneIndex ?? 1) - 1]; }
