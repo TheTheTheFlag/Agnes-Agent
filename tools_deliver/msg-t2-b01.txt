@@ -1,0 +1,14 @@
+【自动化任务 T2｜novel-script 写剧本《美人图》批次 1（第 1-3 集）】
+
+交付目录：data/users/Mirror/deliverables/短剧/美人图/
+上游已就绪：outline.json（60 集，每集时长按 outline 的 duration_seconds）、art.json（场景/道具/光照）、cast.json（角色性情）。
+
+按 novel-script SKILL.md 写第 1-3 集剧本：
+
+1) seed：在服务根目录执行
+   node app/skills/novel-script/scripts/novel-script.mjs seed outline.json --eps 1-3 > data/users/Mirror/deliverables/短剧/美人图/script-b01.json
+2) 读 app/skills/novel-script/references/script-pass.md 与 references/schema.md 照着做；第 1 集开场要接住大纲的冷开场钩子。
+3) 写戏要求：动作节拍与台词行交替的结构化节拍流，每句台词带说话人与语气；时长贴近目标（±15%）；每集冷开场钩子（hookBeat 认领，须落在前 3 拍内）+ 结尾悬念；写完后把 seedNote 删掉。
+4) 校验（不能跳）：cd data/users/Mirror/deliverables/短剧/美人图/ && node app/skills/novel-script/scripts/novel-script.mjs validate script-b01.json --outline outline.json --art art.json；有违规逐条修并重跑，直到 10 道门全绿。写超了先砍动作节拍再压台词，写欠了补冲突不注水；缺美术没登记的光照状态就去 art.json 补。
+5) 本批只产出 script-b01.json（最终 60 集合并与报告由后续任务统一处理，此时不要 render 整剧报告）。
+汇报：本批集数、总场次、总台词句数、每集实际时长 vs 目标（秒数）、validate 各门结果。
