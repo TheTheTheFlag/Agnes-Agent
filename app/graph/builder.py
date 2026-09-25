@@ -169,22 +169,13 @@ def chatbot(state: State, config: RunnableConfig):
     if memory_section:
         system_text = system_text + "\n" + memory_section
 
-    # 任务型消息强制开工：防止自决模式"只应答不干活"（20260925 加固）
+    # 任务信号检测（v2）：命中任务型消息时，在上下文末尾追加强提示（贴近模型决策点）
     _task_signal = (
         "【自动化任务" in user_content or "【任务" in user_content
         or ".mjs" in user_content
         or ("validate" in user_content and "node " in user_content)
         or ("执行" in user_content and ("node " in user_content or "python3 " in user_content))
     )
-    if _task_signal:
-        system_text += (
-            "\n\n=== 任务执行约束 ===\n"
-            "用户本条消息是任务指令而非闲聊。你必须调用工具（read_file / write_file / "
-            "execute_command 等）实际执行并推进它，全部完成后用最终回复汇报结果。\n"
-            "严禁：只回复'好/收到/继续执行'等确认文字后结束回合而不调用任何工具；"
-            "声称将要执行但本回合不执行；把任务推给后续回合。\n"
-            "若上游已产出大半，先读取产物核对现状，补齐缺口直到完成状态（如校验全绿）再汇报。"
-        )
 
     update_prompt(system_text, thread_id)
     # state 不缓存业务数据（profile/preferences/task_plan 等都已从 DB 查）
@@ -302,6 +293,17 @@ def chatbot(state: State, config: RunnableConfig):
     if _resume_summary:
         print(f"[Chatbot] 注入上一轮已完成动作摘要（防失忆重做）: {_resume_summary[:120]}...", flush=True)
         initial_messages = initial_messages + [SystemMessage(content=_resume_summary)]
+
+    if _task_signal:
+        initial_messages = initial_messages + [
+            SystemMessage(content=(
+                "【系统强制：立即开工】用户这条消息是需要实际完成的执行任务，不是闲聊。"
+                "你不允许只回应『好的/收到/继续』之类的确认文字就结束回合。"
+                "本回合必须调用工具：先 read_file 读取相关产物和校验输出，"
+                "再用 execute_command / write_file 把任务推进到完成态（校验通过、文件落盘），"
+                "最后用最终回复汇报结果。若上一轮已做一半，先核对现状再补齐缺口。"
+            ))
+        ]
 
     print(f"[Chatbot] 自决模式（无 L1/L2/L3 硬切）")
     user_tools = get_tools_for_user(_user, thread_id)
