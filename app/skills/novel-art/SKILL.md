@@ -7,7 +7,8 @@ description: |
   产出 art.json + Markdown + 单页评审报告（含导出 JSON）。
   为 AI 生成而设计，不是实拍——环境和道具都是生成资产，交付的是让它们跨集长一样的一致性方案；
   11 道质量门全部由脚本确定性检查（锚点 3–5、无人无手、白底可抠、尺度短语、提示词英文……）。
-  有 novel-outline 的 outline.json 就用 seed 预填场景清单与出现集；出图走 codex 内置 $imagegen（可选）。
+  有 novel-outline 的 outline.json 就用 seed 预填场景清单与出现集；出图统一走 agnes-media 技能
+  （创作台，母场景成图作参考图出变体，作品级提示词）；创作台不可用才降级 codex $imagegen。
   零依赖、零 API key，用当前会话额度。
   Use when asked to 场景设定、出场景、环境设定集、场景一致性、scene bibles for AI short drama。
 allowed-tools:
@@ -32,7 +33,8 @@ metadata:
     bins:
       - node          # >= 18，只用标准库，无 npm 依赖
     optional:
-      - codex         # 有才出环境设定图；没有就只交提示词，其余照常
+      - agnes-media   # 首选环境设定图：Agnes 图片创作台（创作台可用即有图）
+      - codex         # 降级设定图：创作台不可用才用；两条路都没有就只交提示词
   runtimes:
     - claude-code
     - codex
@@ -115,12 +117,18 @@ node {baseDir}/scripts/novel-art.mjs validate <art.json> --cast <cast.json>
 
 ### Step 4 — 出图（可选）
 
-场景和道具各一张 16:9 设定图，版面都是**主视角大图 + 底部和右侧的 L 形细节边框**。场景：标准取景 + 第一个光照状态，细节格是锚点特写。道具：白底三四分之一主视角（主状态），细节格是锚点特写 + 其他状态 + 侧面。读 `{baseDir}/references/sheet.md` 照调用契约做，要点：
+场景和道具各一张 16:9 设定图，版面都是**主视角大图 + 底部和右侧的 L 形细节边框**。场景：标准取景 + 第一个光照状态，细节格是锚点特写。道具：白底三四分之一主视角（主状态），细节格是锚点特写 + 其他状态 + 侧面。出图统一走 **agnes-media 技能**（`python app/skills_builtin/agnes-media/media.py image`），参数与尺寸档位用 agnes-media 技能的参数表（`read_skill agnes-media`），要点：
 
-- **没有 codex 就整步跳过**，只交提示词
+- **创作台不可用才跳过**（降级 codex `$imagegen`，也有才跳过），只交提示词；一条命令一张图，绝不批量
+- 产物进作品库，stdout 出现 `FILE=` 后 `cp` 为 `<输出目录>/images/<slug>-sheet.png`
 - **全图无人**；道具图另加**无手**、**纯白背景**，出现人影或手就重生成
-- **变体场景拿母场景成图当参考图**（`-i` + stdin）——变体机制的意义就在这
-- 一个场景一次调用绝不批量；单个失败跳过不阻断
+- **变体场景拿母场景成图当参考图**（`--ref "母场景成图路径"`）——变体机制的意义就在这
+- **提示词必须达到作品级**——直接喂精简提示词出的是平庸图，按下面质量基线增强（参考用户近期作品集的视觉水准）：
+  - 增强模板：`<该资产英文提示词> + 光影词 2-3 个 + 质感词 2-3 个 + 氛围词 1-2 个 + 质量尾锚`
+  - 质量尾锚（中英双锚照抄）：`Photorealistic, hyper-realistic, 超写实国风，现代风格，写实风格，质感光照，自然光线，质感十足，8K高清纹理，布料褶皱自然，艺术写实风格，营造出震撼的视觉效果`
+  - 词库：光影（明亮清透冷调柔光/冷白柔和轮廓高光/细腻光影过渡/明暗对比强烈/光斑特效）、质感（细腻颗粒肌理/布料褶皱自然/8K PBR 材质/细闪珠光）、氛围（梦幻/诗意/高级感/视觉冲击力/杰作/大师级配色排版/丰富细节）
+  - 场景图出图提示词再加 `empty scene, no people`（空景）；道具图再加 `pure white background, no hands`（可抠+无手污染）——validate 已查 JSON 字段，出图时也写进提示词
+- 单个失败跳过不阻断，最后汇总说明
 
 ### Step 5 — 输出与汇报
 
@@ -142,7 +150,7 @@ node {baseDir}/scripts/novel-art.mjs render <剧名>-art.json --html > art-repor
 ├── <剧名>-art.md
 ├── art-report.html                ← 双击就能开
 └── images/
-    └── <slug>-sheet.png           ← 有 codex 才有
+    └── <slug>-sheet.png           ← 有出图能力才有（agnes-media）
 ```
 
 ---
@@ -161,7 +169,7 @@ seed 吃 outline.json 的场景与道具两块（大纲没有 `props` 时道具�
 
 - 报告界面内置中英（`--lang`，默认中文、或跟 art.json 的 `lang` 字段）；出图提示词永远英文
 - 画风要跟角色 skill 同档，别一半写实一半动画
-- 出图只走 codex built-in `$imagegen`，不碰要 API key 的 CLI fallback
+- 出图统一走 Agnes 图片创作台（agnes-media 技能 `media.py`，提示词按 Step 4 质量基线增强）；codex 内置 `$imagegen` 仅为创作台不可用时的降级，不碰要 API key 的 CLI fallback
 - 场景数量不设硬上限——上限在 novel-outline 的主场景门那里管；这里管的是每个资产的质量
 - 道具只收叙事道具，3–8 件为宜——每多一件就多一份跨集一致性维护
 

@@ -1,6 +1,10 @@
-# 分镜图出图 · codex `$imagegen`
+# 分镜图出图 · Agnes 图片创作台（agnes-media 技能）
 
-出图走 codex 内置的 `$imagegen` 系统 skill，**不需要任何 API key**——用本机 codex 登录态。**没有 codex 就整步跳过**，只交提示词，报告显示「未生成」占位，其余产出照常。
+出图统一走 **agnes-media 技能**：`python app/skills_builtin/agnes-media/media.py image`。
+它经创作台内部通道复用页面完全相同的生成端点（异步任务、**失败自动重试直到成功**），
+产物直接进用户「作品库」，stdout 输出 `FILE=` 绝对路径——复制到分镜流水线即可。
+**不依赖本地 codex、不需要 API key**；创作台不可用才降级 codex `$imagegen`（见下），
+两条路都没有就整步跳过，只交提示词，报告显示「未生成」占位，其余产出照常。
 
 ## 分镜图是什么
 
@@ -8,7 +12,7 @@
 
 ## 参考图挂载（命根子）
 
-每一格的 `-i` 清单：
+每一格的 `--ref` 清单：
 
 1. **场景设定图**（`novel-art` 的 `images/<场景名>-sheet.png`）——必挂，环境、材质、光的唯一标准
 2. **画内每个角色的设定图**（`novel-characters` 的 `images/<角色名>-sheet.png`）——有几个挂几个
@@ -19,16 +23,49 @@
 
 提示词开头明说每张参考图的用途（which is the environment / whose face to match / which prop to match），别让模型猜。
 
-## 调用契约
+## 调用契约（agnes-media）
+
+- **一镜一次调用，绝不批量**（图片数量会拖垮轮询与回话）：
+  ```bash
+  python app/skills_builtin/agnes-media/media.py image \
+    --prompt "<增强后的分镜图提示词>" \
+    --size 2K --ratio 16:9 \
+    --ref "<场景设定图 绝对路径>" \
+    --ref "<角色A设定图 绝对路径>" [--ref "<角色B设定图>" [...]] [--ref "<道具设定图>"]
+  ```
+- `--ref` 接受本地绝对路径或 URL，可重复传多张 = 多图合成；脚本自动上传并复用创作台上传端点
+- **产物落盘 ≠ 交付落盘**：stdout 出现 `FILE=`（作品库绝对路径）后，**必须 `cp` 到`<输出目录>/<段号>/f<切序>.png`**（f1 = 主分镜图）。作品库那份是存档，流水线只认交付目录这份；不要改作品库文件
+- **提示词必须达到作品级**——直接喂精简 `frame` 提示词出的是平庸图。先按下面的「质量基线」增强，末尾再加分镜图收尾句：`No text, no watermark, no borders — a single clean full-bleed frame.`（分镜图是干净的一帧，不是设定图，不要格子边框）
+- 单个失败跳过不阻断，最后汇总说明
+
+## 提示词质量基线（出图必须达到）
+
+参考用户近期作品集的视觉水准（近景人设立绘 / 三视图设定 / 真人写实模板），这是**出图效果的直接决定因素**：
+
+**增强模板**：`<英文 frame 提示词（取景/景别/姿态/位置状态）> + 光影词 2-3 个 + 质感词 2-3 个 + 氛围词 1-2 个 + 质量尾锚（固定结尾）`
+
+**质量尾锚（中英双锚，照抄）**：
+```
+Photorealistic, hyper-realistic, 超写实国风，现代风格，写实风格，质感光照，
+自然光线，质感十足，8K高清纹理，布料褶皱自然，艺术写实风格，营造出震撼的视觉效果
+```
+
+**词库**（按画面从用户近期作品取用的高频词）：
+- 光影：明亮清透冷调柔光 / 冷白柔和轮廓高光 / 细腻光影过渡 / 明暗对比强烈 / 柔光照明 / 光斑特效 / 低饱和冷调
+- 质感：通透皮肤质感 / 细腻颗粒肌理 / 布料褶皱自然 / 细闪珠光 / 8K PBR 材质 / SSS 次表面散射（皮肤特写）
+- 氛围：梦幻 / 诗意 / 高级感 / 空灵 / 视觉冲击力 / 杰作 / 大师级配色排版 / 丰富细节
+- 收尾（分镜图专有）：`No text, no watermark, no borders — a single clean full-bleed frame.`
+
+注意：`frame` JSON 里的英文提示词是语义核心（validate 只查它、门全在它身上），
+质量词与尾锚是**出图调用时的二次增强**——二者不互相覆盖；图片输出用 `--size 2K --ratio 16:9`。
+
+## codex 降级（仅在创作台不可用时）
 
 - **跑在 codex 里**：直接用 `$imagegen`，不要再 shell 出去调 `codex exec`
 - **跑在 Claude Code**：shell 调本机 codex，**先探测版本最高的 binary**（旧版直接报错），探测脚本抄 `novel-characters/references/sheet.md` 的 `find_codex`
 - 所有调用套 `env -u NODE_OPTIONS`（codex 继承坏的 NODE_OPTIONS 会启动即崩）
-- **一镜一次调用，绝不批量**（PNG 字节会撑爆 rollout）
 - 用了 `-i/--image` 这类变长参数时 **prompt 必须走 stdin**
 - 提示词里明写「copy to ./<段号>/f<切序>.png」，别让图留在 codex 默认目录
-- 提示词末尾固定加：`No text, no watermark, no borders — a single clean full-bleed frame.`（分镜图是干净的一帧，不是设定图，不要格子边框）
-- 单个失败跳过不阻断，最后汇总说明
 - **不碰 CLI fallback**（要 `OPENAI_API_KEY`）
 
 ## 出图范围

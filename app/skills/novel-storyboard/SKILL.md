@@ -8,7 +8,8 @@ description: |
   [Shot k] 切点时刻由分镜结构推导、逐字对账，台词逐字进 <d> 块（写法规范已内化为
   references/h3-prompt.md，不依赖外部 skill）。
   产出 storyboard.json + Markdown + 单页评审报告（分镜节奏带 / 分集分镜表 / 生成批次单 /
-  配音对齐单，含导出 JSON）。分镜图出图拿场景与角色设定图当参考图走 codex $imagegen（可选）。
+  配音对齐单，含导出 JSON）。分镜图出图统一走 agnes-media 技能（创作台，参考图挂场景/角色/道具
+  设定图，16:9 关键帧，作品级提示词）；创作台不可用才降级 codex $imagegen。
   17 道质量门全部由脚本确定性检查（第 17 道 shot-recipe 可选：挂上 shot-recipes 卡库才查，不挂就明说跳过）；
   export 一键导出 H3 投产包（每段提示词 + 按 Picture 序的分镜图清单）。零依赖、零 API key，用当前会话额度。
   Use when asked to 分镜、出分镜、镜头表、切镜、storyboard for AI short drama。
@@ -33,7 +34,8 @@ metadata:
     bins:
       - node          # >= 18，只用标准库，无 npm 依赖
     optional:
-      - codex         # 有才出首帧图；没有就只交提示词，其余照常
+      - agnes-media   # 首选首帧图：Agnes 图片创作台（创作台可用即有图）
+      - codex         # 降级首帧图：创作台不可用才用；两条路都没有就只交提示词
   runtimes:
     - claude-code
     - codex
@@ -67,7 +69,7 @@ metadata:
 
 `{baseDir}` = 本文件所在目录。脚本 `{baseDir}/scripts/novel-storyboard.mjs`，零依赖，`node` 直接跑。
 
-**边界（不做的事）**：不写戏不改台词（`novel-script` 的活）、不出场景/角色/道具设定图（`novel-art` / `novel-characters` 的活）、不做视频生成与剪辑合成。口型/唇形同步暂不管——那是生成管线的事。
+**边界（不做的事）**：不写戏不改台词（`novel-script` 的活）、不出场景/角色/道具设定图（`novel-art` / `novel-characters` 的活）、不做成片生成与剪辑合成（视频成片统一走 agnes-media 技能视频模式，见 Step 4.5）。口型/唇形同步暂不管——那是生成管线的事。
 
 ---
 
@@ -118,13 +120,18 @@ node {baseDir}/scripts/novel-storyboard.mjs validate <storyboard.json> \
 
 ### Step 4 — 出分镜图（可选）
 
-一切一张 16:9 关键帧，走 codex 内置 `$imagegen`，读 `{baseDir}/references/frame.md` 照契约做。要点：
+一切一张 16:9 关键帧，统一走 **agnes-media 技能**（`python app/skills_builtin/agnes-media/media.py image`），读 `{baseDir}/references/frame.md` 照契约做。要点：
 
-- **没有 codex 就整步跳过**，只交提示词，报告显示占位不装有
-- **参考图是命根子**：`-i` 挂上该段场景设定图（该光照状态）+ 画内角色的设定图 + 涉及道具的设定图，提示词只负责取景和此刻的姿态
-- 一格一次调用绝不批量；输出 `./<段号>/f<切序>.png`（f1 = 主分镜图，每段一个文件夹）
+- **创作台不可用才跳过**（降级 codex `$imagegen`，也有才跳过），只交提示词，报告显示占位不装有
+- **参考图是命根子**：`--ref` 挂上该段场景设定图（该光照状态）+ 画内角色的设定图 + 涉及道具的设定图，提示词只负责取景和此刻的姿态
+- 一镜一次调用绝不批量；产物进作品库，stdout 出现 `FILE=` 后 `cp` 到 `./<段号>/f<切序>.png`（f1 = 主分镜图，每段一个文件夹）
+- **提示词必须达到作品级**：按 `references/frame.md` 的质量基线增强——光影/质感/氛围词 + 固定质量尾锚（参考用户近期作品集的视觉水准），直接喂精简提示词出的是平庸图
 - **默认先出第一段的整套分镜图给用户看效果**（3–5 张），确认画风和正反打构图再往后补——一集约 30–40 格，错了浪费的是整批
 - 单个失败跳过不阻断，最后汇总说明
+
+### Step 4.5 — 分段成片（视频，统一走 agnes-media）
+
+成片生成统一交给 **agnes-media 技能** 的 video 模式（`python app/skills_builtin/agnes-media/media.py video`）：该段 H3 提示词作 `--prompt`，主分镜图 `f1.png` 作 `--image`（图生视频），多格分镜作 `--keyframes`（关键帧动画，保持角色/场景一致），`--duration` 用段的秒数（3/5/10/18 就近取，段上限按模型）。若视频模型不吃 H3 结构（`<d>` 台词块、镜号），先把 H3 抽成自然语言动作/镜头描述再喂；台词贴片对齐交给配音对齐单。**成片是生成管线的活，本 skill 只负责下料（提示词 + 参考图）和指明这一步用 agnes-media。**
 
 ### Step 5 — 输出与汇报
 
@@ -149,7 +156,7 @@ node {baseDir}/scripts/novel-storyboard.mjs render <剧名>-storyboard.json --ht
 ├── storyboard-report.html         ← 双击就能开
 ├── manifest.json                  ← export 生成
 └── E01-01/                        ← 一段一个文件夹 = 一次 H3 生成的全部材料
-    ├── f1.png                     ← 主分镜图（有 codex 才有）
+    ├── f1.png                     ← 主分镜图（有出图能力才有，agnes-media）
     ├── f2.png …                   ← 子分镜图
     └── prompt.md                  ← H3 提示词（export 生成）
 ```

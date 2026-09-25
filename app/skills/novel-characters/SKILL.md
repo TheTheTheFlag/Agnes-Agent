@@ -227,7 +227,7 @@ node {baseDir}/scripts/novel-characters.mjs validate <cast.json> <book.txt>
 
 出图路径按可用性依次（第一条就够，不要重复尝试后面的）：
 
-- **首选：Agnes 图片创作台**：`python app/skills_builtin/agnes-media/media.py image --prompt "<image.sheet>" --size 1K --ratio 16:9`，stdout 出现 `FILE=` 即成功，把该文件复制为 `images/<slug>-sheet.png`；密钥脚本自动从账号库读，无需配置
+- **首选：Agnes 图片创作台**：`python app/skills_builtin/agnes-media/media.py image --prompt "<image.sheet>" --size 2K --ratio 16:9`，stdout 出现 `FILE=` 即成功，把该文件复制为 `images/<slug>-sheet.png`；密钥脚本自动从账号库读，无需配置
 - 跑在 codex 里就直接用 `$imagegen`；只有图片创作台不可用才 shell 调 codex，先按那里的脚本探测版本最高的 binary（旧版会直接报错）
 - 两条路都不可用才整步跳过（只交提示词），后面照常走
 - **一个角色一次调用，绝不批量**
@@ -272,7 +272,7 @@ report.html 的样式约定见 `{baseDir}/references/report-style.md`——要�
 - 单次上限 24 块（净覆盖约 93 万字符），超了会明确报 `truncated`，不静默截断
 - 人类可读字段跟随 `--lang`（默认中文）；出图和 TTS 提示词**永远英文**，那些引擎吃英文最稳
 - 设定图最容易出的两个问题：**一张图里两个长相**、**为了塞细节把人物压扁**。拿到图先扫一眼，见 `references/sheet.md`
-- 出图只走 codex built-in `$imagegen`。**不用它的 CLI fallback**（要 `OPENAI_API_KEY`）
+- 出图首选 Agnes 图片创作台（agnes-media 技能 `media.py`），codex 内置 `$imagegen` 仅为其不可用时的降级；两条路都不碰要 API key 的 CLI fallback
 - 想要能实时编辑、边跑边看的交互界面，那是另一个东西，不在这个 skill 里
 
 ## 自测
