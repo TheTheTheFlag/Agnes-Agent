@@ -469,6 +469,13 @@ function drmSetRightMode(mode) {
     const head = root.querySelector(".st-head");
     if (head) head.style.display = isPrev ? "none" : "";
   }
+  /* 返回创作：交付物列表一并收起（清空结果，左栏回到「请输入作品名」空态） */
+  if (!isPrev) {
+    const out = document.getElementById("drmDelivOut");
+    if (out) out.innerHTML = `<div class="d-empty">请输入作品名，如「渊核」</div>`;
+    _drmDelivList = [];
+    _drmLastHtml = "";
+  }
   const back = document.getElementById("drmRenderForm");
   if (back) back.onclick = () => { drmSetRightMode("form"); };
 }

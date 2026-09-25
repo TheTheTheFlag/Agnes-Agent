@@ -150,6 +150,24 @@ function copyCode(btn) {
   copyText(code ? code.textContent : "");
 }
 
+/* 复制按钮全局事件委托：
+   - 历史消息（loadHistory）与实时流式消息（addAssistantBubble）共用一份绑定，避免漏绑
+   - 复制 .msg-text 正文时剔除 code-lang 标签 / code-copy 复制钮 / 工具卡与审批卡，
+     避免把“复制”“javascript”一类按钮文字复制进剪贴板 */
+document.addEventListener("click", (e) => {
+  const btn = e.target && e.target.closest ? e.target.closest(".msg-action[data-act=copy]") : null;
+  if (!btn) return;
+  const body = btn.closest(".msg-body");
+  if (!body) return;
+  const textEl = body.querySelector(".msg-text");
+  if (!textEl) return;
+  const clone = textEl.cloneNode(true);
+  clone
+    .querySelectorAll("button, .code-lang, .code-copy, .tool-card, .tool-head, .tool-body, .approval-card, .proc-text, .typing-dots")
+    .forEach((n) => n.remove());
+  copyText(clone.innerText || clone.textContent || "");
+});
+
 /* ==================== API 封装 ==================== */
 function onUnauthorized() {
   // 登录态失效（未登录 / token 过期）：回到登录界面
@@ -1916,14 +1934,6 @@ function renderHistory(msgs) {
       }
     }
   }
-  // 绑定复制按钮
-  $$(".msg-action", inner).forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const body = btn.closest(".msg-body");
-      const txt = body.querySelector(".msg-text").innerText || "";
-      copyText(txt);
-    });
-  });
 }
 
 function prettyArgs(args) {
