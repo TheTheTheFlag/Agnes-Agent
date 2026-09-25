@@ -82,3 +82,6 @@
 [05:12:20] 批次 15 validate exit=1
 [05:12:21] 批次 15 fixauto 后 validate exit=1
 [05:12:21] 批次 15 修复#1 thread 新开
+[05:23:21]   -> [2026-09-26 05:23:18] FINAL status=done info=null
+[05:23:26] 批次 15 修复#1 后 validate exit=1
+[05:23:26] 批次 15 修复#2 thread 新开
