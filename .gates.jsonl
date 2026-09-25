@@ -43,3 +43,6 @@
 {"kind":"run","at":"2026-09-25T23:10:30.183Z","doc":"storyboard-e01.json","gates":17,"failed":2}
 {"kind":"fail","at":"2026-09-25T23:10:30.183Z","doc":"storyboard-e01.json","gate":"coverage","label":"剧本节拍被恰好一次、按顺序、连续认领（分镜级）","detail":"E01 第 1 场整场没有分镜；E01 第 2 场整场没有分镜"}
 {"kind":"fail","at":"2026-09-25T23:10:30.183Z","doc":"storyboard-e01.json","gate":"ep-duration","label":"每集总时长在剧本目标 ±15% 内","detail":"E01 欠 102 秒（0s / 目标 120s）"}
+{"kind":"run","at":"2026-09-25T23:14:52.140Z","doc":"storyboard-e01.json","gates":17,"failed":2}
+{"kind":"fail","at":"2026-09-25T23:14:52.140Z","doc":"storyboard-e01.json","gate":"coverage","label":"剧本节拍被恰好一次、按顺序、连续认领（分镜级）","detail":"E01 第 1 场整场没有分镜；E01 第 2 场整场没有分镜"}
+{"kind":"fail","at":"2026-09-25T23:14:52.140Z","doc":"storyboard-e01.json","gate":"ep-duration","label":"每集总时长在剧本目标 ±15% 内","detail":"E01 欠 102 秒（0s / 目标 120s）"}
