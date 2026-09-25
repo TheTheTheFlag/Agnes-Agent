@@ -14,3 +14,12 @@
 [02:50:44] 批次 6 修复#1 后 validate exit=0
 [02:50:44] 批次 6 ✅ 全绿（第 16-18 集完成）
 [02:50:44] ========== 批次 7：第 19-21 集 → script-b07.json ==========
+[03:05:45] 批次 7 attempt 1: [2026-09-26 03:05:35] FINAL status=done info=null
+[03:05:50] 批次 7 attempt 1 产物缺失，换新线程补投
+[03:05:50] 批次 7 attempt 2: [2026-09-26 03:05:35] FINAL status=done info=null
+[03:05:55] 批次 7 attempt 2 产物缺失，换新线程补投
+[03:05:55] 批次 7 attempt 3: [2026-09-26 03:05:35] FINAL status=done info=null
+[03:06:00] 批次 7 attempt 3 产物缺失，换新线程补投
+[03:06:05] 批次 7 validate exit=1
+[03:06:06] 批次 7 fixauto 后 validate exit=1
+[03:06:06] 批次 7 修复#1 thread 新开

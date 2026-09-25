@@ -1,1 +1,7 @@
-ENOENT: no such file or directory, open '/home/mirror/Agnes-Agent/data/users/Mirror/deliverables/短剧/美人图/script-b07.json'
+✗ 5 处违规：
+
+  第 19 集没有场次
+  第 20 集没有场次
+  第 21 集没有场次
+  质量门未过：每集时长在目标 ±15% 内（第 19 集欠 102 秒（估 0s / 目标 120s）；第 20 集欠 102 秒（估 0s / 目标 120s）；第 21 集欠 102 秒（估 0s / 目标 120s））
+  质量门未过：钩子的具象在全集前 3 拍内兑现（hookBeat 认领）（第 19 集缺 hookBeat（[场, 拍]，认领钩子具象的位置）；第 20 集缺 hookBeat（[场, 拍]，认领钩子具象的位置）；第 21 集缺 hookBeat（[场, 拍]，认领钩子具象的位置））
