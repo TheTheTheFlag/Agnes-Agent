@@ -1,0 +1,6 @@
+  WARN E44 S02: 说话人 MC 不在 cast.json，需模型处理
+  WARN E45: 仅 50.7s/18拍，疑似空壳，跳过补拍（交给模型重做）
+FIX_DONE {'source': 0, 'beats': 1, 'light': 3, 'line': 0, 'add': 19, 'del': 0}
+  E43: beats 39, est 116.1s, claimed ['庆祝女性力量计划首项目成功']
+  E44: beats 42, est 115.1s, claimed ['美人图campaign启动']
+  E45: beats 18, est 50.7s, claimed ['和解与释然']
