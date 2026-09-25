@@ -99,7 +99,9 @@ export function seedFromOutline(outline) {
   // 爽点、在哪几集出现。留空的是美术层的活：尺度、锚点、状态变体、白底提示词。
   // 大纲没有 props 字段就返回空数组，模型照 prop-pass.md 从原文提取，跟以前一样。
   const beatType = new Map((outline?.beats ?? []).map((b) => [b?.id, b?.type]));
-  const props = (outline?.props ?? []).map((pr) => {
+  // props 可能是对象（旧格式 key-value）或数组（新格式），统一转成数组
+  const propsList = Array.isArray(outline?.props) ? outline.props : Object.values(outline?.props ?? {});
+  const props = propsList.map((pr) => {
     const episodes = eps.filter((e) => (e?.propIds ?? []).includes(pr.id)).map((e) => e.ep);
     return {
       id: pr.id,
