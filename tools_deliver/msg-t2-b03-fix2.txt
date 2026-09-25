@@ -1,0 +1,23 @@
+【自动化任务 T2｜剧本批次 3 修复（第 7-9 集）】
+
+工作目录：data/users/Mirror/deliverables/短剧/美人图/
+目标文件：script-b03.json（先 read_file 读现状）
+上游：outline.json / art.json / cast.json / script-b02.json
+刚跑的 validate 未全绿，输出（末尾 80 行）：
+
+✗ 10 处违规：
+
+  第 ? 集的 ep 必须是正整数
+  第 ? 集没有场次
+  第 ? 集的 ep 必须是正整数
+  集号 undefined 重复
+  第 ? 集没有场次
+  第 ? 集的 ep 必须是正整数
+  集号 undefined 重复
+  第 ? 集没有场次
+  质量门未过：每集时长在目标 ±15% 内（第 undefined 集欠 102 秒（估 0s / 目标 120s）；第 undefined 集欠 102 秒（估 0s / 目标 120s）；第 undefined 集欠 102 秒（估 0s / 目标 120s））
+  质量门未过：钩子的具象在全集前 3 拍内兑现（hookBeat 认领）（第 undefined 集的 hookBeat [6, 1] 指向不存在的节拍；第 undefined 集的 hookBeat [6, 3] 指向不存在的节拍；第 undefined 集的 hookBeat [6, 4] 指向不存在的节拍）
+
+请逐条修复 script-b03.json 的违规（节拍必须是 action/line 交替结构、场次/人物/场景对账、集时长 120s±15%、每集 45-55 拍、hookBeat 前 3 拍、结尾悬念、删除 seedNote 等），修完重跑：
+cd data/users/Mirror/deliverables/短剧/美人图/ && node /home/mirror/Agnes-Agent/app/skills/novel-script/scripts/novel-script.mjs validate script-b03.json --outline outline.json --art art.json
+直到全绿。完成后汇报修复内容与最终 validate 摘要。不要动其它批次文件。

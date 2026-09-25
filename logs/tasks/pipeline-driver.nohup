@@ -16,3 +16,6 @@
 [23:53:05] 批次 3 attempt 3 产物缺失，换新线程补投
 [23:53:11] 批次 3 validate exit=1
 [23:53:11] 批次 3 修复#1 thread 新开
+[00:06:11]   -> [2026-09-26 00:05:47] FINAL status=done info=null
+[00:06:16] 批次 3 修复#1 后 validate exit=1
+[00:06:16] 批次 3 修复#2 thread 新开
