@@ -1,0 +1,5 @@
+  WARN E17: 仅 94.6s，疑似空壳，跳过补拍（交给模型重做）
+FIX_DONE {'source': 0, 'beats': 0, 'light': 2, 'line': 0, 'add': 0, 'del': 6}
+  E16: beats 47, est 128.1s, claimed ['证据整理', '风险警示']
+  E17: beats 36, est 94.6s, claimed ['真相之门', '反转伏笔']
+  E18: beats 49, est 127.6s, claimed ['庆功宴突袭']
