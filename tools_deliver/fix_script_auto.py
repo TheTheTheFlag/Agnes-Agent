@@ -17,6 +17,8 @@ if not P or not os.path.exists(P):
 outline = json.load(open(f'{D}/outline.json', encoding='utf-8'))
 art = json.load(open(f'{D}/art.json', encoding='utf-8'))
 doc = json.load(open(P, encoding='utf-8'))
+ca = json.load(open(f'{D}/cast.json', encoding='utf-8'))
+_CAST_IDS = [c.get('id') for c in ca.get('characters', [])]
 
 LIGHT_MAP = {
     'S01': '深夜台灯光束聚焦', 'S02': '夜景冷蓝透射', 'S03': '傍晚暖黄灯光',
@@ -98,9 +100,31 @@ for ep in doc.get('episodes', []):
                 if nl != b['line']:
                     b['line'] = nl; ch['line'] += 1
     total_sec = sum(scene_sec(s.get('flow', [])) for s in ep.get('scenes', []))
-    if total_sec < 100:  # 空壳保护：不硬补，提示人工
-        print(f"  WARN E{epn}: 仅 {total_sec:.1f}s，疑似空壳，跳过补拍（交给模型重做）")
+    total_beats = sum(len(s.get('flow', [])) for s in ep.get('scenes', []))
+    # hookBeat 越界归一化：hookBeat=[场,拍] 中场用 1 基，拍索引若超出现有节拍则收回到 1
+    hb = ep.get('hookBeat')
+    if isinstance(hb, list) and len(hb) == 2:
+        if hb[0] == 0 or hb[0] > len(ep.get('scenes', [])):
+            hb[0] = 1
+            ch['beats'] += 0
+        if hb[1] < 1:
+            hb[1] = 1
+    if total_sec < 60 or total_beats < 12:  # 真正空壳（几乎无内容）：不硬补，提示模型重做
+        print(f"  WARN E{epn}: 仅 {total_sec:.1f}s/{total_beats}拍，疑似空壳，跳过补拍（交给模型重做）")
         continue
+    # 说话人在场校验：speaker 在 cast 名单内但不在本场人物 → 补进人物表（外圈人物画外音除外）
+    for s in ep.get('scenes', []):
+        chars = s.get('characters', [])
+        if not chars:
+            continue
+        for b in s.get('flow', []):
+            sp = b.get('speaker')
+            if sp and sp not in chars:
+                if sp not in _CAST_IDS:
+                    print(f"  WARN E{epn} {s.get('sceneId')}: 说话人 {sp} 不在 cast.json，需模型处理")
+                elif 'VO' not in str(b.get('delivery','')) and str(sp) not in chars:
+                    chars.append(sp)
+                    ch['light'] += 1  # 复用计数字段，仅计数
     if total_sec < 112:
         need = int(math.ceil((114 - total_sec) / 2.5))
         for s in ep.get('scenes', []):
