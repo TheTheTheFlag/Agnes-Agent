@@ -1,0 +1,12 @@
+现在立刻执行，不要再只回复确认文字：
+
+任务：《美人图》剧本批次 1 的 script-b01.json 时长不足，需要扩容到每集目标 120 秒 ±15%。
+
+请直接动手：
+1. 先读 data/users/Mirror/deliverables/短剧/美人图/script-b01.json 与 outline.json 第 1-3 集梗概。
+2. 以「冲突推进 + 感情发展」扩充第 1-3 集：加动作节拍与台词，每集补到 45-55 拍，估时落 102-138s。第 1 集补 ~30 秒，第 2 集补 ~40 秒，第 3 集补 ~65 秒。
+3. 改完即跑：cd data/users/Mirror/deliverables/短剧/美人图/ && node app/skills/novel-script/scripts/novel-script.mjs validate script-b01.json --outline outline.json --art art.json
+4. 有违规（含时长）就修到全绿，最多可迭代 5 轮。
+5. 全绿后汇报：各集拍数、各集估时 vs 120s、10 门结果。
+
+没有把 validate 跑到全绿，本轮就不算结束。
