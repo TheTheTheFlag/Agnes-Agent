@@ -8,6 +8,14 @@
 #   服务器不可用 → 等 60s 重试（最多 30 分钟窗口）；崩溃恢复后从状态文件续跑
 # 状态: logs/tasks/pipeline-scripts.state（当前批次）；总日志 logs/tasks/pipeline-scripts.log
 set -u
+# —— 单实例锁：防止误启动多个驱动实例并发投递 ——
+LOCK=/home/mirror/Agnes-Agent/logs/tasks/pipeline-scripts.lock
+exec 9>"$LOCK"
+if ! flock -n 9; then
+  echo "[$(date +%H:%M:%S)] 已有 pipeline_scripts 实例在跑，本次启动退出"
+  exit 0
+fi
+
 BASE=/home/mirror/Agnes-Agent
 D="$BASE/data/users/Mirror/deliverables/短剧/美人图"
 TOOLSDIR="$BASE/tools_deliver"
