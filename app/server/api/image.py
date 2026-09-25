@@ -48,6 +48,12 @@ _MANIFEST = user_subdir("data_dir", "image_library", "manifest.json")
 _THUMB_MAX = 520
 _MAX_GALLERY = None    # 不限制作品数量，显示全部历史作品
 
+# 异步任务重试策略：失败自动重试直到成功（上限：总时长 6h、单次最长退避 300s）
+_RETRY_TOTAL_MAX = 6 * 3600      # 任务重试总时长上限 6 小时
+_RETRY_START_SLEEP = 5           # 首轮失败后的等待（秒）
+_RETRY_429_SLEEP = 300           # 上游限流（429）冷却等待
+_RETRY_CAP_SLEEP = 120           # 普通失败退避上限
+
 
 def _agnes_keys() -> list:
     """解析当前用户可用的 agnes 图片密钥。
@@ -292,16 +298,55 @@ def _call_generate(key: str, payload: dict) -> dict:
     return {"b64": b64, "url": url}
 
 
-def _persist_item(mode: str, model: str, prompt: str, size: str, ratio: str,
-                  n_refs: int, b64: str, url: str, username: str) -> dict:
-    # 切换到目标用户路径
+def _create_pending(mode: str, model: str, prompt: str, size: str, ratio: str,
+                    n_refs: int, username: str) -> dict:
+    """创建「生成中」占位条目并落盘 manifest，立即返回给前端展示。"""
+    item = {
+        "id": uuid.uuid4().hex[:12],
+        "mode": mode,
+        "model": model,
+        "prompt": prompt[:1000],
+        "size": size,
+        "ratio": ratio,
+        "n_refs": n_refs,
+        "file": "",
+        "thumb": "",
+        "status": "queued",
+        "progress": 0,
+        "attempt": 0,
+        "error": "",
+        "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "completed_at": "",
+        "user": username,
+    }
+    with _user_items_lock(username):
+        items = _user_items.setdefault(username, [])
+        items.insert(0, item)
+        items[:] = items
+    _save_user_manifest(username)
+    return item
+
+
+def _update_pending(username: str, item_id: str, **fields):
+    """按 id 更新占位条目（status/progress/error 等），仅当任务未被删除时生效。"""
+    with _user_items_lock(username):
+        for it in _get_user_items(username):
+            if it.get("id") == item_id:
+                it.update(fields)
+                break
+    _save_user_manifest(username)
+
+
+def _finish_pending(username: str, item_id: str, got: dict) -> None:
+    """生成成功后落盘原图 + 缩略图并标记 completed（复用 _persist_item 的文件逻辑）。"""
     old_user = current_user()
     try:
         set_current_user(username)
         os.makedirs(_LIB, exist_ok=True)
-        item_id = uuid.uuid4().hex[:12]
         raw_fp = None
         thumb_fp = None
+        b64 = got.get("b64") or ""
+        url = got.get("url") or ""
         if b64:
             try:
                 raw_bytes = base64.b64decode(b64)
@@ -327,28 +372,58 @@ def _persist_item(mode: str, model: str, prompt: str, size: str, ratio: str,
                 raw_fp = None
         if not raw_fp:
             raise RuntimeError("产物保存失败（上游既无 Base64 也无法下载）")
-
-        item = {
-            "id": item_id,
-            "mode": mode,
-            "model": model,
-            "prompt": prompt[:1000],
-            "size": size,
-            "ratio": ratio,
-            "n_refs": n_refs,
-            "file": os.path.basename(raw_fp),
-            "thumb": os.path.basename(thumb_fp) if thumb_fp else "",
-            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "user": username,  # 记录归属用户
-        }
-        with _user_items_lock(username):
-            items = _user_items.setdefault(username, [])
-            items.insert(0, item)
-            items[:] = items  # 不截断，保留全部
-        _save_user_manifest(username)
-        return item
+        _update_pending(username, item_id,
+                        file=os.path.basename(raw_fp),
+                        thumb=os.path.basename(thumb_fp) if thumb_fp else "",
+                        status="completed", progress=100,
+                        completed_at=time.strftime("%Y-%m-%d %H:%M:%S"),
+                        error="")
     finally:
         set_current_user(old_user)
+
+
+def _worker_run(payload: dict, keys: list, username: str, item_id: str) -> None:
+    """单任务后台执行：轮换 key + 失败自动重试直到成功/超时。"""
+    t0 = time.time()
+    sleep = _RETRY_START_SLEEP
+    attempt = 0
+    while True:
+        attempt += 1
+        _update_pending(username, item_id, status="running", progress=0, attempt=attempt)
+        last_err = ""
+        for key in keys:
+            try:
+                got = _call_generate(key, payload)
+                _finish_pending(username, item_id, got)
+                return  # 成功
+            except RuntimeError as e:
+                msg = str(e)
+                last_err = msg
+                if "429" in msg or "rate limit" in msg.lower() or "unavailable" in msg.lower():
+                    sleep = _RETRY_429_SLEEP          # 限流：冷却 300s 后继续
+                    continue                          # 换下个 key 再试
+                if "401" in msg or "403" in msg or "unauthorized" in msg.lower() or "invalid" in msg.lower():
+                    sleep = _RETRY_START_SLEEP         # 密钥失效：换下个 key
+                    continue
+                break                                  # 其它错误（5xx/网络等）：本 key 失败换下个 key
+        _update_pending(username, item_id, status="running", error=last_err[:200])
+        if time.time() - t0 > _RETRY_TOTAL_MAX:
+            _update_pending(username, item_id, status="failed", progress=0,
+                            error=f"重试超过 {_RETRY_TOTAL_MAX // 3600}h 仍未成功，最后错误: {last_err[:200]}",
+                            completed_at=time.strftime("%Y-%m-%d %H:%M:%S"))
+            return
+        time.sleep(sleep)
+        sleep = min(int(sleep * 1.6) + 3, _RETRY_CAP_SLEEP)   # 指数退避，封顶
+
+
+def _start_worker(username: str, jobs: list) -> None:
+    """jobs: [{item, payload}] —— 为每一张图启动独立后台线程。"""
+    for j in jobs:
+        threading.Thread(
+            target=_worker_run,
+            args=(j["payload"], _agnes_keys(), username, j["item"]["id"]),
+            daemon=True,
+        ).start()
 
 
 
@@ -419,32 +494,36 @@ def generate(payload: dict, request: Request):
     else:
         base_payload["return_base64"] = True
 
+    # 异步化：立即创建占位任务并启动后台线程（失败自动重试直到成功）
+    jobs = []
     items = []
     for i in range(count):
         payload_dup = dict(base_payload)
         if count > 1:
             payload_dup["prompt"] = prompt.replace("#i", "").replace("{i}", "") or prompt
-        last_err = ""
-        ok = False
-        for key in keys:
-            try:
-                got = _call_generate(key, payload_dup)
-                item = _persist_item(mode, model, prompt, size, ratio, len(data_uris),
-                                     got["b64"], got["url"], username)
-                items.append(item)
-                ok = True
-                break
-            except RuntimeError as e:
-                msg = str(e)
-                if "401" in msg or "403" in msg or "unauthorized" in msg.lower() or "invalid" in msg.lower():
-                    last_err = msg
-                    continue  # 换下一个 key
-                last_err = msg
-                break
-        if not ok:
-            return JSONResponse({"error": f"第 {i + 1} 张生成失败: {last_err}"}, status_code=502)
+        item = _create_pending(mode, model, payload_dup["prompt"], size, ratio,
+                               len(data_uris), username)
+        jobs.append({"item": item, "payload": payload_dup})
+        items.append(item)
+    _start_worker(username, jobs)
 
-    return {"ok": True, "count": len(items), "items": items}
+    return {"ok": True, "count": len(items), "items": items, "async": True}
+
+
+@router.get("/task/{item_id}")
+async def task(item_id: str, request: Request = None):
+    """轮询图片生成任务状态（queued / running / completed / failed）。"""
+    if not _EXT_RE.match(item_id):
+        return JSONResponse({"error": "非法 id"}, status_code=400)
+    username = getattr(getattr(request, "state", None), "username", None) or current_user()
+    with _user_items_lock(username):
+        item = next((it for it in _get_user_items(username) if it.get("id") == item_id), None)
+    if not item:
+        return JSONResponse({"error": "任务不存在"}, status_code=404)
+    # 仅作品库存在、无任务记录的历史作品（旧同步入库）→ 视为已完成，避免前端/外部轮询空转
+    if not item.get("status"):
+        item = dict(item, status="completed")
+    return {"ok": True, "item": item}
 
 
 @router.get("/history")

@@ -1,6 +1,9 @@
 /* ============================================================================
    图片创作工作台（Agnes Image 2.5 / 2.1 / 2.0 Flash）
    ============================================================================ */
+// 整体包进 IIFE：隔离顶层 const/函数，避免与同页其他模块（video-studio.js 等）
+// 在全局词法环境中重名（如 _UPLOAD_TIMEOUT）导致整文件解析失败。
+(function () {
 window.__imageStudioLoading = true;
 console.log("[image-studio.js] 开始执行...");
 
@@ -37,7 +40,11 @@ const Studio = {
   page: 1,            // current page
   perPage: 50,        // items per page
   activeTab: false,
+  pollers: {},        // id -> timer（生成任务轮询）
 };
+
+const _UPLOAD_TIMEOUT = 60000;    // 参考图上传超时 60s
+const _GENERATE_TIMEOUT = 120000; // 提交请求超时 120s（仅前端，不取消后端处理）
 
 /* ---------- 主渲染 ---------- */
 window.renderStudioTab = async function renderStudioTab(el) {
@@ -59,6 +66,7 @@ window.renderStudioTab = async function renderStudioTab(el) {
               <button class="d-btn" id="stAddRef">＋ 添加参考图</button>
               <span class="d-empty" style="margin:0">图生图 1 张 · 多图合成 ≥2 张 · 顺序即"图1 / 图2"</span>
             </div>
+            <div class="d-row" id="stRefNoteRow" style="margin-top:6px;flex-wrap:wrap;gap:2px 12px"></div>
             <input type="file" id="stRefFile" accept="image/*" multiple style="display:none">
           </div>
 
@@ -113,6 +121,7 @@ window.renderStudioTab = async function renderStudioTab(el) {
     ratio: $("#stRatio", el), px: $("#stPx", el), count: $("#stCount", el),
     gen: $("#stGen", el), busy: $("#stBusy", el), grid: $("#stGrid", el),
     countLbl: $("#stCountLbl", el), banner: $("#stKeyBanner", el), refBlock: $("#stRefBlock", el),
+    refNote: $("#stRefNoteRow", el),
     pagination: $("#stPagination", el),
   };
 
@@ -133,7 +142,10 @@ window.renderStudioTab = async function renderStudioTab(el) {
 
   // —— 事件 ——
   $("#stAddRef", el).addEventListener("click", () => $("#stRefFile", el).click());
-  $("#stRefFile", el).addEventListener("change", (e) => onRefFiles(e.target.files));
+  $("#stRefFile", el).addEventListener("change", (e) => {
+    if (e.target.files && e.target.files.length > 0) onRefFiles(e.target.files);
+    e.target.value = "";
+  });
   $$(".st-chip", el).forEach((c) => c.addEventListener("click", () => {
     const v = Studio.el.prompt.value;
     if (c.dataset.style === "__clear") { Studio.el.prompt.value = ""; }
@@ -229,14 +241,36 @@ async function onRefFiles(files) {
       toast("仅支持图片文件: " + f.name, "error"); continue;
     }
     if (f.size > 20 * 1024 * 1024) { toast("图片超过 20MB: " + f.name, "error"); continue; }
+    // 与视频创作页一致的上传进度提示：上传中 → ✅/❌，5 秒后移除
+    const note = document.createElement("span");
+    note.className = "d-empty";
+    note.textContent = `上传中: ${f.name} (${(f.size / 1024 / 1024).toFixed(1)}MB)`;
+    Studio.el.refNote.appendChild(note);
     try {
       const fd = new FormData(); fd.append("file", f);
-      const up = await fetch("/api/upload", { method: "POST", body: fd, credentials: "include" });
-      if (up.status === 401) return onUnauthorized();
-      const ud = await up.json().catch(() => ({}));
-      if (!up.ok) throw new Error(ud.error || "上传失败");
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), _UPLOAD_TIMEOUT);
+      const up = await fetch("/api/upload", {
+        method: "POST", body: fd, credentials: "include", signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+      if (up.status === 401) { onUnauthorized(); return; }
+      const text = await up.text();
+      let ud = {};
+      try { ud = JSON.parse(text); } catch (e) { }
+      if (!up.ok) throw new Error(ud.error || text || "上传失败");
       Studio.refs.push({ path: ud.path, name: ud.path.split("/").pop(), role: "" });
-    } catch (e) { toast("参考图上传失败: " + e.message, "error"); }
+      note.textContent = `✅ ${f.name}`;
+      note.style.color = "#22c55e";
+    } catch (e) {
+      let errMsg = e.message;
+      if (e.name === "AbortError") errMsg = `上传超时（${_UPLOAD_TIMEOUT / 1000}秒），请检查网络后重试`;
+      note.textContent = `❌ ${f.name}: ${errMsg}`;
+      note.style.color = "#ef4444";
+      toast("参考图上传失败: " + errMsg, "error");
+    } finally {
+      setTimeout(() => note.remove(), 5000);
+    }
   }
   paintRefs();
 }
@@ -251,8 +285,14 @@ async function generate() {
   Studio.busy = true;
   Studio.el.gen.disabled = true;
   Studio.el.busy.style.display = "";
-  Studio.el.busy.textContent = "⏳ 生成中…（每张约 10–60 秒，请耐心等待）";
+  Studio.el.busy.textContent = "⏳ 正在提交任务...";
+
+  const startTime = Date.now();
+  let requestDone = false;
   try {
+    // 超时仅用于前端提示，不取消后端处理（任务已异步化，提交即刻入库）
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), _GENERATE_TIMEOUT);
     const r = await apiPost("/api/image/generate", {
       mode: Studio.mode,
       model: Studio.el.model.value,
@@ -261,18 +301,88 @@ async function generate() {
       ratio: Studio.el.ratio.value,
       refs: Studio.refs.map((x) => x.path),
       count: Number(Studio.el.count.value),
-    });
-    if (!r.ok) throw new Error(r.error || "生成失败");
+    }, controller.signal);
+    const elapsed = Date.now() - startTime;
+    requestDone = true;
+    clearTimeout(timeoutId);
+
+    if (!r || !r.items || r.items.length === 0) throw new Error("服务器未返回任务信息");
     for (const it of r.items) Studio.gallery.unshift(it);
-    toast(`已生成 ${r.items.length} 张`, "success");
+    toast(`✅ 任务已提交（${elapsed}ms），生成中（失败自动重试），完成后入库`, "success");
+    paintGallery();
+    (r.items || []).forEach((it) => pollImageTask(it.id));
   } catch (e) {
-    toast("生成失败: " + e.message, "error");
+    const elapsed = Date.now() - startTime;
+    let errMsg = e.message;
+    if (e.name === "AbortError") {
+      toast("⏳ 任务已提交，后端处理中（网络较慢），请刷新作品库查看进度", "info");
+      setTimeout(() => { loadGallery().then(() => resumeImagePolling()); }, 3000);
+      return;
+    } else if (!requestDone) {
+      errMsg = `网络错误: ${errMsg}（${elapsed}ms）`;
+    }
+    toast("❌ 提交失败: " + errMsg, "error");
+    Studio.el.busy.textContent = "⚠️ 提交失败，请重试";
   } finally {
     Studio.busy = false;
     Studio.el.gen.disabled = false;
-    Studio.el.busy.style.display = "none";
-    paintGallery();
+    setTimeout(() => { Studio.el.busy.style.display = "none"; }, 3000);
   }
+}
+
+/* ---------- 生成任务轮询（与视频创作页同构） ---------- */
+function imgTerminal(s) { return !s || s === "completed" || s === "failed"; }
+
+function resumeImagePolling() {
+  Object.keys(Studio.pollers || {}).forEach((id) => clearTimeout(Studio.pollers[id]));
+  Studio.pollers = {};
+  const pending = Studio.gallery.filter((it) => !imgTerminal(it.status));
+  pending.forEach((it) => pollImageTask(it.id));
+}
+
+function pollImageTask(id) {
+  if (!Studio.pollers) Studio.pollers = {};
+  if (Studio.pollers[id]) return;
+  let retryCount = 0;
+  const maxRetries = 10;   // 最多重试 10 次；后端 worker 一直在跑，大不了刷新页面
+  const tick = async () => {
+    try {
+      const r = await apiGet("/api/image/task/" + encodeURIComponent(id));
+      const it = r.item;
+      if (it) {
+        const i = Studio.gallery.findIndex((g) => g.id === id);
+        if (i >= 0) {
+          const prevStatus = Studio.gallery[i].status;
+          Studio.gallery[i] = it;
+          // 仅在状态变化时整库重绘，避免轮询期反复重建图片节点造成“狂刷新”
+          if (prevStatus !== it.status) paintGallery();
+        } else {
+          Studio.gallery.unshift(it);
+          paintGallery();
+        }
+        retryCount = 0;    // 成功则重置重试计数
+        if (imgTerminal(it.status)) {
+          clearTimeout(Studio.pollers[id]);
+          delete Studio.pollers[id];
+          if (it.status === "completed") toast("✅ 图片已生成并入库", "success");
+          else toast("❌ 生成失败: " + (it.error || ""), "error");
+          return;
+        }
+      }
+    } catch (e) {
+      retryCount++;
+      if (retryCount >= maxRetries) {
+        console.error("[pollImageTask] 达到最大重试次数，放弃轮询:", id, e.message);
+        delete Studio.pollers[id];
+        toast("网络异常，请刷新页面查看最新状态", "error");
+        return;
+      }
+      console.warn("[pollImageTask] 轮询失败，重试", retryCount, "/", maxRetries, ":", e.message);
+    }
+    const delay = Math.min(1500 * Math.pow(2, Math.min(retryCount, 3)), 15000);
+    Studio.pollers[id] = setTimeout(tick, delay);
+  };
+  Studio.pollers[id] = setTimeout(tick, 1500);
 }
 
 /* ---------- 作品库 ---------- */
@@ -283,6 +393,7 @@ async function loadGallery() {
     Studio.gallery = r.items || [];
   } catch (e) { /* 网络失败时保留现有视图 */ }
   paintGallery();
+  resumeImagePolling();
 }
 
 const IMAGE_MODE_LBL = { txt2img: "文生图", img2img: "图生图", multi: "多图合成" };
@@ -305,10 +416,28 @@ function paintGallery() {
     return;
   }
   Studio.el.grid.innerHTML = items.map((it) => {
-    const src = "/api/image/file/" + it.id + (it.thumb ? "?thumb=1" : "");
+    const st = it.status || "completed";
+    const running = st === "queued" || st === "running";
+    const failed = st === "failed";
+    const done = st === "completed";
+    let body;
+    if (running) {
+      body = `<div class="st-card-img" style="display:flex;align-items:center;justify-content:center;background:#f4f5f7;min-height:130px;flex-direction:column;gap:6px">
+        <span style="font-size:22px">⏳</span>
+        <span style="font-size:12px;color:#666">生成中${it.attempt ? " · 尝试 " + it.attempt + " 次" : ""}</span>
+        <span style="font-size:11px;color:#999">失败自动重试中…</span></div>`;
+    } else if (failed) {
+      body = `<div class="st-card-img" style="display:flex;align-items:center;justify-content:center;background:#fdf0f0;min-height:130px;flex-direction:column;gap:6px;padding:8px">
+        <span style="font-size:22px">✕</span>
+        <span style="font-size:12px;color:#c0392b">生成失败</span>
+        <span style="font-size:11px;color:#999;text-align:center">${escapeHtml(truncate(it.error || "", 60))}</span></div>`;
+    } else {
+      const src = "/api/image/file/" + it.id + (it.thumb ? "?thumb=1" : "");
+      body = `<div class="st-card-img"><img loading="lazy" src="${src}" alt=""></div>`;
+    }
     return `
     <figure class="st-card" data-id="${escapeHtml(it.id)}">
-      <div class="st-card-img"><img loading="lazy" src="${src}" alt=""></div>
+      ${body}
       <figcaption class="st-card-meta">
         <span class="st-card-chip">${escapeHtml(IMAGE_MODE_LBL[it.mode] || it.mode)}</span>
         <span class="st-card-chip">${escapeHtml(it.size)}</span>
@@ -316,8 +445,8 @@ function paintGallery() {
       </figcaption>
       <div class="st-card-prompt">${escapeHtml(truncate(it.prompt || "", 80))}</div>
       <div class="st-card-ops">
-        <button class="d-btn sm" data-act="open">查看</button>
-        <button class="d-btn sm" data-act="reuse">用图继续</button>
+        <button class="d-btn sm" data-act="open" ${done ? "" : "disabled"}>查看</button>
+        <button class="d-btn sm" data-act="reuse" ${done ? "" : "disabled"}>用图继续</button>
         <button class="d-btn sm" data-act="copy">复用提示词</button>
         <button class="d-btn sm" data-act="redo">同参重绘</button>
         <button class="d-btn sm danger" data-act="del">删除</button>
@@ -328,19 +457,21 @@ function paintGallery() {
   $$(".st-card", Studio.el.grid).forEach((card) => {
     const item = items.find((g) => g.id === card.dataset.id);
     if (!item) return;
-    // 点击图片区域也能打开灯箱
+    const done = (item.status || "completed") === "completed";
+    // 点击图片区域也能打开灯箱（仅完成的图片可打开）
     const cardImg = $$(".st-card-img", card)[0];
-    if (cardImg) {
+    if (cardImg && done) {
       cardImg.style.cursor = "zoom-in";
       cardImg.addEventListener("click", () => openLightbox(item));
     }
     $$("[data-act]", card).forEach((b) => b.addEventListener("click", async () => {
       try {
-        if (b.dataset.act === "open") openLightbox(item);
+        if (b.dataset.act === "open") { if (done) openLightbox(item); }
         else if (b.dataset.act === "copy") {
           await copyText(item.prompt || "");
           toast("提示词已复制", "success");
         } else if (b.dataset.act === "reuse") {
+          if (!done) { toast("图片尚未生成完成，无法作为参考图", "error"); return; }
           Studio.mode = Studio.mode === "multi" ? "multi" : "img2img";
           // 使用 item.id（不带扩展名）作为图片ID
           Studio.refs.push({ path: "image_library/" + item.file, name: item.id, role: "", isLibrary: true });
@@ -428,3 +559,4 @@ function openLightbox(item) {
 window.__imageStudioLoading = false;
 window.__imageStudioReady = typeof renderStudioTab === "function";
 console.log("[image-studio.js] 执行完成，renderStudioTab:", typeof renderStudioTab, "ready:", window.__imageStudioReady);
+})();

@@ -37,6 +37,19 @@ _PUB_REF_DIR = _os.path.join(_DATA_DIR, "video_ref")
 _os.makedirs(_PUB_REF_DIR, exist_ok=True)
 app.mount("/pub/video-ref", StaticFiles(directory=_PUB_REF_DIR), name="video_ref")
 
+# 内部调用令牌（agnes-media 技能复用创作台端点）：环境变量优先，否则自动生成并落盘
+# data/internal_token，重启后仍有效。auth 中间件校验 X-Agnes-Internal-Token 头。
+if not _os.environ.get("AGENT_INTERNAL_TOKEN"):
+    _itoken_file = _os.path.join(_DATA_DIR, "internal_token")
+    if not _os.path.isfile(_itoken_file):
+        try:
+            import secrets as _secrets
+            _os.makedirs(_DATA_DIR, exist_ok=True)
+            with open(_itoken_file, "w", encoding="utf-8") as _f:
+                _f.write(_secrets.token_urlsafe(48))
+        except Exception:
+            pass
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

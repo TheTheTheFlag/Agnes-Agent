@@ -44,6 +44,11 @@ _THUMB_MAX = 720
 _MAX_GALLERY = 200
 _REF_KEEP_SEC = 3 * 24 * 3600   # 参考图临时文件保留 3 天
 
+# 失败自动重建：上游 failed 后用「精简入参快照」重新创建任务，直到成功
+_REBUILD_MAX = 30            # 单个任务自动重建次数上限
+_REBUILD_TTL = 6 * 3600      # 任务从创建起最长存活 6 小时
+_CREATE_RETRY = 3            # 创建阶段 429/5xx/网络错误自动重试次数
+
 # 模型 / 模式 / 参数（与官方文档一致）
 VIDEO_MODELS = {
     "agnes-video-2.5-flash": {
@@ -485,7 +490,7 @@ def _build_payload(model: str, mode: str, payload: dict, request, use_public: bo
     return out
 
 
-def _persist_new(model: str, mode: str, prompt: str, payload: dict, key_idx: int, created: dict, username: str) -> dict:
+def _persist_new(model: str, mode: str, prompt: str, payload: dict, key_idx: int, created: dict, username: str, bparams: dict = None) -> dict:
     item = {
         "id": uuid.uuid4().hex[:12],
         "model": model,
@@ -507,6 +512,9 @@ def _persist_new(model: str, mode: str, prompt: str, payload: dict, key_idx: int
         "thumb": "",
         "duration": None,
         "error": "",
+        "bparams": bparams,          # 精简原始入参快照（用于失败自动重建）
+        "_t0": time.time(),          # 任务创建时刻（重建时限闸）
+        "rebuild_count": 0,          # 已自动重建次数
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "completed_at": "",
     }
@@ -516,6 +524,61 @@ def _persist_new(model: str, mode: str, prompt: str, payload: dict, key_idx: int
         items[:] = items[: _MAX_GALLERY]
     _save_user_manifest(username)
     return item
+
+
+def _maybe_rebuild(request, item: dict) -> str:
+    """上游 failed 后自动重建任务。返回 'ok'（已重建）/ 'retry'（限流稍后再试）/ 'fail'（放弃）。
+
+    阈值：自动重建 ≤ _REBUILD_MAX 次，且任务自创建起 ≤ _REBUILD_TTL 秒。
+    用 _persist_new 保存的精简入参 bparams 重新 _build_payload + _create_task，
+    参考图仍走 Data URI，上游要求公开 URL 时自动退回 pub/video-ref 兜底。
+    """
+    bp = item.get("bparams") or {}
+    if not bp or not str(bp.get("prompt") or "").strip():
+        return "fail"
+    try:
+        t0 = float(item.get("_t0") or time.time())
+    except (TypeError, ValueError):
+        t0 = time.time()
+    if time.time() - t0 > _REBUILD_TTL or int(item.get("rebuild_count") or 0) >= _REBUILD_MAX:
+        return "fail"
+    keys = _agnes_keys()
+    if not keys:
+        return "fail"
+    model = str(item.get("model") or bp.get("model") or "agnes-video-2.5-flash")
+    mode = str(item.get("mode") or bp.get("mode") or "ti2vid")
+    bp_refs = [str(x) for x in (bp.get("refs") or []) if str(x).strip()]
+
+    def _try(rq):
+        try:
+            payload = _build_payload(model, mode, bp, rq, use_public=False)
+            return _create_task(keys, payload)
+        except RuntimeError as e:
+            msg = str(e)
+            if ("公开 http(s) URL" in msg or "载体 URL" in msg) and bp_refs:
+                base = _public_base(rq)
+                if base and not _is_local_base(base):
+                    payload = _build_payload(model, mode, bp, rq, use_public=True)
+                    return _create_task(keys, payload)
+                raise
+            raise
+
+    try:
+        key_idx, created = _try(request)
+    except ValueError:
+        return "fail"                                   # 参考图缺失/读取失败，重建无意义
+    except RuntimeError as e:
+        msg = str(e)
+        if "429" in msg or "limit" in msg.lower() or "网络错误" in msg or "HTTP 5" in msg:
+            return "retry"                              # 限流/瞬时失败：保持 queued 下轮再试
+        return "fail"                                   # 4xx 参数级错误：重建无意义
+    item["video_id"] = created.get("video_id") or ""
+    item["task_id"] = created.get("task_id") or created.get("id") or ""
+    item["key_idx"] = key_idx
+    item["rebuild_count"] = int(item.get("rebuild_count") or 0) + 1
+    item["progress"] = 0
+    item["error"] = ""
+    return "ok"
 
 
 
@@ -573,27 +636,39 @@ def generate(payload: dict, request: Request):
         return JSONResponse({"error": str(e)}, status_code=400)
 
     _prune_refs()
-    try:
-        key_idx, created = _create_task(keys, upstream_payload)
-    except RuntimeError as e:
-        msg = str(e)
-        # 上游拒收内联载体（多为图片过小或格式不符）时，退回公开 URL 兜底
-        if ("公开 http(s) URL" in msg or "载体 URL" in msg) and refs:
-            base = _public_base(request)
-            if base and not _is_local_base(base):
-                try:
-                    upstream_payload = _build_payload(model, mode, p, request, use_public=True)
-                    key_idx, created = _create_task(keys, upstream_payload)
-                except (RuntimeError, ValueError) as e2:
-                    return JSONResponse({"error": f"{msg}（公开 URL 兜底失败：{e2}）"}, status_code=502)
-            else:
-                return JSONResponse({"error": f"{msg}（参考图体积过小或格式不受支持，请换一张更清晰的图片）"},
-                                    status_code=502)
-        else:
-            return JSONResponse({"error": msg}, status_code=502)
+    key_idx = None
+    created = None
+    create_msg = ""
+    for attempt in range(_CREATE_RETRY):
+        try:
+            key_idx, created = _create_task(keys, upstream_payload)
+            break
+        except RuntimeError as e:
+            msg = str(e)
+            create_msg = msg
+            # 上游拒收内联载体（多为图片过小或格式不符）时，退回公开 URL 兜底
+            if ("公开 http(s) URL" in msg or "载体 URL" in msg) and refs:
+                base = _public_base(request)
+                if base and not _is_local_base(base):
+                    try:
+                        upstream_payload = _build_payload(model, mode, p, request, use_public=True)
+                        key_idx, created = _create_task(keys, upstream_payload)
+                        break
+                    except (RuntimeError, ValueError) as e2:
+                        return JSONResponse({"error": f"{msg}（公开 URL 兜底失败：{e2}）"}, status_code=502)
+                else:
+                    return JSONResponse({"error": f"{msg}（参考图体积过小或格式不受支持，请换一张更清晰的图片）"},
+                                        status_code=502)
+            can_retry = ("429" in msg or "limit" in msg.lower() or "网络错误" in msg or "HTTP 5" in msg)
+            if can_retry and attempt < _CREATE_RETRY - 1:
+                time.sleep(5 * (attempt + 1))
+                continue
+            break
+    if key_idx is None:
+        return JSONResponse({"error": create_msg}, status_code=502)
 
     username = getattr(getattr(request, "state", None), "username", None) or current_user()
-    item = _persist_new(model, mode, prompt, upstream_payload, key_idx, created, username)
+    item = _persist_new(model, mode, prompt, upstream_payload, key_idx, created, username, bparams=p)
     return {"ok": True, "count": 1, "items": [item]}
 
 
@@ -603,6 +678,11 @@ def task(item_id: str, request: Request = None):
         return JSONResponse({"error": "非法 id"}, status_code=400)
     username = getattr(getattr(request, "state", None), "username", None) or current_user()
     item = _find(item_id, username)
+    if not item:
+        # 兼容按 video_id / task_id 查询（media.py fetch 等内部调用）
+        with _user_items_lock(username):
+            item = next((it for it in _user_items.get(username, [])
+                         if it.get("video_id") == item_id or it.get("task_id") == item_id), None)
     if not item:
         return JSONResponse({"error": "任务不存在"}, status_code=404)
     if item.get("status") in ("completed", "failed") and item.get("file"):
@@ -631,8 +711,18 @@ def task(item_id: str, request: Request = None):
 
     if st == "failed":
         err = data.get("error")
-        item["error"] = err.get("message") if isinstance(err, dict) else str(err or "生成失败")
-        item["completed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        errmsg = err.get("message") if isinstance(err, dict) else str(err or "生成失败")
+        item["error"] = errmsg
+        rebuild = _maybe_rebuild(request, item)
+        if rebuild == "ok":
+            item["status"] = "queued"
+            item["error"] = f"生成失败（{errmsg}），已自动重建任务 #{item.get('rebuild_count')}"
+        elif rebuild == "retry":
+            item["status"] = "queued"          # 限流：保持 queued，下一轮轮询自然节流后重试
+            item["error"] = f"生成失败（{errmsg}），自动重建等待中"
+        else:
+            item["error"] = f"{errmsg}（已自动重试 {item.get('rebuild_count', 0)} 次仍失败）"
+            item["completed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
     elif st == "completed":
         url = data.get("url") or (data.get("metadata") or {}).get("url") or ""
         if url and not item.get("file"):

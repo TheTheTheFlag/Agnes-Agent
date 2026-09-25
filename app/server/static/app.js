@@ -2472,7 +2472,8 @@ async function switchStudioTab(tab) {
       const fn = window.renderDramaStudioTab || renderDramaStudioTab;
       if (!_studioDramaReady) { _studioDramaReady = true; await fn(drmP); }
     } else if (tab === "image") {
-      const loaded = await waitForFn("renderStudioTab");
+      // 首次打开 / 缓存刷新时 image-studio.js 可能仍在下载：加长等待（10s 兜底）
+      const loaded = await waitForFn("renderStudioTab", 50, 200);
       if (!loaded) {
         imgP.innerHTML = drawerErr(new Error("图片创作模块加载超时，请刷新页面重试"));
         return;

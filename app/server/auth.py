@@ -30,6 +30,25 @@ COOKIE_NAME = "agnes_auth"
 TOKEN_TTL_SECONDS = accounts.TOKEN_TTL_SECONDS
 MIN_PASSWORD_LEN = accounts.MIN_PASSWORD_LEN
 
+# 内部调用令牌：允许 agnes-media 技能等本地进程以指定用户身份调用 /api 端点，
+# 复用创作台同一套后端逻辑。令牌来自环境变量 AGENT_INTERNAL_TOKEN 或
+# data/internal_token 文件（服务启动时自动生成，见 server/__init__.py）。
+_INTERNAL_TOKEN_FILE = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "data", "internal_token",
+)
+
+
+def _internal_token() -> str:
+    v = os.getenv("AGENT_INTERNAL_TOKEN") or ""
+    if v:
+        return v
+    try:
+        with open(_INTERNAL_TOKEN_FILE, encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 admin_router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -243,6 +262,19 @@ def install_auth_middleware(app):
         if request.method == "OPTIONS":
             return await call_next(request)
         if path.startswith("/api/") and not path.startswith("/api/auth/"):
+            # 内部调用通道：X-Agnes-Internal-Token + X-Agnes-Internal-User（agnes-media 技能复用页面端点）
+            itok = request.headers.get("X-Agnes-Internal-Token") or ""
+            iuser = (request.headers.get("X-Agnes-Internal-User") or "").strip()
+            if iuser and itok:
+                expected = _internal_token()
+                if expected and hmac.compare_digest(itok, expected):
+                    request.state.username = iuser
+                    from app.userctx import set_current_user, reset_current_user
+                    _utok = set_current_user(iuser)
+                    try:
+                        return await call_next(request)
+                    finally:
+                        reset_current_user(_utok)
             username = _current_username(request)
             if not username:
                 return JSONResponse({"error": "未登录或登录已过期"}, status_code=401)

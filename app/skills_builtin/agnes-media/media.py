@@ -2,26 +2,22 @@
 """
 Agnes AI 媒体统一生成脚本（skill: agnes-media）
 
-把「生成 → 轮询 → 下载产物 → 写日志」整合为同一个脚本入口，供大模型按实际
-需求传参调用，不再手写/复制固定生成脚本。
+【复用创作台逻辑】本脚本不再直连上游 API，而是通过内部通道调用
+本地创作台服务器（127.0.0.1:8081）与页面完全相同的端点：
 
-子命令：
-  image   文生图 / 图生图 / 多图合成（同步接口，返回即产物）
-  video   文生视频 / 图生视频 / 关键帧动画（异步接口：创建任务 → 自动轮询 → 下载）
-  fetch   按 task_id / video_id 查询任务状态（调试用）
+  image  →  POST /api/image/generate（异步任务）→ GET /api/image/task/{id} 轮询 → 产物已入库
+  video  →  POST /api/video/generate（异步任务）→ GET /api/video/task/{id} 轮询 → 产物已入库
+  fetch  →  GET /api/video/task/{id} / /api/image/task/{id} 查询任务状态
 
-公共行为：
-  - API Key 一律从本文件同目录 keys.json 读取（不硬编码、不入库）。
-  - 产物与日志统一写入 <skill_dir>/output/YYYYMMDD/（log.md 追加，含时间/Prompt/参数/URL/File）。
-  - stdout 输出 URL= / FILE= / LOG= 等机器可读行，方便 Agent 回话或继续处理。
-  - 参考图既可传 URL 也可传本地路径（本地文件自动转 Data URI，无需手工 base64）。
+- 生成失败由后端自动重试直到成功（图片 worker 线程；视频失败自动重建任务）；
+  脚本侧在轮询超限前一直等待，超时应改用 fetch 续查、不要重新创建任务。
+- 产物直接落在创建任务的用户「作品库」（data/.../image_library|video_library），
+  创作台页面与本脚本产物唯一、不重复。stdout 输出 FILE=（作品库绝对路径）供后续处理。
+- 日志仍追加写 <skill_dir>/output/YYYYMMDD/log.md（只写日志，不重复落产物文件）。
+- 内部鉴权：X-Agnes-Internal-Token（AGENT_INTERNAL_TOKEN 或 data/internal_token，
+  服务启动时自动生成）+ X-Agnes-Internal-User（当前用户，默认 Mirror）。
 
-按官方文档实现（2026-09 核对）：
-  - Image  : POST /v1/images/generations · agnes-image-2.5-flash
-             图生图/多图参考图放 extra_body.image[]（URL 或 Data URI）；输出格式放 extra_body.response_format
-  - Video  : POST /v1/videos · agnes-video-v2.0（异步）
-             创建后 GET /agnesapi?video_id=<id> 轮询；completed 后取 metadata.url 下载
-             num_frames ≤ 441 且满足 8n+1；关键帧动画用 extra_body.image[] + extra_body.mode="keyframes"
+子命令与参数保持与旧版一致（批量脚本无需改动）。
 """
 
 import argparse
@@ -31,7 +27,9 @@ import mimetypes
 import os
 import re
 import sys
+import tempfile
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -44,8 +42,7 @@ except Exception:
 import requests
 
 SKILL_DIR = Path(__file__).resolve().parent
-BASE_URL = "https://api.agnes-ai.cn/v1"
-QUERY_URL = "https://api.agnes-ai.cn/agnesapi"
+PROJECT_ROOT = SKILL_DIR.resolve().parents[3]          # .../Agnes-Agent
 OUTPUT_ROOT = SKILL_DIR / "output"
 
 # 模型/默认参数（与 SKILL.md front-matter 保持一致）
@@ -57,39 +54,170 @@ IMAGE_RATIOS = ("1:1", "3:4", "4:3", "16:9", "9:16", "2:3", "3:2", "21:9")
 VIDEO_PRESETS = {3: 81, 5: 121, 10: 241, 18: 441}  # @24fps 的 num_frames
 
 IMG_RATIO_DEFAULT = "16:9"
-
-# 统一超时：全部请求/任务等待按 5 分钟（300s）执行
 HTTP_TIMEOUT = 300
 
 
-def load_api_key() -> str:
-    keys_file = SKILL_DIR / "keys.json"
-    key = ""
-    if keys_file.exists():
-        try:
-            keys = json.loads(keys_file.read_text(encoding="utf-8"))
-            key = str(keys.get("agnes") or keys.get("api_key") or "").strip()
-        except Exception:
-            key = ""
-    if not key:
-        # 优雅降级：keys.json 缺失/为空时，从账号库按当前用户解析 agnes 密钥，
-        # 使「图片创作台」同一套密钥池对 execute_command 路径同样可用。
-        try:
-            from app.userctx import resolve_user_keys
-            pool = resolve_user_keys().get("agnes") or []
-            if pool:
-                key = str(pool[0]).strip()
-        except Exception:
-            pass
-    if not key:
-        raise SystemExit(f"[media] 找不到可用 API Key（{keys_file} 不存在或为空，且账号库无 agnes key）")
-    return key
+# ==================== 内部调用通道（复用创作台端点） ====================
+def _base_url() -> str:
+    return (os.getenv("AGNES_SERVER_BASE") or "http://127.0.0.1:8081").rstrip("/")
 
 
-def headers(api_key: str) -> dict:
-    return {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+def _internal_token() -> str:
+    v = (os.getenv("AGENT_INTERNAL_TOKEN") or "").strip()
+    if v:
+        return v
+    try:
+        tok = (PROJECT_ROOT / "data" / "internal_token").read_text(encoding="utf-8").strip()
+        return tok
+    except Exception:
+        return ""
 
 
+def _internal_user() -> str:
+    """调用身份：优先当前用户上下文 → 环境变量 → 平台默认。"""
+    try:
+        from app.userctx import current_user
+        u = current_user()
+        if u:
+            return str(u)
+    except Exception:
+        pass
+    return os.getenv("AGENT_USERNAME") or "Mirror"
+
+
+def _hdrs() -> dict:
+    tok = _internal_token()
+    if not tok:
+        raise SystemExit("[media] 找不到内部令牌（AGENT_INTERNAL_TOKEN 或 data/internal_token 缺失，请先启动服务）")
+    return {
+        "X-Agnes-Internal-Token": tok,
+        "X-Agnes-Internal-User": _internal_user(),
+        "Content-Type": "application/json",
+    }
+
+
+def _api_get(path: str, allow_404: bool = False):
+    r = requests.get(_base_url() + path, headers=_hdrs(), timeout=HTTP_TIMEOUT)
+    if r.status_code == 401:
+        raise SystemExit("[media] 内部令牌校验失败（401）：请检查 data/internal_token 是否与服务端一致")
+    if r.status_code == 404 and allow_404:
+        return None
+    if r.status_code >= 400:
+        raise SystemExit(f"[media] GET {path} HTTP {r.status_code}: {r.text[:400]}")
+    return r.json()
+
+
+def _api_post(path: str, body: dict):
+    r = requests.post(_base_url() + path, headers=_hdrs(), json=body, timeout=HTTP_TIMEOUT)
+    if r.status_code == 401:
+        raise SystemExit("[media] 内部令牌校验失败（401）：请检查 data/internal_token 是否与服务端一致")
+    if r.status_code >= 400:
+        raise SystemExit(f"[media] POST {path} HTTP {r.status_code}: {r.text[:600]}")
+    return r.json()
+
+
+def _api_upload_ref(local_path: str) -> str:
+    """把本地参考图经 /api/upload（页面同一上传端点）入库，返回 uploads/<name> 供 refs 使用。"""
+    p = Path(local_path)
+    if not p.exists():
+        raise SystemExit(f"[media] 参考图不存在: {p}")
+    with open(p, "rb") as f:
+        files = {"file": (p.name.split("/")[-1], f)}
+        r = requests.post(_base_url() + "/api/upload", files=files,
+                          headers={"X-Agnes-Internal-Token": _internal_token(),
+                                   "X-Agnes-Internal-User": _internal_user()},
+                          timeout=HTTP_TIMEOUT)
+    if r.status_code == 401:
+        raise SystemExit("[media] 内部令牌校验失败（401）")
+    if r.status_code >= 400:
+        raise SystemExit(f"[media] 上传参考图 HTTP {r.status_code}: {r.text[:400]}")
+    ud = r.json()
+    path = ud.get("path") or ""
+    if not path:
+        raise SystemExit(f"[media] 上传参考图未返回 path: {json.dumps(ud, ensure_ascii=False)[:200]}")
+    return path
+
+
+def _ref_to_local(ref: str) -> str:
+    """参考图统一转成服务器本机可读的本地路径（URL/Data URI 先落到临时文件）。"""
+    ref = (ref or "").strip()
+    if ref.startswith("data:"):
+        hdr, _, b64 = ref.partition(",")
+        mime = hdr.replace("data:", "").split(";")[0] or "image/png"
+        ext = mimetypes.guess_extension(mime) or ".png"
+        tmp = Path(tempfile.gettempdir()) / f"media_ref_{uuid.uuid4().hex}{ext}"
+        tmp.write_bytes(base64.b64decode(b64))
+        return str(tmp)
+    if ref.startswith("http://") or ref.startswith("https://"):
+        tmp = Path(tempfile.gettempdir()) / f"media_ref_{uuid.uuid4().hex}{guess_ext(ref, '.png')}"
+        download(ref, tmp)
+        return str(tmp)
+    return ref
+
+
+def _user_lib_dir(kind: str) -> str:
+    """解析当前用户的作品库目录（与后端 user_subdir 同源）。"""
+    try:
+        from app.userctx import set_current_user
+        from app.config import user_subdir
+        set_current_user(_internal_user())
+        return str(user_subdir("data_dir", kind))
+    except Exception:
+        return ""
+
+
+def _api_download(path: str, dst: Path) -> None:
+    hdr = {"X-Agnes-Internal-Token": _internal_token(), "X-Agnes-Internal-User": _internal_user()}
+    with requests.get(_base_url() + path, headers=hdr, stream=True, timeout=HTTP_TIMEOUT) as r:
+        if r.status_code >= 400:
+            raise SystemExit(f"[media] 下载 {path} HTTP {r.status_code}: {r.text[:200]}")
+        with open(dst, "wb") as f:
+            for chunk in r.iter_content(chunk_size=1 << 16):
+                f.write(chunk)
+
+
+# ==================== 轮询（复用页面 task 端点） ====================
+def poll_task(kind: str, item_id: str, interval: int, max_wait: int) -> dict:
+    """轮询 /api/{kind}/task/{id} 直到 completed/failed；超时抛错提示 fetch 续查。"""
+    t0 = time.time()
+    last_st = ""
+    while True:
+        r = _api_get(f"/api/{kind}/task/{item_id}")
+        item = r.get("item") or {}
+        st = item.get("status") or "queued"
+        if st != last_st:
+            line = f"[media] {kind} 任务状态: {st}"
+            if item.get("progress"):
+                line += f" {item['progress']}%"
+            if item.get("error"):
+                line += f"（{item['error']}）"
+            print(line, file=sys.stderr)
+            last_st = st
+        if st == "completed" and item.get("file"):
+            return item
+        if st == "failed":
+            raise SystemExit(f"[media] 任务失败: {item.get('error') or '未知错误'}（TASK_ID={item_id}，多次自动重试仍未成功）")
+        if time.time() - t0 > max_wait:
+            raise SystemExit(f"[media] 轮询超时（{max_wait}s），TASK_ID={item_id}，可稍后用 fetch 子命令续查（后端仍在自动重试）")
+        time.sleep(interval)
+
+
+def _resolve_lib_file(kind: str, basename: str, item: dict, seq_prefix: str) -> Path:
+    """产物路径：优先返回作品库内文件（本脚本已通过页面端点入库）；解析失败时下载到技能 output 兜底。"""
+    libdir = _user_lib_dir(kind)
+    if libdir:
+        fp = Path(libdir) / basename
+        if fp.is_file():
+            return fp
+    d = today_dir()
+    seq = next_seq(d, seq_prefix)
+    ext = os.path.splitext(basename)[1] or (".mp4" if kind == "video" else ".png")
+    dst = d / f"{seq_prefix}_{seq:04d}{ext}"
+    _api_download(f"/api/{kind}/file/{item['id']}", dst)
+    return dst
+
+
+# ==================== 工具 ====================
 def today_dir() -> Path:
     d = OUTPUT_ROOT / datetime.now().strftime("%Y%m%d")
     d.mkdir(parents=True, exist_ok=True)
@@ -103,19 +231,6 @@ def next_seq(d: Path, prefix: str) -> int:
         if m:
             n = max(n, int(m.group(1)) + 1)
     return n
-
-
-def to_data_uri(ref: str) -> str:
-    """参考图：URL 直接返回；本地路径转 Data URI。"""
-    ref = ref.strip()
-    if ref.startswith("data:") or ref.startswith("http://") or ref.startswith("https://"):
-        return ref
-    p = Path(ref)
-    if not p.exists():
-        raise SystemExit(f"[media] 参考图不存在: {p}")
-    mime = mimetypes.guess_type(p.name)[0] or "image/png"
-    b64 = base64.b64encode(p.read_bytes()).decode("ascii")
-    return f"data:{mime};base64,{b64}"
 
 
 def guess_ext(url: str, fallback: str = ".png") -> str:
@@ -134,7 +249,6 @@ def download(url: str, save_path: Path, api_key: str = "") -> None:
 
 
 def append_log(log_file: Path, **fields) -> None:
-    """统一日志：每次成功产物追加一条（时间/Prompt/参数/URL/File）。"""
     block = [f"## {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"]
     for k, v in fields.items():
         if v not in (None, ""):
@@ -145,172 +259,153 @@ def append_log(log_file: Path, **fields) -> None:
         f.write("\n".join(block))
 
 
-# ============================================================ Image
-def cmd_image(args, api_key: str) -> int:
-    payload: dict = {"model": args.model, "prompt": args.prompt, "size": args.size}
-    if args.ratio:
-        payload["ratio"] = args.ratio
-    if args.return_base64:
-        payload["return_base64"] = True
-    extra: dict = {"response_format": args.format}
-    if args.refs:  # 图生图 / 多图合成
-        extra["image"] = [to_data_uri(x) for x in args.refs]
+# ==================== Image ====================
+def cmd_image(args) -> int:
+    refs = []
+    mode = "txt2img"
+    if args.refs:
+        mode = "multi" if len(args.refs) > 1 else "img2img"
+        refs = [_api_upload_ref(_ref_to_local(x)) for x in args.refs]
+    body: dict = {
+        "mode": mode,
+        "model": args.model,
+        "prompt": args.prompt,
+        "size": args.size,
+        "ratio": args.ratio,
+        "refs": refs,
+        "count": 1,
+    }
     if args.extra:
-        extra.update(json.loads(args.extra))
-    payload["extra_body"] = extra
+        try:
+            body.update({k: v for k, v in json.loads(args.extra).items() if k not in body})
+        except Exception:
+            raise SystemExit(f"[media] --extra 不是合法 JSON: {args.extra}")
 
     if args.dry_run:
-        print("[dry-run] POST", f"{BASE_URL}/images/generations", json.dumps(payload, ensure_ascii=False)[:2000])
+        print("[dry-run] POST", _base_url() + "/api/image/generate", json.dumps(body, ensure_ascii=False)[:2000])
+        return 0
+    if args.return_base64 or args.format != "url":
+        print("[media] 提示：--format/--return-base64 已并入页面异步入库，产物统一为 FILE（作品库）", file=sys.stderr)
+
+    r = _api_post("/api/image/generate", body)
+    items = r.get("items") or []
+    if not items:
+        raise SystemExit("[media] 图片任务未返回条目")
+    item = items[0]
+    print(f"TASK_ID={item.get('id')}")
+
+    item = poll_task("image", item["id"], interval=args.interval, max_wait=args.timeout)
+
+    fp = _resolve_lib_file("image", item["file"], item, "img")
+    print(f"FILE={fp}")
+    url = item.get("url") or item.get("remote_url") or ""
+    if url:
+        print(f"URL={url}")
+    log_file = today_dir() / "log.md"
+    append_log(log_file, Prompt=args.prompt, Model=args.model, Size=args.size,
+               Ratio=args.ratio, File=str(fp))
+    print(f"LOG={log_file}")
+    return 0
+
+
+# ==================== Video ====================
+def build_page_body(args) -> dict:
+    body: dict = {"model": args.model, "prompt": args.prompt}
+    is_flash = "flash" in args.model
+
+    if args.keyframes:
+        if is_flash and len(args.keyframes) < 2:
+            raise SystemExit("[media] flash 关键帧模式需要 ≥2 张参考图")
+        body["mode"] = "keyframe" if is_flash else "keyframes"
+        refs = list(args.keyframes)
+    elif args.image:
+        body["mode"] = "reference" if is_flash else "img2vid"
+        refs = [args.image]
+    elif args.mode and args.mode in (("text", "keyframe", "reference") if is_flash else ("ti2vid", "img2vid", "keyframes")):
+        body["mode"] = args.mode
+        refs = []
+    else:
+        body["mode"] = "text" if is_flash else "ti2vid"
+        refs = []
+    if refs:
+        body["refs"] = [_api_upload_ref(_ref_to_local(x)) for x in refs]
+
+    if is_flash:
+        body["seconds"] = str(args.duration or 5)
+        if args.seed is not None:
+            body["seed"] = args.seed
+    else:
+        frames = args.frames or (VIDEO_PRESETS.get(args.duration, 0) if args.duration else 0)
+        if not frames:
+            frames = 121                       # 默认约 5s @24fps
+        if frames > 441:
+            raise SystemExit(f"[media] num_frames 最大 441（当前 {frames}）")
+        if (frames - 1) % 8 != 0:
+            raise SystemExit(f"[media] num_frames 必须满足 8n+1（当前 {frames}，建议 81/121/241/441）")
+        body["num_frames"] = frames
+        if args.fps:
+            body["frame_rate"] = args.fps
+        if args.width:
+            body["width"] = args.width
+        if args.height:
+            body["height"] = args.height
+        if args.seed is not None:
+            body["seed"] = args.seed
+
+    if args.negative_prompt:
+        body["negative_prompt"] = args.negative_prompt
+    if args.steps:
+        print("[media] 提示：--steps 在创作台后端不支持，已忽略（固定质量档）", file=sys.stderr)
+    if args.extra:
+        try:
+            body.update({k: v for k, v in json.loads(args.extra).items() if k not in body})
+        except Exception:
+            raise SystemExit(f"[media] --extra 不是合法 JSON: {args.extra}")
+    return body
+
+
+def cmd_video(args) -> int:
+    body = build_page_body(args)
+    if args.dry_run:
+        print("[dry-run] POST", _base_url() + "/api/video/generate", json.dumps(body, ensure_ascii=False)[:2000])
         return 0
 
-    r = requests.post(f"{BASE_URL}/images/generations", headers=headers(api_key), json=payload, timeout=HTTP_TIMEOUT)
-    if r.status_code >= 400:
-        raise SystemExit(f"[media] HTTP {r.status_code}: {r.text[:500]}")
-    data = r.json()["data"][0]
+    r = _api_post("/api/video/generate", body)
+    items = r.get("items") or []
+    if not items:
+        raise SystemExit("[media] 视频任务未返回条目")
+    item = items[0]
+    vid = item.get("video_id") or item.get("id")
+    print(f"TASK_ID={item.get('id')}")
+    print(f"VIDEO_ID={vid}")
 
-    d = today_dir()
-    log_file = d / "log.md"
-    if args.format == "b64_json" or data.get("b64_json"):
-        raw = base64.b64decode(data["b64_json"])
-        seq = next_seq(d, "img")
-        path = d / f"img_{seq:04d}.png"
-        path.write_bytes(raw)
-        url = data.get("url") or ""
-        print(f"FILE={path}")
-    else:
-        url = data["url"]
-        seq = next_seq(d, "img")
-        path = d / f"img_{seq:04d}{guess_ext(url, '.png')}"
-        download(url, path)
-        print(f"URL={url}")
-        print(f"FILE={path}")
+    item = poll_task("video", item["id"], interval=args.interval, max_wait=args.timeout)
 
-    append_log(log_file, Prompt=args.prompt, Model=args.model, Size=args.size,
-               Ratio=args.ratio, Image=url or "(base64)", File=str(path))
-    print(f"LOG={log_file}")
-    return 0
-
-
-# ============================================================ Video
-def build_video_payload(args) -> dict:
-    payload: dict = {"model": args.model, "prompt": args.prompt}
-    # 时长：--duration 快捷档 或 --frames/--fps
-    if args.duration:
-        if args.duration not in VIDEO_PRESETS:
-            raise SystemExit(f"[media] --duration 支持 {sorted(VIDEO_PRESETS)} 秒（@24fps）")
-        args.frames = VIDEO_PRESETS[args.duration]
-        if not args.fps:
-            args.fps = 24
-    if args.frames:
-        payload["num_frames"] = args.frames
-    if args.fps:
-        payload["frame_rate"] = args.fps
-    if args.width:
-        payload["width"] = args.width
-    if args.height:
-        payload["height"] = args.height
-    if args.image:  # 图生视频（单图，顶层 image）
-        payload["image"] = to_data_uri(args.image)
-    if args.negative_prompt:
-        payload["negative_prompt"] = args.negative_prompt
-    if args.seed is not None:
-        payload["seed"] = args.seed
-    if args.steps is not None:
-        payload["num_inference_steps"] = args.steps
-
-    extra: dict = {}
-    if args.keyframes:  # 关键帧动画：extra_body.image[] + extra_body.mode（官方 curl 示例）
-        extra["image"] = [to_data_uri(x) for x in args.keyframes]
-        extra["mode"] = "keyframes"
-    elif args.mode:
-        extra["mode"] = args.mode  # 其它模式标记也放 extra_body（与官方示例一致）
-    if args.extra:
-        extra.update(json.loads(args.extra))
-    if extra:
-        payload["extra_body"] = extra
-
-    nf = payload.get("num_frames")
-    if nf is not None:
-        if nf > 441:
-            raise SystemExit(f"[media] num_frames 最大 441（当前 {nf}）")
-        if (nf - 1) % 8 != 0:
-            raise SystemExit(f"[media] num_frames 必须满足 8n+1（当前 {nf}，建议 81/121/241/441）")
-    return payload
-
-
-def video_create(args, api_key: str) -> dict:
-    payload = build_video_payload(args)
-    if args.dry_run:
-        print("[dry-run] POST", f"{BASE_URL}/videos", json.dumps(payload, ensure_ascii=False)[:2000])
-        raise SystemExit(0)
-    r = requests.post(f"{BASE_URL}/videos", headers=headers(api_key), json=payload, timeout=HTTP_TIMEOUT)
-    if r.status_code >= 400:
-        raise SystemExit(f"[media] HTTP {r.status_code}: {r.text[:500]}")
-    return r.json()
-
-
-def video_poll(video_id: str, api_key: str, task_id: str = "", interval: int = 8, max_wait: int = 1800):
-    """轮询视频任务，completed 返回响应 dict；失败抛错。"""
-    t0 = time.time()
-    while True:
-        params = {"video_id": video_id}
-        if task_id:  # 兼容旧版：也允许 task_id
-            params = {"video_id": task_id}
-        r = requests.get(QUERY_URL, params=params, headers=headers(api_key), timeout=HTTP_TIMEOUT)
-        if r.status_code >= 400:
-            raise SystemExit(f"[media] 查询 HTTP {r.status_code}: {r.text[:400]}")
-        data = r.json()
-        status = data.get("status") or data.get("state")
-        if status == "completed":
-            return data
-        if status in ("failed", "error", "cancelled"):
-            raise SystemExit(f"[media] 视频任务失败: {json.dumps(data.get('error') or data, ensure_ascii=False)[:500]}")
-        if time.time() - t0 > max_wait:
-            raise SystemExit(f"[media] 轮询超时（{max_wait}s），video_id={video_id}，可稍后用 fetch 子命令续查")
-        print(f"[media] 视频生成中… status={status} progress={data.get('progress')} （已等待 {int(time.time() - t0)}s）", file=sys.stderr)
-        time.sleep(interval)
-
-
-def cmd_video(args, api_key: str) -> int:
-    created = video_create(args, api_key)
-    video_id = created.get("video_id") or created.get("task_id") or created.get("id")
-    print(f"TASK_ID={created.get('task_id') or created.get('id')}")
-    print(f"VIDEO_ID={video_id}")
-    data = video_poll(video_id, api_key, interval=args.interval, max_wait=args.timeout)
-
-    url = (data.get("metadata") or {}).get("url") or data.get("url")
-    if not url:
-        raise SystemExit(f"[media] 任务完成但响应中无视频 URL: {json.dumps(data, ensure_ascii=False)[:500]}")
-
-    d = today_dir()
-    seq = next_seq(d, "video")
-    path = d / f"video_{seq:04d}{guess_ext(url, '.mp4')}"
-    download(url, path)
+    fp = _resolve_lib_file("video", item["file"], item, "video")
+    url = item.get("remote_url") or ""
     print(f"URL={url}")
-    print(f"FILE={path}")
-    log_file = d / "log.md"
-    append_log(log_file, Prompt=args.prompt, Model=args.model, Task=video_id,
-               Duration=created.get("seconds"), Size=created.get("size"), URL=url, File=str(path))
+    print(f"FILE={fp}")
+    log_file = today_dir() / "log.md"
+    append_log(log_file, Prompt=args.prompt, Model=args.model,
+               Duration=item.get("seconds") or item.get("duration"),
+               Size=item.get("size"), Task=vid, URL=url or "(已入库)", File=str(fp))
     print(f"LOG={log_file}")
     return 0
 
 
-def cmd_fetch(args, api_key: str) -> int:
-    params = {}
-    if args.video_id:
-        params = {"video_id": args.video_id}
-    elif args.task_id:
-        params = {"video_id": args.task_id}
-    else:
+def cmd_fetch(args) -> int:
+    ident = (args.video_id or args.task_id or "").strip()
+    if not ident:
         raise SystemExit("[media] fetch 需要 --video-id 或 --task-id")
-    r = requests.get(QUERY_URL, params=params, headers=headers(api_key), timeout=HTTP_TIMEOUT)
-    r.raise_for_status()
-    data = r.json()
-    print(json.dumps(data, ensure_ascii=False, indent=2))
-    return 0
+    for kind in ("video", "image"):
+        r = _api_get(f"/api/{kind}/task/{ident}", allow_404=True)
+        if r:
+            print(json.dumps(r, ensure_ascii=False, indent=2))
+            return 0
+    raise SystemExit(f"[media] 未找到任务: {ident}")
 
 
-# ============================================================ CLI
+# ==================== CLI ====================
 def add_common_image_args(p):
     p.add_argument("--prompt", required=True, help="图像描述 / 编辑指令")
     p.add_argument("--model", default=MODEL_IMAGE_DEFAULT,
@@ -319,16 +414,18 @@ def add_common_image_args(p):
     p.add_argument("--ratio", default=IMG_RATIO_DEFAULT, choices=IMAGE_RATIOS,
                    help=f"宽高比（默认 {IMG_RATIO_DEFAULT}）")
     p.add_argument("--ref", action="append", dest="refs", default=[],
-                   help="参考图：URL 或本地路径（图生图/多图合成，可重复传多次；本地自动转 Data URI）")
-    p.add_argument("--format", default="url", choices=["url", "b64_json"], help="输出格式")
-    p.add_argument("--return-base64", action="store_true", help="文生图直接以 Base64 返回")
-    p.add_argument("--extra", default="", help='附加参数 JSON（合并进 extra_body，如 \'{"seed":42}\'）')
+                   help="参考图：URL 或本地路径（图生图/多图合成，可重复传多次；自动上传并复用创作台上传端点）")
+    p.add_argument("--format", default="url", choices=["url", "b64_json"], help="输出格式（并入异步入库，恒为 FILE）")
+    p.add_argument("--return-base64", action="store_true", help="文生图直接以 Base64 返回（并入异步入库，恒为 FILE）")
+    p.add_argument("--extra", default="", help='附加参数 JSON（如 \'{"seed":42}\'）')
+    p.add_argument("--interval", type=int, default=5, help="轮询间隔秒数（默认 5）")
+    p.add_argument("--timeout", type=int, default=600, help="最大等待秒数（默认 600；后端 6h 内持续自动重试）")
     p.add_argument("--dry-run", action="store_true", help="只打印将发送的请求体，不发请求")
 
 
 def add_common_video_args(p):
     p.add_argument("--prompt", required=True, help="视频内容描述（[主体]+[动作]+[场景]+[镜头]+[光线]+[风格]）")
-    p.add_argument("--model", default=MODEL_VIDEO, help=f"模型（默认 {MODEL_VIDEO}）")
+    p.add_argument("--model", default=MODEL_VIDEO, help=f"模型（默认 {MODEL_VIDEO}；flash 用 agnes-video-2.5-flash）")
     p.add_argument("--image", default="", help="图生视频：单张图片 URL 或本地路径")
     p.add_argument("--keyframes", action="append", dest="keyframes", default=[],
                    help="关键帧动画：关键帧图片（URL/本地路径，≥2 张，可重复传）")
@@ -336,40 +433,40 @@ def add_common_video_args(p):
                    help="快捷时长（秒，@24fps）：3/5/10/18")
     p.add_argument("--frames", type=int, default=0, help="num_frames（≤441，满足 8n+1；默认 121≈5s@24fps）")
     p.add_argument("--fps", type=int, default=0, help="frame_rate（1-60，默认 24）")
-    p.add_argument("--width", type=int, default=0, help="宽度（默认由服务标准化，标准场景 1152/16:9）")
-    p.add_argument("--height", type=int, default=0, help="高度（默认 768/16:9）")
+    p.add_argument("--width", type=int, default=0, help="宽度（由后端标准化）")
+    p.add_argument("--height", type=int, default=0, help="高度（由后端标准化）")
     p.add_argument("--negative-prompt", default="", help="反向提示词")
     p.add_argument("--seed", type=int, default=None, help="随机种子（可复现）")
-    p.add_argument("--steps", type=int, default=None, help="num_inference_steps")
+    p.add_argument("--steps", type=int, default=None, help="num_inference_steps（后端不支持，忽略）")
     p.add_argument("--mode", default="", help="其它生成模式标记（keyframes 请用 --keyframes 自动设置）")
     p.add_argument("--interval", type=int, default=8, help="轮询间隔秒数（默认 8）")
-    p.add_argument("--timeout", type=int, default=HTTP_TIMEOUT, help="最大等待秒数（默认 300，即 5 分钟）")
-    p.add_argument("--extra", default="", help='附加参数 JSON（合并进 extra_body，如 \'{"negative_prompt":"x"}\'）')
+    p.add_argument("--timeout", type=int, default=HTTP_TIMEOUT,
+                   help="最大等待秒数（默认 300；视频批次脚本可设至 99 小时 = 356400s）")
+    p.add_argument("--extra", default="", help='附加参数 JSON（如 \'{"resolution":"720p"}\'）')
     p.add_argument("--dry-run", action="store_true", help="只打印将发送的请求体，不发请求")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="agnes-media",
-        description="Agnes AI 图片/视频统一生成脚本（生成→轮询→下载→日志一条龙）")
+        description="Agnes AI 图片/视频统一生成脚本（复用创作台后端：提交→轮询→入库→日志）")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    p_img = sub.add_parser("image", help="文生图 / 图生图 / 多图合成")
+    p_img = sub.add_parser("image", help="文生图 / 图生图 / 多图合成（异步提交+自动重试）")
     add_common_image_args(p_img)
     p_img.set_defaults(fn=cmd_image)
 
-    p_vid = sub.add_parser("video", help="文生视频 / 图生视频 / 关键帧动画（自动轮询+下载）")
+    p_vid = sub.add_parser("video", help="文生视频 / 图生视频 / 关键帧动画（自动轮询+入库）")
     add_common_video_args(p_vid)
     p_vid.set_defaults(fn=cmd_video)
 
-    p_fetch = sub.add_parser("fetch", help="查询视频任务状态（调试）")
-    p_fetch.add_argument("--video-id", default="", help="创建任务返回的 video_id")
+    p_fetch = sub.add_parser("fetch", help="查询任务状态（按 video_id / task_id，兼容 image）")
+    p_fetch.add_argument("--video-id", default="", help="创建任务返回的 video_id / 任务 id")
     p_fetch.add_argument("--task-id", default="", help="task_id（兼容旧版查询）")
     p_fetch.set_defaults(fn=cmd_fetch)
 
     args = parser.parse_args()
-    api_key = load_api_key()
-    return args.fn(args, api_key)
+    return args.fn(args)
 
 
 if __name__ == "__main__":
