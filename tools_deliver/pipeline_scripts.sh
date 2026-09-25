@@ -118,6 +118,14 @@ EOF
   log "批次 $n validate exit=$vr"
   tail -6 "$vlog" >> "$LOGF"
 
+  # 3.5) 机械门程序化兜底（不占模型配额）：source/beatsClaimed/光照/台词长度/时长
+  if [ "$vr" -ne 0 ]; then
+    python3 "$TOOLSDIR/fix_script_auto.py" "$D/$fn" > "$LOGDIR/t2-b${b}.fixauto" 2>&1
+    vr=$(validate_batch "$fn" "$vlog")
+    log "批次 $n fixauto 后 validate exit=$vr"
+    tail -6 "$vlog" >> "$LOGF"
+  fi
+
   # 4) 修复循环（最多 3 轮）
   fix=0
   while [ "$vr" -ne 0 ] && [ "$fix" -lt 3 ]; do
@@ -139,8 +147,13 @@ EOF
 
 $(tail -80 "$vlog")
 
-请逐条修复 ${fn} 的违规（节拍必须是 action/line 交替结构、场次/人物/场景对账、集时长 120s±15%、每集 45-55 拍、hookBeat 前 3 拍、结尾悬念、删除 seedNote 等），修完重跑：
-cd data/users/Mirror/deliverables/短剧/美人图/ && node /home/mirror/Agnes-Agent/app/skills/novel-script/scripts/novel-script.mjs validate ${fn} --outline outline.json --art art.json
+⚠️ 重要判断：如果 ${fn} 是"空壳/半成品"（每集只有 1-2 场、估时远低于 100s、只有 seed 骨架），
+不要在这个骨架上面修补——请直接删除该文件，然后用 SKILL.md 的完整流程重新生成第 $a-$c 集：
+   node app/skills/novel-script/scripts/novel-script.mjs seed outline.json --eps $a-$c > data/users/Mirror/deliverables/短剧/美人图/${fn}
+   然后填充每集 4-5 场、45-55 拍、估时 120s±15%，接续 script-b${p}.json 的结尾悬念。
+如果文件内容已较完整，则逐条修 validate 列出的违规（光照要用 art.json 登记的中文状态名、
+台词 ≤35 字、动作与台词交替节拍、爽点认领）即可。
+修完重跑：cd data/users/Mirror/deliverables/短剧/美人图/ && node /home/mirror/Agnes-Agent/app/skills/novel-script/scripts/novel-script.mjs validate ${fn} --outline outline.json --art art.json
 直到全绿。完成后汇报修复内容与最终 validate 摘要。不要动其它批次文件。
 EOF
       log "批次 $n 修复#$fix thread 新开"
