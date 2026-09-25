@@ -1,0 +1,15 @@
+【自动化任务 T2｜novel-script 写剧本《美人图》批次 12（第 34-36 集）】
+
+交付目录：data/users/Mirror/deliverables/短剧/美人图/
+上游产物（先读取核对）：outline.json（60 集，每集时长按 duration_seconds）、art.json（场景/道具/光照）、cast.json、上一批 script-b11.json（第 31-33 集）。
+
+要求按 novel-script SKILL.md 写第 34-36 集剧本：
+
+1) seed：在服务根目录执行
+   node app/skills/novel-script/scripts/novel-script.mjs seed outline.json --eps 34-36 > data/users/Mirror/deliverables/短剧/美人图/script-b12.json
+2) 承接：先读 script-b11.json 的最后一拍（第 33 集结尾悬念），第 34 集开场必须接住它；人物性情（cast.json）、场景锚点与光照（art.json）保持一致。
+3) 写戏要求：动作节拍与台词行交替的结构化节拍流，每句台词带说话人与语气；每集估时落在目标 120s ±15%（102-138s），写足 45-55 拍；每集冷开场钩子（hookBeat 认领，前 3 拍内）+ 结尾悬念；写完删除 seedNote。
+4) 校验（不能跳）：cd data/users/Mirror/deliverables/短剧/美人图/ && node app/skills/novel-script/scripts/novel-script.mjs validate script-b12.json --outline outline.json --art art.json；有违规逐条修并重跑直到全绿。
+5) 本批只产出 script-b12.json，不要 render 整剧报告。
+
+完成后汇报：本批集数、总场次、总台词句数、每集实际估时 vs 目标、validate 各门结果。
