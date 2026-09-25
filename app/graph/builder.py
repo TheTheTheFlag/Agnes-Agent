@@ -22,14 +22,14 @@ from app.graph.state import State
 from app.graph.utils import (count_tokens, retry_llm_call, parse_tool_calls_from_content,
     ensure_tool_calls, ensure_token_limit, sync_state_to_db, load_prompt_template,
     MODEL_CONTEXT_LIMIT, TOKEN_LIMIT, KEEP_RECENT, MAX_TOOL_CALL_ROUNDS, _tool_params_summary,
-    prepare_context_messages, apply_reply_guard, build_recent_work_summary)
+    prepare_context_messages, apply_reply_guard, build_recent_work_summary, extract_task_instruction)
 from app.tools import tools, request_planning, get_tools_for_user
 from app.llm import create_llm
 from app.memory import MemoryManager
 from app.planning.dag_planner import create_dag_planner_node
 from app.planning.dag_executor import create_executor
 from app.planning.dag_summarizer import create_dag_summarizer
-from app.planning.react_loop import ReActLoop
+from app.planning.react_loop import ReActLoop, inject_user_prefix
 from app.server import update_state, update_prompt, add_log_entry, add_event
 
 # ---------- 配置 ----------
@@ -282,6 +282,22 @@ def chatbot(state: State, config: RunnableConfig):
     # 修复"坏会话因孤儿 tool 消息 / 满屏兜底文案而持续空返回"的问题。
     initial_messages = prepare_context_messages(history_messages, system_text, keep_recent=KEEP_RECENT)
 
+    # 任务钉扎（业界做法）：把最近一条用户任务指令原文钉在 system 之后（index 1）。
+    # _compact_window 只保护「开头连续 SystemMessage」——钉扎位因此永不进入窗口压缩/裁剪，
+    # 任务指令不会被 30 块窗口、60K 字符窗口或后台摘要层层稀释（历史教训：任务写在 user
+    # 消息里，被压缩后模型"失忆"，变成只确认不干活）。
+    try:
+        _pinned_task = extract_task_instruction(history_messages)
+    except Exception:
+        _pinned_task = ""
+    if initial_messages and _pinned_task:
+        _pin_entry = SystemMessage(content=(
+            "【当前任务指令·固定置顶】以下是用户最近下达的任务指令，本回合的一切工具动作"
+            "都必须围绕它推进，真实产出产物并通过校验后再汇报：\n" + _pinned_task
+        ))
+        initial_messages = [initial_messages[0]] + [_pin_entry] + initial_messages[1:]
+        print(f"[Chatbot] 任务钉扎注入: {_pinned_task[:100]}...", flush=True)
+
     # #3 空回复/异常中断之下的续接：把"上一轮已成功完成的工具动作"摘要注入本回合上下文，
     # 杜绝模型"失忆推倒重做"（20:17:48 事件：上一轮空回复后模型声称找不到源文件、重做第二遍）。
     # 摘要只含成功写入的文件/成功执行的命令，且去重限条数，注入 60 条窗口内的最近动作。
@@ -292,18 +308,16 @@ def chatbot(state: State, config: RunnableConfig):
         _resume_summary = ""
     if _resume_summary:
         print(f"[Chatbot] 注入上一轮已完成动作摘要（防失忆重做）: {_resume_summary[:120]}...", flush=True)
-        initial_messages = initial_messages + [SystemMessage(content=_resume_summary)]
+        # 当轮指令走 user 前缀（业界：遵循度高于埋在消息流中间的 SystemMessage）
+        initial_messages = inject_user_prefix(initial_messages, _resume_summary)
 
     if _task_signal:
-        initial_messages = initial_messages + [
-            SystemMessage(content=(
-                "【系统强制：立即开工】用户这条消息是需要实际完成的执行任务，不是闲聊。"
-                "你不允许只回应『好的/收到/继续』之类的确认文字就结束回合。"
-                "本回合必须调用工具：先 read_file 读取相关产物和校验输出，"
-                "再用 execute_command / write_file 把任务推进到完成态（校验通过、文件落盘），"
-                "最后用最终回复汇报结果。若上一轮已做一半，先核对现状再补齐缺口。"
-            ))
-        ]
+        initial_messages = inject_user_prefix(initial_messages,
+            "【系统强制：立即开工】用户这条消息是需要实际完成的执行任务，不是闲聊。"
+            "你不允许只回应『好的/收到/继续』之类的确认文字就结束回合。"
+            "本回合必须调用工具：先 read_file 读取相关产物和校验输出，"
+            "再用 execute_command / write_file 把任务推进到完成态（校验通过、文件落盘），"
+            "最后用最终回复汇报结果。若上一轮已做一半，先核对现状再补齐缺口。")
 
     print(f"[Chatbot] 自决模式（无 L1/L2/L3 硬切）")
     user_tools = get_tools_for_user(_user, thread_id)

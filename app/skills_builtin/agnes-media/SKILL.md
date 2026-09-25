@@ -97,6 +97,10 @@ python <skill_dir>/media.py video --prompt "在两张关键帧之间平滑转场
 **耗时提示**：5 秒视频通常需 1-3 分钟轮询，属正常；若轮询超时，用 `fetch` 续查不要重新创建任务
 （后端会继续自动重试直到成功或放弃）。
 
+**短剧分镜成片（novel-storyboard Step 4.5）**：每段一次 video 调用——`--image` 主分镜图 f1.png、
+`--keyframes` 子分镜图 f2..fN、`--duration` 用段秒数就近档位 3/5/10/18、`--timeout 356400`；
+stdout 的 `FILE=` 复制到交付目录 `<段号>/<段号>.mp4`。逐段执行，不批量。
+
 ### `fetch` — 调试：按 `--video-id` / `--task-id` 查询任务状态（兼容 image 任务）
 
 ## 产物与日志（脚本自动完成）

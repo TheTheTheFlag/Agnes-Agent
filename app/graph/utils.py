@@ -298,6 +298,33 @@ def build_recent_work_summary(messages, max_items=8):
     )
 
 
+# ==================== 任务钉扎（业界：任务指令置顶、位于头部系统区） ====================
+TASK_PIN_MAX_CHARS = 3000
+
+
+def extract_task_instruction(messages, max_chars=TASK_PIN_MAX_CHARS) -> str:
+    """从历史中提取「最近一条用户任务指令」用于置顶钉扎。
+
+    每次新投递/新对话，最新 human 消息就是当前任务本身（自包含）。取原文钉在
+    system 之后（index 1）；_compact_window 的 head 保护「开头连续 SystemMessage」，
+    因此钉扎位永不进入裁剪/压缩——任务指令不会被 30 块窗口、60K 字符窗口或后台
+    摘要层层稀释（历史教训：任务写在 user 消息里，被压缩后模型"失忆"，变成
+    只确认不干活）。找不到 human 或为空则返回 ""，调用方跳过注入即可。
+    """
+    for m in reversed(messages):
+        t = getattr(m, "type", "") or (m.get("type") if isinstance(m, dict) else "")
+        if t != "human":
+            continue
+        c = getattr(m, "content", "") if not isinstance(m, dict) else (m.get("content") or "")
+        if isinstance(c, list):
+            c = "".join(str(x.get("text", "") or "") if isinstance(x, dict) else str(x) for x in c)
+        c = str(c or "").strip()
+        if not c:
+            continue
+        return c[:max_chars]
+    return ""
+
+
 def strip_degenerate_replies(messages):
     """清理历史中"模型异常"类回复（业界：错误/兜底文案不是有效对话内容，不进上下文）。
 

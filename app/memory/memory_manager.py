@@ -889,7 +889,7 @@ class MemoryManager:
             # Stanford 三因子排序（α*Recency + β*Importance + γ*Relevance）挑出最该保留的摘要，
             # 而不是单纯按时间取最近 N 条——避免久远但高价值的记忆被新摘要挤出注入窗口。
             try:
-                summaries = self.get_history_summaries_scored(limit=3, thread_id=thread_id)
+                summaries = self.get_history_summaries_scored(limit=6, thread_id=thread_id)
             except Exception:
                 summaries = []
             texts = [s.get("summary_text") for s in summaries if s.get("summary_text")]

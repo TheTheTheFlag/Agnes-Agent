@@ -81,7 +81,8 @@ metadata:
 - `--art`：报告里 S01 显示成场景名 + 批次单嵌场景设定图
 - `--shots <卡片目录>`：**可选**挂载 shot-recipes 的镜头配方卡库（指向 `shot-recipes/references/cards`，只接受目录不接受导出的 JSON），开第 17 道 `shot-recipe` 门。没装 shot-recipes 就别给——本 skill 自包含，不依赖它
 
-**一次切几集**：跟剧本的批次走（剧本写到哪就分到哪），默认一批 ≤ 3 集。
+**一次切几集**：**一次只切一集**——分镜 → 出图（Step 4）→ 成片（Step 4.5 视频）在单集内闭环，
+这集的分镜图与整集视频全部落地后再切下一集；不要整批切完再回头补视频。
 
 ### Step 1 — seed 工作底稿
 
@@ -129,9 +130,26 @@ node {baseDir}/scripts/novel-storyboard.mjs validate <storyboard.json> \
 - **默认先出第一段的整套分镜图给用户看效果**（3–5 张），确认画风和正反打构图再往后补——一集约 30–40 格，错了浪费的是整批
 - 单个失败跳过不阻断，最后汇总说明
 
-### Step 4.5 — 分段成片（视频，统一走 agnes-media）
+### Step 4.5 — 分段成片（视频，统一走 agnes-media）⛔ 每集必做
 
-成片生成统一交给 **agnes-media 技能** 的 video 模式（`python app/skills_builtin/agnes-media/media.py video`）：该段 H3 提示词作 `--prompt`，主分镜图 `f1.png` 作 `--image`（图生视频），多格分镜作 `--keyframes`（关键帧动画，保持角色/场景一致），`--duration` 用段的秒数（3/5/10/18 就近取，段上限按模型）。若视频模型不吃 H3 结构（`<d>` 台词块、镜号），先把 H3 抽成自然语言动作/镜头描述再喂；台词贴片对齐交给配音对齐单。**成片是生成管线的活，本 skill 只负责下料（提示词 + 参考图）和指明这一步用 agnes-media。**
+**成片在本 skill 内闭环：这集的分镜图出完后，立即逐段生成这集视频，全部落地再切下一集。**
+
+顺序执行（每段一次调用，绝不批量）：
+
+```bash
+# 1) 先出命令单（确定性映射：段秒数→--duration 就近档位、图→--image/--keyframes、提示词→--prompt）
+node {baseDir}/scripts/storyboard-video-plan.mjs <剧名>-storyboard.json --episode EXX > <workdir>/video-plan-eXX.md
+# 2) 依命令单逐段执行（示例，一次一段）：
+python app/skills_builtin/agnes-media/media.py video \
+  --prompt "<H3 提示词；若视频模型不吃 <d>/镜号 结构，先抽成自然语言动作/镜头描述>" \
+  --image "<workdir>/<段号>/f1.png" \
+  [--keyframes "<workdir>/<段号>/f2.png" [...]] \
+  --duration <段秒数就近档位 3/5/10/18> --timeout 356400
+```
+
+- stdout 出现 `FILE=` 后复制到 `<workdir>/<段号>/<段号>.mp4`：`cp "<FILE>" "<workdir>/<段号>/<段号>.mp4"`
+- 单段失败重试一次（换 seed 或精简 prompt），仍失败就记录跳过，**不阻断该集后续段**
+- 该集所有段出片后，汇报每段 mp4 绝对路径；缺片的段明说原因
 
 ### Step 5 — 输出与汇报
 
@@ -158,7 +176,8 @@ node {baseDir}/scripts/novel-storyboard.mjs render <剧名>-storyboard.json --ht
 └── E01-01/                        ← 一段一个文件夹 = 一次 H3 生成的全部材料
     ├── f1.png                     ← 主分镜图（有出图能力才有，agnes-media）
     ├── f2.png …                   ← 子分镜图
-    └── prompt.md                  ← H3 提示词（export 生成）
+    ├── prompt.md                  ← H3 提示词（export 生成）
+    └── E01-01.mp4                 ← 本段成片（Step 4.5，agnes-media video）
 ```
 
 ---

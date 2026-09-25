@@ -66,6 +66,33 @@ _KEEP_TAIL_MSGS = 18                # 保留最近 N 条消息（当前轮 + 最
 _MAX_TOOL_RESULT_CHARS = 6_000      # 单条工具结果保留上限（防上下文被结果刷爆）
 
 
+def inject_user_prefix(messages, prefix_text):
+    """把「当轮指令」以 user 前缀形式注入（业界：模型对 user 前缀的遵循度
+    高于埋在消息流中间的 SystemMessage）。
+
+    在消息流中找最后一条 human 消息，把 prefix 拼到其 content 开头（deepcopy，
+    不污染外部历史；找不到 human 时退化为追加 SystemMessage）。只作用于本次
+    模型调用的消息窗口，不会持久化进会话历史（chatbot 节点仅返回最终答复）。
+    """
+    if not messages or not prefix_text:
+        return messages
+    out = list(messages)
+    for i in range(len(out) - 1, -1, -1):
+        m = out[i]
+        t = getattr(m, "type", "") or (m.get("type") if isinstance(m, dict) else "")
+        if t != "human":
+            continue
+        import copy as _copy
+        nm = _copy.deepcopy(m)
+        orig = getattr(nm, "content", "") if not isinstance(nm, dict) else (nm.get("content") or "")
+        if isinstance(orig, list):
+            orig = "".join(str(x.get("text", "") or "") if isinstance(x, dict) else str(x) for x in orig)
+        nm.content = (str(prefix_text).strip() + "\n" + str(orig or "")).strip()
+        out[i] = nm
+        return out
+    return out + [SystemMessage(content=prefix_text)]
+
+
 class ReActLoop:
     def __init__(self, llm_with_tools, max_iterations: int = 15, node: str = "agent",
                  require_final_marker: bool = False, terminate_tools: set = None):
@@ -160,13 +187,10 @@ class ReActLoop:
                     no_progress_streak += 1
                     if no_progress_streak >= _NO_PROGRESS_LIMIT:
                         messages.append(response)
-                        messages.append(SystemMessage(
-                            content=(
-                                f"[强制收尾] 你已连续 {no_progress_streak} 轮没有调用任何工具。"
-                                f"为避免无限空转，请立即调用 fail_node 声明失败（reason 写明卡在哪），"
-                                f"或调用 complete_node 列出已写文件结束本子任务；不再继续。"
-                            )
-                        ))
+                        messages = inject_user_prefix(messages,
+                            f"[强制收尾] 你已连续 {no_progress_streak} 轮没有调用任何工具。"
+                            f"为避免无限空转，请立即调用 fail_node 声明失败（reason 写明卡在哪），"
+                            f"或调用 complete_node 列出已写文件结束本子任务；不再继续。")
                         final_answer = (
                             f"[强制收尾] 连续 {no_progress_streak} 轮无工具调用，"
                             f"子任务无法推进（模型空转未调用 complete_node/fail_node）。"
@@ -174,10 +198,9 @@ class ReActLoop:
                         break
                     # 前几轮：继续注入引导，期望模型下一轮产生动作
                     messages.append(response)
-                    messages.append(SystemMessage(
-                        content="[引导] 你刚才只输出了文字，没有任何实际动作。请调用 write_file 工具把完整文件"
-                                "写入 deliverables 目录（一次写完整），或调用 complete_subtask 声明完成 / fail_subtask 声明失败。"
-                    ))
+                    messages = inject_user_prefix(messages,
+                        "[引导] 你刚才只输出了文字，没有任何实际动作。请调用 write_file 工具把完整文件"
+                        "写入 deliverables 目录（一次写完整），或调用 complete_subtask 声明完成 / fail_subtask 声明失败。")
                     continue
                 # 空回复（无 tool_calls 且无正文）多为瞬时网关抖动 → 快速重试一次；
                 # 仍空则交给 _extract_final_answer 记录并兜底（连续异常由 builder 层 apply_reply_guard 熔断）。
@@ -198,7 +221,7 @@ class ReActLoop:
                         self._nudge_used += 1
                         _guide = self._nudge_guide(self._nudge_used)
                         messages.append(response)
-                        messages.append(SystemMessage(content=_guide))
+                        messages = inject_user_prefix(messages, _guide)
                         print(f"[ReAct] 检测到“继续执行”意图，注入强制工具执行引导（第 {self._nudge_used}/3 级）", flush=True)
                         continue
                     final_answer = self._extract_final_answer(response)
@@ -215,12 +238,11 @@ class ReActLoop:
                 if _key in self._done_cmds:
                     repeated_done.append(_n)
             if repeated_done:
-                messages.append(SystemMessage(
-                    content="[防重复执行] 你正在重复执行一条已成功完成过的调用（结果已在上文给出）："
-                            + ", ".join(sorted(set(repeated_done)))
-                            + "。请直接使用已有结果给用户最终答复并结束本轮；"
-                              "若确有新需求（如再生成一张不同的），请修改参数（prompt/size/seed）后重新发起，不要原样重复执行。"
-                ))
+                messages = inject_user_prefix(messages,
+                    "[防重复执行] 你正在重复执行一条已成功完成过的调用（结果已在上文给出）："
+                    + ", ".join(sorted(set(repeated_done)))
+                    + "。请直接使用已有结果给用户最终答复并结束本轮；"
+                      "若确有新需求（如再生成一张不同的），请修改参数（prompt/size/seed）后重新发起，不要原样重复执行。")
                 print("⚠️ 检测到已成功命令被再次执行，拦截并引导收尾", flush=True)
                 continue
 
@@ -241,12 +263,11 @@ class ReActLoop:
                     # 不再执行该轮重复调用（避免白跑一次 + 再塞一大坨重复结果进上下文），
                     # 改为注入"防死循环"引导，让模型要么换动作、要么直接收尾。
                     dup = "; ".join(f"{n}({str(a)[:100]})" for n, a in current_calls_str)
-                    messages.append(SystemMessage(
-                        content="[防死循环] 你刚发起了与上一轮完全相同的工具调用：" + dup +
-                                "。该调用并未推进任务。请立即采取行动：若所需信息已掌握，"
-                                "就调用真正完成任务的工具（如 execute_command / 写文件），或直接给出最终回答；"
-                                "不要再次重复相同调用。"
-                    ))
+                    messages = inject_user_prefix(messages,
+                        "[防死循环] 你刚发起了与上一轮完全相同的工具调用：" + dup +
+                        "。该调用并未推进任务。请立即采取行动：若所需信息已掌握，"
+                        "就调用真正完成任务的工具（如 execute_command / 写文件），或直接给出最终回答；"
+                        "不要再次重复相同调用。")
                     print(f"⚠️ 检测到重复工具调用（第 {same_call_count} 次），注入防死循环引导")
                     continue
             else:
@@ -376,20 +397,17 @@ class ReActLoop:
                     if tool_name in ("write_file", "edit_file") and "缺少必填参数" in result_str and "content" in result_str:
                         self._wf_missing_content = getattr(self, "_wf_missing_content", 0) + 1
                         if self._wf_missing_content >= 2:
-                            messages.append(SystemMessage(
-                                content=(
-                                    "[写文件参数修复] 你已连续多次发起 write_file 但参数里始终缺 content，"
-                                    "这些调用都未执行成功。请按顺序选一种可立即执行的方式继续，"
-                                    "禁止再次发起只有 path 或空参数的 write_file：\n"
-                                    "1) 重新调用 write_file，把 path 和完整 content（JSON string）都放进工具参数；\n"
-                                    "2) 直接调用 execute_command 运行对应技能脚本生成文件"
-                                    "（如角色卡：cd /home/mirror/Agnes-Agent && node app/skills/novel-characters/scripts/novel-characters.mjs <按该技能 SKILL.md 的必填参数>），"
-                                    "脚本会自己写盘，不需要手工拼完整 JSON；\n"
-                                    "3) 把内容拆成 2–3 个小文件分别 write_file（每个 content 控制在 2KB 内），"
-                                    "再用 execute_command 的 node 单行脚本把碎片合并成目标文件；\n"
-                                    "4) 若确实无法继续，调用 fail_subtask / complete_node 声明，并写明阻塞原因。"
-                                )
-                            ))
+                            messages = inject_user_prefix(messages,
+                                "[写文件参数修复] 你已连续多次发起 write_file 但参数里始终缺 content，"
+                                "这些调用都未执行成功。请按顺序选一种可立即执行的方式继续，"
+                                "禁止再次发起只有 path 或空参数的 write_file：\n"
+                                "1) 重新调用 write_file，把 path 和完整 content（JSON string）都放进工具参数；\n"
+                                "2) 直接调用 execute_command 运行对应技能脚本生成文件"
+                                "（如角色卡：cd /home/mirror/Agnes-Agent && node app/skills/novel-characters/scripts/novel-characters.mjs <按该技能 SKILL.md 的必填参数>），"
+                                "脚本会自己写盘，不需要手工拼完整 JSON；\n"
+                                "3) 把内容拆成 2–3 个小文件分别 write_file（每个 content 控制在 2KB 内），"
+                                "再用 execute_command 的 node 单行脚本把碎片合并成目标文件；\n"
+                                "4) 若确实无法继续，调用 fail_subtask / complete_node 声明，并写明阻塞原因。")
                             print("⚠️ write_file 连续缺 content，注入写文件参数修复引导", flush=True)
                     else:
                         # 非缺参错误/正常完成 → 重置计数（成功一次即视为模型学会）
@@ -418,15 +436,12 @@ class ReActLoop:
                                   {"node": self._trace_node})
                 except Exception:
                     pass
-                messages.append(SystemMessage(
-                    content=(
-                        "[轮次上限已用尽] 你已达本回合工具调用次数上限。"
-                        "若当前任务尚未实际完成——例如关键产物（如 outline.json / episodes）缺失、"
-                        "validate 校验未通过、环节之间存在未合并的中间产物——请在最终答复里明确写出"
-                        "『未完成』的原因与缺失项，并列出已完成的文件路径，不要宣称全部完成。"
-                        "用户看到未完成后会继续追问，届时工具预算会随新回合重置。"
-                    )
-                ))
+                messages = inject_user_prefix(messages,
+                    "[轮次上限已用尽] 你已达本回合工具调用次数上限。"
+                    "若当前任务尚未实际完成——例如关键产物（如 outline.json / episodes）缺失、"
+                    "validate 校验未通过、环节之间存在未合并的中间产物——请在最终答复里明确写出"
+                    "『未完成』的原因与缺失项，并列出已完成的文件路径，不要宣称全部完成。"
+                    "用户看到未完成后会继续追问，届时工具预算会随新回合重置。")
             final_answer = self._force_answer(messages)
         elif final_from_text_only and iteration >= self.max_iterations:
             # 纯文本收尾恰好撞上轮次上限：上面那轮可能被当最终答复兜住（如"由于工具调用限制"），
@@ -439,14 +454,11 @@ class ReActLoop:
                               {"node": self._trace_node})
             except Exception:
                 pass
-            messages.append(SystemMessage(
-                content=(
-                    "[收尾自检] 你的上一条答复是本回合的最终答复，但本回合工具调用次数恰好用尽。"
-                    "请先复核本轮关键产物是否真实存在且内容完整（如有 outline.json / 各分集文件，"
-                    "确认 episodes 数量与集数一致），再重写最终答复：若一切齐备就正常汇报各文件路径；"
-                    "若有缺失/未合并/未过校验，必须明确写出『未完成』项，不要以口头承诺代替实际产物。"
-                )
-            ))
+            messages = inject_user_prefix(messages,
+                "[收尾自检] 你的上一条答复是本回合的最终答复，但本回合工具调用次数恰好用尽。"
+                "请先复核本轮关键产物是否真实存在且内容完整（如有 outline.json / 各分集文件，"
+                "确认 episodes 数量与集数一致），再重写最终答复：若一切齐备就正常汇报各文件路径；"
+                "若有缺失/未合并/未过校验，必须明确写出『未完成』项，不要以口头承诺代替实际产物。")
             try:
                 response = self._invoke_llm(messages)
                 final_answer = re.sub(r'<tool_call>.*?</tool_call>', '', response.content, flags=re.DOTALL).strip()
@@ -727,9 +739,9 @@ class ReActLoop:
         dropped_chars = max(0, total - sum(len(str(getattr(m, "content", "") or "")) for m in kept))
         summary = SystemMessage(
             content=(
-                f"[上下文压缩] 为避免长会话上下文膨胀导致模型输出劣化，已移除中间"
-                f" {dropped} 条较早的消息（约 {dropped_chars} 字符，多为早期对话与工具执行结果）。"
-                f"任务目标与最近几轮内容保持不变，请基于现有信息继续，不要假设被移除内容仍可引用。"
+                f"[上下文压缩] 为保持上下文精炼，已对较早的 {dropped} 条消息"
+                f"（约 {dropped_chars} 字符）进行压缩归档。"
+                f"当前任务目标与最近几轮对话保持完整，请基于现有上下文继续工作。"
             )
         )
         kept = head + [summary] + tail
@@ -781,7 +793,7 @@ class ReActLoop:
         return f"未知工具: {tool_name}"
 
     def _force_answer(self, messages):
-        messages.append(SystemMessage(content="请基于已有信息直接回答"))
+        messages = inject_user_prefix(messages, "[系统] 请基于已有信息直接回答，不要再调用工具。")
         try:
             response = self._invoke_llm(messages)
             return re.sub(r'<tool_call>.*?</tool_call>', '', response.content, flags=re.DOTALL).strip() or "[模型未返回内容] 请检查模型配置或 API 额度。"
