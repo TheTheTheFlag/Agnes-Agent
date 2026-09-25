@@ -1,0 +1,14 @@
+【自动化任务 T2-fix｜《美人图》script-b01.json 校验清零】
+
+交付目录：data/users/Mirror/deliverables/短剧/美人图/script-b01.json
+
+现状：script-b01.json（第 1-3 集）的时长扩充已完成（各集估时已进入 120s±15%），仅剩 2 处 validate 违规：
+「第 3 集第 1 场有节拍既不是动作也不是台词（action 与 line 二选一）」（出现 2 次）。
+
+要求：
+1. 先跑校验确认现状：cd data/users/Mirror/deliverables/短剧/美人图/ && node app/skills/novel-script/scripts/novel-script.mjs validate script-b01.json --outline outline.json --art art.json
+2. 找出第 3 集第 1 场那两个非法节拍（既无 action 也无 line），按 schema（references/schema.md）改成合法结构：动作节拍给 action（可带 speaker/emotion 可省略），台词节拍给 line + speaker。
+3. 修复后重跑 validate 直到 10 门全绿。
+4. 全绿后汇报：修改了哪两个节拍（原样 → 新样）、validate 最终结果。
+
+不要动其他已经正确的内容。没有全绿不算完成。
