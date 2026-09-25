@@ -2,6 +2,13 @@
 # pipeline_storyboard.sh — 剧本全部完成后：T5 角色图重出 → 60 集合并 → 逐集 分镜(含出图) → 直跑视频
 # 用法: bash pipeline_storyboard.sh [START_EP] [END_EP]
 set -u
+# —— 单实例锁 ——
+LOCK=/home/mirror/Agnes-Agent/logs/tasks/pipeline-storyboard.lock
+exec 9>"$LOCK"
+if ! flock -n 9; then
+  echo "[$(date +%H:%M:%S)] 已有 pipeline_storyboard 实例在跑，本次启动退出"
+  exit 0
+fi
 BASE=/home/mirror/Agnes-Agent
 D="$BASE/data/users/Mirror/deliverables/短剧/美人图"
 TOOLSDIR="$BASE/tools_deliver"
@@ -54,24 +61,33 @@ if [ ! -f "$LOGDIR/t5-done.flag" ]; then
 
 工作目录：data/users/Mirror/deliverables/短剧/美人图/
 先 read_skill 读 app/skills/novel-characters/SKILL.md 与 references/*.md。
-上游：cast.json（9 角色）、美人图-art.json（场景/道具）、现有 images/（旧角色图 7 张可作构图参考但必须重出）。
+上游：cast.json（7 个角色，C01-C07）、art.json（场景/道具）、现有 images/（旧图仅供参考构图，必须全部重出）。
 
 要求：
-1) 按 novel-characters SKILL.md 生成/更新每个角色的 images/<角色名>-sheet.png（全部 9 个角色，一个不少）
+1) 按 novel-characters SKILL.md 生成/更新每个角色的 images/<角色名>-sheet.png（全部 7 个角色：C01沈知微 C02林晚棠 C03苏蔓 C04叶青禾 C05陈墨白 C06周曼妮 C07周正明，一个不少）
 2) 出图统一走 agnes-media（python app/skills_builtin/agnes-media/media.py image），提示词必须达到新质量基线：
    增强模板 = 角色描述 + 光影词2-3 + 质感词2-3 + 氛围词1-2 + 固定质量尾锚：
    Photorealistic, hyper-realistic, 超写实国风，现代风格，写实风格，质感光照，自然光线，质感十足，8K高清纹理，布料褶皱自然，艺术写实风格，营造出震撼的视觉效果
-3) cast.json 里每个角色的 image.sheet 更新为最终落盘路径（绝对或 deliverables 相对路径）
+3) cast.json 里每个角色的 image.sheet 更新为最终落盘路径（必须用真实存在的路径，写完后自查 os.path.exists）
 4) stdout 出现 FILE= 后 cp 到 images/<角色名>-sheet.png
 5) 一角色一张可多角度（挂其它角色/场景图作参考保一致）；单张失败重试一次，最后汇报每角色路径
-完成后汇报：9 个角色各自的 sheet 路径 + cast.json 是否已同步。
+完成后汇报：7 个角色各自的 sheet 路径 + cast.json 是否已同步为可解析路径。
 EOF
     acc=$(dispatch_wait "$TOOLSDIR/msg-t5.txt" "$LOGDIR/t5.log" 9600)
     log "T5 -> $acc"
     sleep 5
-    cnt=$(ls "$D"/images/*-sheet.png 2>/dev/null | wc -l)
-    log "T5 后 sheet 图数量: $cnt"
-    if [ "$cnt" -ge 9 ]; then touch "$LOGDIR/t5-done.flag"; fi
+    ok=$(python3 -c "
+import json, os
+ca = json.load(open('$D/cast.json', encoding='utf-8'))
+miss = []
+for c in ca.get('characters', []):
+    sh = (c.get('image') or {}).get('sheet', '')
+    if not sh or not (os.path.exists(sh) or os.path.exists('$D/' + sh)):
+        miss.append(c.get('id'))
+print('OK' if not miss else 'MISS:' + ','.join(miss))
+" 2>/dev/null)
+    log "T5 后 cast 落盘检查: $ok"
+    if [ "$ok" = "OK" ]; then touch "$LOGDIR/t5-done.flag"; fi
   fi
 fi
 
