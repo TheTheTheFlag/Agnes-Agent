@@ -3,3 +3,6 @@
 [06:47:17] T5 -> [2026-09-26 06:47:17] FINAL status=done info=null
 [06:47:22] T5 后 cast 落盘检查: OK
 [06:47:22] == 前置 合并：script-b01..b20 → 美人图-script.json ==
+[06:48:23] merge -> [2026-09-26 06:48:04] FINAL status=done info=null
+[06:48:28] 合并后集数条目: 60
+[06:48:28] ========== 第 1 集 分镜+视频 → storyboard-e01.json ==========
