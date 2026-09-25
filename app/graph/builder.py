@@ -169,6 +169,23 @@ def chatbot(state: State, config: RunnableConfig):
     if memory_section:
         system_text = system_text + "\n" + memory_section
 
+    # 任务型消息强制开工：防止自决模式"只应答不干活"（20260925 加固）
+    _task_signal = (
+        "【自动化任务" in user_content or "【任务" in user_content
+        or ".mjs" in user_content
+        or ("validate" in user_content and "node " in user_content)
+        or ("执行" in user_content and ("node " in user_content or "python3 " in user_content))
+    )
+    if _task_signal:
+        system_text += (
+            "\n\n=== 任务执行约束 ===\n"
+            "用户本条消息是任务指令而非闲聊。你必须调用工具（read_file / write_file / "
+            "execute_command 等）实际执行并推进它，全部完成后用最终回复汇报结果。\n"
+            "严禁：只回复'好/收到/继续执行'等确认文字后结束回合而不调用任何工具；"
+            "声称将要执行但本回合不执行；把任务推给后续回合。\n"
+            "若上游已产出大半，先读取产物核对现状，补齐缺口直到完成状态（如校验全绿）再汇报。"
+        )
+
     update_prompt(system_text, thread_id)
     # state 不缓存业务数据（profile/preferences/task_plan 等都已从 DB 查）
     state["thread_id"] = thread_id
