@@ -1,0 +1,31 @@
+【自动化任务 T-C3｜short-drama-director 分镜＋投喂稿＋关键帧图《困在七岁》第 3 集】
+
+工作目录（绝对路径）：data/users/Mirror/deliverables/短剧/困在七岁/
+前置：read_file 困在七岁-剧本.md（E3 部分）、困在七岁-分集大纲.md、assets/manifest.json 与《资产图册.md》；read_skill app/skills/short-drama-director/SKILL.md 与 references/：★ agnes-media-adapter.md、★ asset-first-pipeline.md（P3/P4）、asset-spatial-ledger.md、camera-specs-15rules.md、cinematic-dramaturgy-rules.md、★ segment-splicing.md、★ vo-os-weaving.md、★ prompt-feeding-checklist.md、model-adapters.md（七段式方法论）、storyboard-board-lite.md、character-art-style.md（画风基准）、quality-gate-review.md、scripts/validate_prompt.py（机检 C1~C20）。
+
+【锁定重申】A=agnes 单通道；B=16:9 横屏全流程；D=①末态双保险＋②段缝换机位；暴力淡化；画风基准外观设定并入出图词。
+
+【E3 范围】E3 · 相认·归案·困在七岁（3场/10镜头/60s）。
+· 场1 触发·记忆：2012 春节饭局，成年永勇（红发青年形象锚，用 assets/ref-sanview/face/fullbody 三图 --ref）筷子顿在半空→泪落；
+· 场2 认亲·泪崩：村里摇头→姑姑报纸比对→父子相认（全剧情感峰值）；
+· 场3 归案·终场：画本翻示→警方抓捕（剪影/警灯，不渲染抓人血腥）→遗骸——【★遗骸段克制改写】画面用「新翻的土坑＋跪地捧土之手＋泥土沾指缝＋画本一角」，不出现白骨/骨殖特写（故事原文也是「把泥土捧在手里」），台词保留「我妈终于回家了」→ 终场村口月光独白。
+· 首段承接 E2 末段接续状态（永勇站街角攥画本、电视播春节新闻——画面自该姿态起手）。
+
+【产出（全部落盘 投喂稿/E03/ 目录）】
+1) 分镜投喂-E03.md：写满 E3 全部段/镜（每镜：景别/机位/主体/站位/动作/画面描写/台词（语气位）/声音层/接续状态），画幅声明置顶 16:9；对白 ≤18 字/句且按 3.5~5 字/s 倒推镜长；同段≥4 镜时长须有快慢呼吸；无台词氛围镜单镜 ≤5s。段=场次级切割（可再细分），3 场建议 5~7 段。
+2) 关键帧图（本任务只出图、不出视频）：每段 2~3 张 16:9 关键帧（首帧锁段首、末帧锁段缝末态），经 media.py image（--ratio 16:9 --size 2K；角色段用 assets 资产 --ref 保脸；画风基准外观设定并入），落盘 投喂稿/E03/<段号>/kf1.png..kfN.png。缺失即未完成。
+3) 投喂稿正文：写文件 投喂稿/E03/投喂稿-E03.md，逐段给七段式投喂稿（agnese 纯文本、每段 ≤500 字、禁官方字符 {}<>()【】 与 H3 字段、禁工作流规则词；台词写入声音层），注明各段 --duration 档位（3/5/10/18）。
+4) manifest.json：
+{
+  "episode": "E03",
+  "project_dir": "<工作目录绝对路径>",
+  "segments": [
+    {"seg": "E03-01", "prompt": "<七段式投喂稿正文>", "duration": <3|5|10|18>,
+     "keyframes": ["<工作目录>/投喂稿/E03/E03-01/kf1.png", "<…>/kf2.png"]}
+  ]
+}
+· duration ∈ {3,5,10,18}；keyframes 每段 ≥2 张且路径存在（os.path.exists 自查）；prompt 为 agnes 纯文本七段式全文。
+5) 机检（不能跳）：cd app/skills/short-drama-director && python3 scripts/validate_prompt.py 投喂稿/E03/投喂稿-E03.md --model agnes，FAIL 清零才交付。
+6)【☆大文件落盘铁律】写 md/JSON 用 execute_command + heredoc 分块（cat > / cat >> << 'EOF'，每块 ≤8KB）；禁止单次 write_file 超大 content。
+
+【汇报】E3：段数/镜数/总估时；关键帧图全数落盘路径清单；validate_prompt.py 各段结果；manifest.json 字节数。缺任一段关键帧或机检未清零视为未完成。

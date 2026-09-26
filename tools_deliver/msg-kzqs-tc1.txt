@@ -1,0 +1,30 @@
+【自动化任务 T-C1｜short-drama-director 分镜＋投喂稿＋关键帧图《困在七岁》第 1 集】
+
+工作目录（绝对路径）：data/users/Mirror/deliverables/短剧/困在七岁/
+前置：read_file 困在七岁-剧本.md（E1 部分）、困在七岁-分集大纲.md、assets/manifest.json 与《资产图册.md》；read_skill app/skills/short-drama-director/SKILL.md 与 references/：★ agnes-media-adapter.md、★ asset-first-pipeline.md（P3/P4）、asset-spatial-ledger.md、camera-specs-15rules.md、cinematic-dramaturgy-rules.md、★ segment-splicing.md、★ vo-os-weaving.md、★ prompt-feeding-checklist.md、model-adapters.md（七段式方法论）、storyboard-board-lite.md、character-art-style.md（画风基准）、quality-gate-review.md、scripts/validate_prompt.py（机检 C1~C20）。
+
+【锁定重申】A=agnes 单通道；B=16:9 横屏全流程（分镜构图/关键帧图/视频 --ratio 16:9）；D=①末态双保险（每段 keyframes 收尾帧锁段缝末态，接续状态写具体末帧画面）+②段缝换机位；暴力淡化（遇害段画面只做门缝剪影/收音机光影，声音层写全：川剧锣鼓→骤静＋压抑哭腔＋重物闷响，出图词禁血腥/武器/血迹）；画风基准外观设定并入出图词。
+
+【E1 范围】E1 · 1994·遇害与被卖（4场/14镜头/85s）。遇害段位于场次3（45-70s），必须按下述淡化口径处理：
+· 门缝视角：屋内过曝光影＋三个男人剪影＋母亲被按倒的轮廓，不可辨识具体动作；
+· 声音层居于主导：收音机川剧锣鼓声震天响 → 「啪」骤静 → 压抑极微弱的哭腔 → 重物闷响「咚」；
+· 出图词与关键帧一律不出现注射器/刀/血迹/倒地特写，人物姿态克制。
+
+【产出（全部落盘 投喂稿/E01/ 目录）】
+1) 分镜投喂-E01.md：按 SKILL 时间轴分镜格式写满 E1 全部段/镜（每镜：景别/机位/主体/站位/动作/画面描写/台词（语气位）/声音层/接续状态），画幅声明置顶 16:9；对白按 3.5~5 字/s 倒推镜长；同段≥4 镜时长须有快慢呼吸（禁雷同等分）；无台词氛围镜单镜 ≤5s。段=场次级切割（可再细分），4 场建议 6~9 段。
+2) 关键帧图（本任务只出图、不出视频）：每段 2~3 张 16:9 关键帧（首帧锁段首、末帧锁段缝末态=上一段结尾画面延续），经 media.py image（--ratio 16:9 --size 2K；有角色的段用 assets 角色资产 --ref 保脸；画风基准外观设定并入），落盘 投喂稿/E01/<段号>/kf1.png..kfN.png；段缝关键帧按 segment-splicing ①末态双保险绘制。缺图禁止跳过段——扣为未完成。
+3) 投喂稿正文：写文件 投喂稿/E01/投喂稿-E01.md，逐段给七段式投喂稿（agnese 纯文本、每段 ≤500 字、禁官方字符 {}<>()【】 与 H3 字段、禁工作流规则词如「末态继承/拼接节点」；台词写入声音层），并注明该段 --duration 档位（3/5/10/18，内容倒推）。
+4) manifest.json（视频驱动读取，务必写对）：
+{
+  "episode": "E01",
+  "project_dir": "<工作目录绝对路径>",
+  "segments": [
+    {"seg": "E01-01", "prompt": "<七段式投喂稿正文>", "duration": <3|5|10|18>,
+     "keyframes": ["<工作目录>/投喂稿/E01/E01-01/kf1.png", "<…>/kf2.png"]}
+  ]
+}
+· duration 必须 ∈ {3,5,10,18}；keyframes 每段 ≥2 张且路径真实存在（写完后逐个 os.path.exists 自查）；prompt 为 agnes 纯文本七段式全文。
+5) 机检（不能跳）：cd app/skills/short-drama-director && python3 scripts/validate_prompt.py 投喂稿/E01/投喂稿-E01.md --model agnes，FAIL 清零（C1~C20）才交付；修复只改内容不新造词。
+6)【☆大文件落盘铁律】写 md/JSON 一律用 execute_command + heredoc 分块（首次 cat > '路径' << 'EOF' … EOF，追加 cat >> … << 'EOF' … EOF，每块 ≤8KB）；禁止单次 write_file 塞超大 content。
+
+【汇报】E1：段数/镜数/总估时；关键帧图全数落盘路径清单；validate_prompt.py 各段结果；manifest.json 字节数。缺任一段关键帧或机检未清零视为未完成。
