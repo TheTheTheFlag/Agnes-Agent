@@ -33,7 +33,7 @@ dispatch_wait(){
   local msg="$1" lg="$2" to="$3" tid pid
   tid=$(new_thread)
   nohup python3 "$TOOLSDIR/deliver_task.py" --thread "$tid" --msgfile "$msg" --log "$lg" \
-      < /dev/null > "$lg.nohup" 2>&1 &
+      9>&- < /dev/null > "$lg.nohup" 2>&1 &
   pid=$!
   local deadline=$(( $(date +%s) + to ))
   while [ "$(date +%s)" -lt "$deadline" ]; do
@@ -141,7 +141,9 @@ for i in $(seq "$START" "$END"); do
 
 本任务是「单集闭环」：只做第 $i 集的分镜 JSON，出图与视频由流水线自动跑，你完全不用管图片。
 1) seed：node app/skills/novel-storyboard/scripts/novel-storyboard.mjs seed 美人图-script.json --eps $i > data/users/Mirror/deliverables/短剧/美人图/${fn}
-2) 切镜：把第 $i 集切成段与分镜（每段≤15s、每切2-5s、节拍全覆盖——每场节拍按序连续认领，可多切共认领相邻拍；单切内台词合起来 ≤5 秒装得下）。模仿 storyboard-e01.json：每段一个 h3Prompt，integrated_multimodal_description 逐镜英文画面（写清机位/景别/主体/动作/氛围）、overall_soundscape（英文）、non_diegetic_music（英文）；删掉 seedScenes。
+2) ★切镜（最重要，必须写满整个 segments 数组）★：把第 $i 集切成段与分镜，逐字段仿照 storyboard-e01.json 的 JSON 结构写进 ${fn} 的 episodes[0].segments。一段 = 一个 h3Prompt 的段；segment 字段 {id, sceneIndex, cuts, h3Prompt}；cut 字段 {seconds, size, camera, characters, props, beats, frame}，即：
+   {"seconds": 3.2, "size": "medium", "camera": "Static Shot", "characters": ["C01"], "props": ["手提包"], "beats": [3, 3], "frame": "cinematic film still, medium shot, Shen Zhiwei in tailored suit in modern office, glass curtain wall river view, cold professional lighting, cinematic depth of field"}
+   硬约束：每段≤15s、每切2-5s、节拍全覆盖（每场节拍按序连续认领，可多切共认领相邻拍）、单切内台词合计≤5s；beats 是闭区间 [起,止]（拍号从 1 开始）。frames 一律英文写实电影级（机位/景别/主体/动作/氛围/光影）。h3Prompt 结构照 e01（对齐行 + integrated_multimodal_description 逐镜英文 + overall_soundscape + non_diegetic_music + dialogue 的 <d>[角色] 台词</d> 逐字照抄剧本）。删掉 seedScenes。
 3) 自查（非最终裁判）：cd . && node app/skills/novel-storyboard/scripts/novel-storyboard.mjs validate ${fn} --script 美人图-script.json --outline outline.json --cast cast.json --art art.json
    结构类红黄别管（流水线 sb_fix_auto 自动修）；重点自查：节拍覆盖率、切内台词 ≤5s、frame 英文且含景别短语与 cinematic film still、h3Prompt 正文英文。
 4) 汇报：第 $i 集共几段几镜、写好的创作部分清单。
@@ -168,6 +170,7 @@ EOF
 
 工作目录：data/users/Mirror/deliverables/短剧/美人图/
 ★ 黄金样例：先 read_file 读 data/users/Mirror/deliverables/短剧/美人图/storyboard-e01.json（已 17 门全绿），照它的组织方式补/改本集切镜结构。
+★ 若 ${fn} 目前只有 seed 骨架（segments 空 / 切为 0 / 只贴了 seedScenes）：必须手工按 e01 的 JSON 结构把第 $i 集切成完整 segments 数组写回（≥6 段、每段 3~6 镜、认领全部节拍、每段一个 h3Prompt），否则任务无效；不许只回文字解释。
 目标文件：${fn}（先 read_file 读现状；出图与视频由流水线自动跑，你不用管图片；结构门已由 sb_fix_auto 自动修好，别再改结构）
 刚跑的 validate 未全绿，输出（末尾 80 行）：
  
@@ -194,7 +197,7 @@ EOF
   MISSING=$(python3 "$TOOLSDIR/sb_img_gap.py" "$D/$fn" E${e} 2>/dev/null | grep -v '^GAP' | wc -l)
   if [ "$MISSING" -gt 0 ]; then
     log "第 $i 集缺分镜图 $MISSING 段 → 直跑 media 出图"
-    python3 "$TOOLSDIR/run_episode_images.py" "$D/$fn" E$e > "$LOGDIR/image-e${e}.log" 2>&1
+    python3 "$TOOLSDIR/run_episode_images.py" "$D/$fn" E$e 9>&- > "$LOGDIR/image-e${e}.log" 2>&1
     log "  直跑出图退出码 $?"
     MISSING2=$(python3 "$TOOLSDIR/sb_img_gap.py" "$D/$fn" E${e} 2>/dev/null | grep -v '^GAP' | wc -l)
     log "  出图后仍缺 $MISSING2 段"
@@ -202,7 +205,7 @@ EOF
   log "第 $i 集：后台直跑视频（并发上限 2）"
   if wait_server; then
     while [ "$(pgrep -fc 'run_episode_videos.py' 2>/dev/null || echo 0)" -ge 2 ]; do sleep 60; done
-    nohup python3 "$TOOLSDIR/run_episode_videos.py" "$D/$fn" E${e} > "$LOGDIR/video-e${e}.log" 2>&1 &
+    nohup python3 "$TOOLSDIR/run_episode_videos.py" "$D/$fn" E${e} 9>&- > "$LOGDIR/video-e${e}.log" 2>&1 &
     log "  已启动视频后台任务 (pid $!)"
   fi
 done

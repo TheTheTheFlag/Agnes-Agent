@@ -8,6 +8,15 @@ import sys, re, os, subprocess, time, json, shutil
 MEDIA = "/home/mirror/Agnes-Agent/app/skills_builtin/agnes-media/media.py"
 PLANMJS = "/home/mirror/Agnes-Agent/app/skills/novel-storyboard/scripts/storyboard-video-plan.mjs"
 
+import os
+_tok = os.environ.get("AGENT_INTERNAL_TOKEN", "").strip()
+if not _tok:
+    try:
+        _tok = open("/home/mirror/Agnes-Agent/data/internal_token", encoding="utf-8").read().strip()
+    except Exception:
+        pass
+if _tok:
+    os.environ["AGENT_INTERNAL_TOKEN"] = _tok
 sb_path = sys.argv[1]
 ep = sys.argv[2] if len(sys.argv) > 2 else "all"
 base = os.path.dirname(os.path.abspath(sb_path))
@@ -48,7 +57,8 @@ for b in blocks[1:]:
         log(f"{seg}: 命令解析失败")
         fail += 1
         continue
-    cmd = " ".join(line for line in code.group(1).splitlines() if line.strip())
+    cmd = " ".join(line.rstrip().rstrip("\\").strip() for line in code.group(1).splitlines() if line.strip())
+    cmd = cmd.replace("python app/skills_builtin", "python3 app/skills_builtin", 1)
     log(f"{seg}: 开始生成（{head.strip()}）")
     t0 = time.time()
     try:

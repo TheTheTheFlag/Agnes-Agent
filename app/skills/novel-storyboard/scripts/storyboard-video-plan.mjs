@@ -40,6 +40,12 @@ for (const ep of eps) {
     if (!existsSync(f1)) { warn++; rows.push({ warn: 'f1 缺', segId, tag: epTag }); continue; }
     const kfs = [];
     for (let i = 2; i <= 30; i++) { const p = join(dir, `f${i}.png`); if (existsSync(p)) kfs.push(p); else break; }
+    // 后端 keyframes 模式最多 3 张图：f1 + 至多 2 张关键帧（取中段与末段，覆盖首/中/尾）
+    if (kfs.length > 2) {
+      const last = kfs[kfs.length - 1];
+      const mid = kfs[Math.floor((kfs.length - 1) / 2)] || last;
+      kfs.splice(0, kfs.length, mid, last);
+    }
     const prompt = String(s.h3Prompt || s.prompt || '').trim();
     const cmdParts = ["python", "app/skills_builtin/agnes-media/media.py", "video",
       `--duration ${durP}`, '--timeout 356400', `--image "${f1}"`];

@@ -11,3 +11,6 @@ tools_deliver/pipeline_storyboard.sh: 第 223 行： [: 0
 [08:06:17] ========== 第 2 集 分镜+视频 → storyboard-e02.json ==========
 [08:16:17] 第 1 集 分镜任务 -> [2026-09-26 08:16:03] FINAL status=done info=null
 [08:16:18]   sb_fix_auto exit=1 ->   WARN E02 没有任何分镜切（骨架空，模型必须补）   WARN E02 无对白切可调，时长 0.0s 不在 [102,138] 
+[08:29:18]   -> fix#1 [2026-09-26 08:28:58] FINAL status=done info=null
+[08:29:24]   validate exit=1
+[08:29:24]   sb_fix_auto exit=1 ->   WARN E02 没有任何分镜切（骨架空，模型必须补）   WARN E02 无对白切可调，时长 0.0s 不在 [102,138] 
