@@ -1,9 +1,17 @@
 【自动化任务 T-C3｜short-drama-director 分镜＋投喂稿＋关键帧图《困在七岁》第 3 集】
 
 工作目录（绝对路径）：data/users/Mirror/deliverables/短剧/困在七岁/
-前置：read_file 困在七岁-剧本.md（E3 部分）、困在七岁-分集大纲.md、assets/manifest.json 与《资产图册.md》；read_skill app/skills/short-drama-director/SKILL.md 与 references/：★ agnes-media-adapter.md、★ asset-first-pipeline.md（P3/P4）、asset-spatial-ledger.md、camera-specs-15rules.md、cinematic-dramaturgy-rules.md、★ segment-splicing.md、★ vo-os-weaving.md、★ prompt-feeding-checklist.md、model-adapters.md（七段式方法论）、storyboard-board-lite.md、character-art-style.md（画风基准）、quality-gate-review.md、scripts/validate_prompt.py（机检 C1~C20）。
+前置：read_file 困在七岁-剧本.md（E3 部分）、困在七岁-分集大纲.md、assets/manifest.json 与《资产图册.md》、投喂稿/E01/E01 与 E02 的投喂稿（沿用七段式写法与段缝衔接）；read_skill app/skills/short-drama-director/SKILL.md 与 references/：★ agnes-media-adapter.md、★ asset-first-pipeline.md（P3/P4）、asset-spatial-ledger.md、camera-specs-15rules.md、cinematic-dramaturgy-rules.md、★ segment-splicing.md、★ vo-os-weaving.md、★ prompt-feeding-checklist.md、model-adapters.md（七段式方法论）、storyboard-board-lite.md、character-art-style.md（画风基准）、quality-gate-review.md、scripts/validate_prompt.py（机检 C1~C20）。
 
 【锁定重申】A=agnes 单通道；B=16:9 横屏全流程；D=①末态双保险＋②段缝换机位；暴力淡化；画风基准外观设定并入出图词。
+
+【E1 教训·必读】（同 T-C2 前两集通用，E3 照做）
+1) ★机检必须逐段跑：validate_prompt.py 会把整个多段 md 当一个段，C2（镜头数≤ceil(段长/3)）必误报、还搜出【强制禁止项】里的高危词当真实命中。禁止对整文件单次机检。正确做法：投喂稿定稿后执行 `bash tools_deliver/validate_split.sh <投喂稿.md 绝对路径>`（自动按段拆分并逐段跑 validate_prompt.py --model agnes），每段 FAIL 清零才算达标；汇报时贴每段 PASS/FAIL 明细。
+2) 每段镜头数上限：ceil(段长/3)——10s 段≤4 镜、18s 段≤6 镜、5s 段≤2 镜。快切蒙太奇段（4~5 镜/1~2s）会撞上限：拆成两段分别投喂，各段单独出关键帧。
+3) duration 档位只准 3/5/10/18：投喂稿段头 `--duration` 标注与 manifest 的 duration 字段只用这四档（禁 8）。E3 总时长目标 ≤60s。
+4) manifest.json 必须与投喂稿机械同源：段序/段名/duration/正文逐字一致。禁止手改，禁止补写剧本外剧情桥段。改投喂稿必须同步重建 manifest。
+5) 关键帧必须与最终段内容一一对应：定稿前不要出图；改了段内容必须重出该段 kf；交付前逐段自查 kf≥2 张且 os.path.exists 全真。
+6) 质量项（WARN 也清零为佳）：每镜画面描写以主体开头（「画面主体：…」或人物/身体局部开头）；「低语/呢喃」等声音词不放画面段（移入台词语气位）；特写镜不承载空间级事件（「屋内/房间」等空间词与特写并存→升中景或删）。
 
 【E3 范围】E3 · 相认·归案·困在七岁（3场/10镜头/60s）。
 · 场1 触发·记忆：2012 春节饭局，成年永勇（红发青年形象锚，用 assets/ref-sanview/face/fullbody 三图 --ref）筷子顿在半空→泪落；
@@ -14,7 +22,7 @@
 【产出（全部落盘 投喂稿/E03/ 目录）】
 1) 分镜投喂-E03.md：写满 E3 全部段/镜（每镜：景别/机位/主体/站位/动作/画面描写/台词（语气位）/声音层/接续状态），画幅声明置顶 16:9；对白 ≤18 字/句且按 3.5~5 字/s 倒推镜长；同段≥4 镜时长须有快慢呼吸；无台词氛围镜单镜 ≤5s。段=场次级切割（可再细分），3 场建议 5~7 段。
 2) 关键帧图（本任务只出图、不出视频）：每段 2~3 张 16:9 关键帧（首帧锁段首、末帧锁段缝末态），经 media.py image（--ratio 16:9 --size 2K；角色段用 assets 资产 --ref 保脸；画风基准外观设定并入），落盘 投喂稿/E03/<段号>/kf1.png..kfN.png。缺失即未完成。
-3) 投喂稿正文：写文件 投喂稿/E03/投喂稿-E03.md，逐段给七段式投喂稿（agnese 纯文本、每段 ≤500 字、禁官方字符 {}<>()【】 与 H3 字段、禁工作流规则词；台词写入声音层），注明各段 --duration 档位（3/5/10/18）。
+3) 投喂稿正文：写文件 投喂稿/E03/投喂稿-E03.md，逐段给七段式投喂稿（agnes 纯文本、每段 ≤500 字、禁官方字符 {}<>()【】 与 H3 字段、禁工作流规则词；台词写入声音层），注明各段 --duration 档位（3/5/10/18；★禁缺档）。文件只含 E03 段与文件头注释，不要追加其它正文。
 4) manifest.json：
 {
   "episode": "E03",
@@ -24,8 +32,8 @@
      "keyframes": ["<工作目录>/投喂稿/E03/E03-01/kf1.png", "<…>/kf2.png"]}
   ]
 }
-· duration ∈ {3,5,10,18}；keyframes 每段 ≥2 张且路径存在（os.path.exists 自查）；prompt 为 agnes 纯文本七段式全文。
-5) 机检（不能跳）：cd app/skills/short-drama-director && python3 scripts/validate_prompt.py 投喂稿/E03/投喂稿-E03.md --model agnes，FAIL 清零才交付。
+· duration ∈ {3,5,10,18}；keyframes 每段 ≥2 张且路径存在（逐个 os.path.exists 自查）；prompt 为 agnes 纯文本七段式全文，与投喂稿对应段正文同源。
+5) 机检（不能跳）：按教训 1 用 `bash tools_deliver/validate_split.sh 投喂稿/E03/投喂稿-E03.md` 逐段机检，FAIL 清零才交付。
 6)【☆大文件落盘铁律】写 md/JSON 用 execute_command + heredoc 分块（cat > / cat >> << 'EOF'，每块 ≤8KB）；禁止单次 write_file 超大 content。
 
-【汇报】E3：段数/镜数/总估时；关键帧图全数落盘路径清单；validate_prompt.py 各段结果；manifest.json 字节数。缺任一段关键帧或机检未清零视为未完成。
+【汇报】E3：段数/镜数/总估时；关键帧图全数落盘路径清单；validate_split.sh 各段 PASS/FAIL 明细；manifest.json 字节数。缺任一段关键帧或机检未清零视为未完成。
