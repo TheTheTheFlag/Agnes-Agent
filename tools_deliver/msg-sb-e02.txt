@@ -1,0 +1,18 @@
+【自动化任务 T3｜novel-storyboard 分镜《美人图》第 2 集（单集闭环）】
+
+工作目录：data/users/Mirror/deliverables/短剧/美人图/
+先 read_skill 读 app/skills/novel-storyboard/SKILL.md，再读 references/storyboard-pass.md、schema.md、frame.md、h3-prompt.md，照它们做。
+上游：美人图-script.json（60 集完整剧本，台词已按短剧节奏拆 ≤18 字）、outline.json、cast.json（角色设定图）、art.json、images/。
+
+本任务是「单集闭环」：只做第 2 集，分镜 → 出图全部完成后再交，不要做其它集。
+★ 机械门放心交给 sb_fix_auto：段打包/段号、h3Prompt 对齐行/切点时刻/<d> 块/字段序、景别/风格/运镜短语、人物道具对账、同框拆解、时长对齐 都会自动修。你只要保证「创作内容」到位：
+1) seed：node app/skills/novel-storyboard/scripts/novel-storyboard.mjs seed 美人图-script.json --eps 2 > data/users/Mirror/deliverables/短剧/美人图/storyboard-e02.json
+2) 切镜：按 storyboard-pass.md 把第 2 集切成段与分镜（段≤15s、每切2-5s、节拍全覆盖——每场节拍按序连续认领，可多切共认领相邻拍；单切内台词合起来 ≤5 秒装得下）；
+   每段写 h3Prompt 的创作部分：integrated_multimodal_description 逐镜英文画面（写清机位/景别/主体/动作/氛围）、overall_soundscape（英文）、non_diegetic_music（英文）；删掉 seedScenes。
+3) 校验行（供你自查，非最终裁判）：cd . && node app/skills/novel-storyboard/scripts/novel-storyboard.mjs validate storyboard-e02.json --script 美人图-script.json --outline outline.json --cast cast.json --art art.json
+   结构类红黄先不管（sb_fix_auto 会修）；重点自查：节拍覆盖率、切内台词 ≤5s、frame 英文且含景别短语与 cinematic film still、h3Prompt 正文英文无中文人名。
+4) 出图（本集全部段，一次出齐）：按 SKILL.md Step 4 与 frame.md，逐段逐镜调 agnes-media image 出分镜图到 <segmentId>/f<切序>.png：
+   - 挂场景/角色/道具设定图当 --ref（画面里有谁挂谁）；提示词 = 英文 frame 提示词 + 光影/质感/氛围词 + 固定质量尾锚 + 收尾句 No text, no watermark, no borders
+   - 每段至少 f1.png，多格全出；缺图的段在汇报里点名
+5) 汇报：第 2 集共几段几镜、每段 f*.png 路径、以及你写好的创作部分清单。
+不渲染 HTML 报告，不要碰其它集文件。
