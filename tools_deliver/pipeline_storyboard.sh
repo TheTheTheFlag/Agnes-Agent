@@ -193,14 +193,36 @@ EOF
     if [ "$vr" -ne 0 ]; then log "第 $i 集分镜 3 轮修复仍未过，跳过视频"; echo "SB $i FAILED" >> "$LOGDIR/pipeline-storyboard.failed"; continue; fi
   fi
 
-  # -------- 直跑视频（不经 LLM） --------
-  log "第 $i 集：直跑整集视频"
+  # -------- 直跑视频（缺图先补图） --------
+  MISSING=$(python3 "$TOOLSDIR/sb_img_gap.py" "$D/$fn" E${e} 2>/dev/null | grep -v '^GAP' | wc -l)
+  if [ "$MISSING" -gt 0 ]; then
+    log "第 $i 集缺分镜图 $MISSING 段，先补图"
+    cat > "$TOOLSDIR/msg-sb-img-e${e}.txt" <<EOF
+【自动化任务 T3-IMG｜分镜图出图《美人图》第 $i 集】
+
+工作目录：data/users/Mirror/deliverables/短剧/美人图/
+目标：让 ${fn} 每一段都有 <段号>/f1.png（多镜段还要 f2..fN 关键帧）。
+
+步骤：
+1) read_file 读 ${fn}：每段有 cuts（每切有 frame 英文提示词，已含景别/风格/光影）。
+2) 对每一段 <段号>：mkdir -p <段号>；逐切出图到 <段号>/f<切序>.png（第1镜 f1.png 钉 0.00 秒，第 k 镜 fk.png 钉该切点）。
+   出图走 agnes-media image：--ref 挂该镜出场角色的设定图 images/<角色名>.png，以及 art.json 中该场景的设定图；
+   提示词 = 该切 cut.frame（英文原文）+ 光影/质感/氛围词 + 固定质量尾锚；收尾句 No text, no watermark, no borders；16:9。
+   每段 f1.png 必须出；多镜段把 f2..fN 补全。
+3) 自查：python3 /home/mirror/Agnes-Agent/tools_deliver/sb_img_gap.py ${fn} E$e （输出 GAP 那行 missing=0 即达标）。
+4) 汇报：共 N 段出图 M 张、路径清单；仍缺的段点名。
+不要改 storyboard JSON、不要做视频、不要碰其它集。
+EOF
+    acc=$(dispatch_wait "$TOOLSDIR/msg-sb-img-e${e}.txt" "$LOGDIR/sb-img-e${e}.log" 7200)
+    log "  补图任务 -> $acc"
+    MISSING2=$(python3 "$TOOLSDIR/sb_img_gap.py" "$D/$fn" E${e} 2>/dev/null | grep -v '^GAP' | wc -l)
+    log "  补图后仍缺 $MISSING2 段"
+  fi
+  log "第 $i 集：后台直跑视频（并发上限 2）"
   if wait_server; then
-    python3 "$TOOLSDIR/run_episode_videos.py" "$D/$fn" E${e} > "$LOGDIR/video-e${e}.log" 2>&1 &
-    VPID=$!
-    # 串行：等待完成（视频最长 2h/段）
-    while kill -0 $VPID 2>/dev/null; do sleep 60; done
-    grep -E "完成:|OK \(|FAIL" "$LOGDIR/video-e${e}.log" | tail -12 >> "$LOGF"
+    while [ "$(pgrep -fc 'run_episode_videos.py' 2>/dev/null || echo 0)" -ge 2 ]; do sleep 60; done
+    nohup python3 "$TOOLSDIR/run_episode_videos.py" "$D/$fn" E${e} > "$LOGDIR/video-e${e}.log" 2>&1 &
+    log "  已启动视频后台任务 (pid $!)"
   fi
 done
 log "===== pipeline_storyboard 全部结束 $(date) ====="
