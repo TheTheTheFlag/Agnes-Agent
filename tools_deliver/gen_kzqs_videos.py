@@ -61,6 +61,7 @@ def main():
             dur = 5
         cmd = ["python3", MEDIA, "video", "--duration", str(dur),
                "--timeout", "356400", "--prompt", prompt]
+        cmd += ["--width", "1280", "--height", "720"]
         kfs = [k for k in (s.get("keyframes") or []) if k and os.path.exists(k)]
         if s.get("ti2vid"):
             pass
