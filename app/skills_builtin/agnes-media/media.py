@@ -156,14 +156,35 @@ def _ref_to_local(ref: str) -> str:
 
 
 def _user_lib_dir(kind: str) -> str:
-    """解析当前用户的作品库目录（与后端 user_subdir 同源）。"""
+    """解析当前用户的作品库目录（与后端 user_subdir 同源）。
+
+    kind 为 API 端点名（video/image），作品库目录名带 _library 后缀，
+    在此做映射：video -> video_library，image -> image_library。
+    standalone 运行（本脚本以 `python3 media.py` 执行，app.* 不可导入）时
+    按已知布局直接定位 data/users/<user>/data/<lib_kind>，避免兜底下载副本
+    被服务器 _sync_skill_outputs 二次登记进作品库（重复条目根因，2026-09-26 修订）。
+    """
+    lib_kind = {"video": "video_library", "image": "image_library"}.get(kind, kind)
+    p = ""
     try:
         from app.userctx import set_current_user
         from app.config import user_subdir
         set_current_user(_internal_user())
-        return str(user_subdir("data_dir", kind))
+        p = str(user_subdir("data_dir", lib_kind))
     except Exception:
-        return ""
+        p = ""
+    if p and os.path.isdir(p):
+        return p
+    user = _internal_user() or "Mirror"
+    cand = ""
+    for root in (Path(__file__).resolve().parents[i] for i in range(2, 6)):
+        t = root / "data" / "users" / user / "data" / lib_kind
+        if t.is_dir():
+            cand = str(t)
+            break
+    if cand:
+        return cand
+    return p
 
 
 def _api_download(path: str, dst: Path) -> None:
