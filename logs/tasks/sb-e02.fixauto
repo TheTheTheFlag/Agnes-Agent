@@ -22,3 +22,33 @@ GATES 13/17 绿
   ✗ H3 首行对齐指令由分镜结构推导逐字对账，切点时刻逐个对（E02-01 描述正文缺 [Shot 1]）
   WARN E02 没有任何分镜切（骨架空，模型必须补）
   WARN E02 无对白切可调，时长 0.0s 不在 [102,138]
+FIXED ids=11 pack=7 h3=6 cut=43 frame=25 ref=25 crowd=0 dur=0 dlg=0 split=0 map=0
+GATES 13/17 绿
+  ✗ 剧本节拍被恰好一次、按顺序、连续认领（分镜级）（E02-01#1 的节拍区间 [null, null] 不合法（该场共 23 拍）；E02-01#2 的节拍区间 [null, null] 不合法（该场共 23 拍）；E02-01#3 的节拍区间 [null, null] 不合法（该场共 23 拍）；E02-01#4 的节拍区间 [null, null] 不合法（该场共 23 拍）；E02-01#5 的节拍区间 [null, null] 不合法（该场共 23 拍）；E02-01#6 的节拍区间 [null, null] 不合法（该场共 23 拍）；E02-02#1 的节拍区间 [null, null] 不合法（该场共 23 拍）；E02-02）
+  ✗ 运镜用 H3 官方词表，且出现在自己的 [Shot k] 段落里（E02-07#1 在 h3Prompt 里找不到对应的 [Shot 1] 段落；E02-07#2 在 h3Prompt 里找不到对应的 [Shot 2] 段落；E02-07#3 在 h3Prompt 里找不到对应的 [Shot 3] 段落；E02-07#4 在 h3Prompt 里找不到对应的 [Shot 4] 段落；E02-07#5 在 h3Prompt 里找不到对应的 [Shot 5] 段落；E02-08#1 在 h3Prompt 里找不到对应的 [Shot 1] 段落；E02-08#2 在 h3Prompt 里找不到对应的 [Shot 2] 段落；E02-08#3 在 h3Prompt ）
+  ✗ H3 首行对齐指令由分镜结构推导逐字对账，切点时刻逐个对（E02-07 首行对齐指令和分镜结构对不上（promptLang=en）；E02-08 首行对齐指令和分镜结构对不上（promptLang=en）；E02-09 首行对齐指令和分镜结构对不上（promptLang=en）；E02-10 首行对齐指令和分镜结构对不上（promptLang=en）；E02-11 首行对齐指令和分镜结构对不上（promptLang=en））
+  ✗ 场次／人物／道具对账剧本（E02-07 的 sceneIndex 3 在剧本第 2 集里不存在；E02-08 的 sceneIndex 3 在剧本第 2 集里不存在；E02-09 的 sceneIndex 3 在剧本第 2 集里不存在；E02-10 的 sceneIndex 3 在剧本第 2 集里不存在；E02-11 的 sceneIndex 4 在剧本第 2 集里不存在）
+FIXED ids=11 pack=7 h3=6 cut=43 frame=25 ref=25 crowd=0 dur=0 dlg=0 split=0 map=0
+GATES 13/17 绿
+  ✗ 剧本节拍被恰好一次、按顺序、连续认领（分镜级）（E02-01#1 的节拍区间 [null, null] 不合法（该场共 23 拍）；E02-01#2 的节拍区间 [null, null] 不合法（该场共 23 拍）；E02-01#3 的节拍区间 [null, null] 不合法（该场共 23 拍）；E02-01#4 的节拍区间 [null, null] 不合法（该场共 23 拍）；E02-01#5 的节拍区间 [null, null] 不合法（该场共 23 拍）；E02-01#6 的节拍区间 [null, null] 不合法（该场共 23 拍）；E02-02#1 的节拍区间 [null, null] 不合法（该场共 23 拍）；E02-02）
+  ✗ 运镜用 H3 官方词表，且出现在自己的 [Shot k] 段落里（E02-07#1 在 h3Prompt 里找不到对应的 [Shot 1] 段落；E02-07#2 在 h3Prompt 里找不到对应的 [Shot 2] 段落；E02-07#3 在 h3Prompt 里找不到对应的 [Shot 3] 段落；E02-07#4 在 h3Prompt 里找不到对应的 [Shot 4] 段落；E02-07#5 在 h3Prompt 里找不到对应的 [Shot 5] 段落；E02-08#1 在 h3Prompt 里找不到对应的 [Shot 1] 段落；E02-08#2 在 h3Prompt 里找不到对应的 [Shot 2] 段落；E02-08#3 在 h3Prompt ）
+  ✗ H3 首行对齐指令由分镜结构推导逐字对账，切点时刻逐个对（E02-07 首行对齐指令和分镜结构对不上（promptLang=en）；E02-08 首行对齐指令和分镜结构对不上（promptLang=en）；E02-09 首行对齐指令和分镜结构对不上（promptLang=en）；E02-10 首行对齐指令和分镜结构对不上（promptLang=en）；E02-11 首行对齐指令和分镜结构对不上（promptLang=en））
+  ✗ 场次／人物／道具对账剧本（E02-07 的 sceneIndex 3 在剧本第 2 集里不存在；E02-08 的 sceneIndex 3 在剧本第 2 集里不存在；E02-09 的 sceneIndex 3 在剧本第 2 集里不存在；E02-10 的 sceneIndex 3 在剧本第 2 集里不存在；E02-11 的 sceneIndex 4 在剧本第 2 集里不存在）
+FIXED ids=11 pack=7 h3=6 cut=43 frame=25 ref=25 crowd=0 dur=0 dlg=0 split=0 map=0
+GATES 13/17 绿
+  ✗ 剧本节拍被恰好一次、按顺序、连续认领（分镜级）（E02-01#1 的节拍区间 [null, null] 不合法（该场共 23 拍）；E02-01#2 的节拍区间 [null, null] 不合法（该场共 23 拍）；E02-01#3 的节拍区间 [null, null] 不合法（该场共 23 拍）；E02-01#4 的节拍区间 [null, null] 不合法（该场共 23 拍）；E02-01#5 的节拍区间 [null, null] 不合法（该场共 23 拍）；E02-01#6 的节拍区间 [null, null] 不合法（该场共 23 拍）；E02-02#1 的节拍区间 [null, null] 不合法（该场共 23 拍）；E02-02）
+  ✗ 运镜用 H3 官方词表，且出现在自己的 [Shot k] 段落里（E02-07#1 在 h3Prompt 里找不到对应的 [Shot 1] 段落；E02-07#2 在 h3Prompt 里找不到对应的 [Shot 2] 段落；E02-07#3 在 h3Prompt 里找不到对应的 [Shot 3] 段落；E02-07#4 在 h3Prompt 里找不到对应的 [Shot 4] 段落；E02-07#5 在 h3Prompt 里找不到对应的 [Shot 5] 段落；E02-08#1 在 h3Prompt 里找不到对应的 [Shot 1] 段落；E02-08#2 在 h3Prompt 里找不到对应的 [Shot 2] 段落；E02-08#3 在 h3Prompt ）
+  ✗ H3 首行对齐指令由分镜结构推导逐字对账，切点时刻逐个对（E02-07 首行对齐指令和分镜结构对不上（promptLang=en）；E02-08 首行对齐指令和分镜结构对不上（promptLang=en）；E02-09 首行对齐指令和分镜结构对不上（promptLang=en）；E02-10 首行对齐指令和分镜结构对不上（promptLang=en）；E02-11 首行对齐指令和分镜结构对不上（promptLang=en））
+  ✗ 场次／人物／道具对账剧本（E02-07 的 sceneIndex 3 在剧本第 2 集里不存在；E02-08 的 sceneIndex 3 在剧本第 2 集里不存在；E02-09 的 sceneIndex 3 在剧本第 2 集里不存在；E02-10 的 sceneIndex 3 在剧本第 2 集里不存在；E02-11 的 sceneIndex 4 在剧本第 2 集里不存在）
+FIXED ids=11 pack=7 h3=6 cut=43 frame=25 ref=25 crowd=0 dur=0 dlg=0 split=0 map=0
+GATES 13/17 绿
+  ✗ 剧本节拍被恰好一次、按顺序、连续认领（分镜级）（E02-01#1 的节拍区间 [null, null] 不合法（该场共 23 拍）；E02-01#2 的节拍区间 [null, null] 不合法（该场共 23 拍）；E02-01#3 的节拍区间 [null, null] 不合法（该场共 23 拍）；E02-01#4 的节拍区间 [null, null] 不合法（该场共 23 拍）；E02-01#5 的节拍区间 [null, null] 不合法（该场共 23 拍）；E02-01#6 的节拍区间 [null, null] 不合法（该场共 23 拍）；E02-02#1 的节拍区间 [null, null] 不合法（该场共 23 拍）；E02-02）
+  ✗ 运镜用 H3 官方词表，且出现在自己的 [Shot k] 段落里（E02-07#1 在 h3Prompt 里找不到对应的 [Shot 1] 段落；E02-07#2 在 h3Prompt 里找不到对应的 [Shot 2] 段落；E02-07#3 在 h3Prompt 里找不到对应的 [Shot 3] 段落；E02-07#4 在 h3Prompt 里找不到对应的 [Shot 4] 段落；E02-07#5 在 h3Prompt 里找不到对应的 [Shot 5] 段落；E02-08#1 在 h3Prompt 里找不到对应的 [Shot 1] 段落；E02-08#2 在 h3Prompt 里找不到对应的 [Shot 2] 段落；E02-08#3 在 h3Prompt ）
+  ✗ H3 首行对齐指令由分镜结构推导逐字对账，切点时刻逐个对（E02-07 首行对齐指令和分镜结构对不上（promptLang=en）；E02-08 首行对齐指令和分镜结构对不上（promptLang=en）；E02-09 首行对齐指令和分镜结构对不上（promptLang=en）；E02-10 首行对齐指令和分镜结构对不上（promptLang=en）；E02-11 首行对齐指令和分镜结构对不上（promptLang=en））
+  ✗ 场次／人物／道具对账剧本（E02-07 的 sceneIndex 3 在剧本第 2 集里不存在；E02-08 的 sceneIndex 3 在剧本第 2 集里不存在；E02-09 的 sceneIndex 3 在剧本第 2 集里不存在；E02-10 的 sceneIndex 3 在剧本第 2 集里不存在；E02-11 的 sceneIndex 4 在剧本第 2 集里不存在）
+FIXED ids=11 pack=7 h3=6 cut=43 frame=25 ref=25 crowd=0 dur=0 dlg=0 split=0 map=0
+GATES 13/17 绿
+  ✗ 剧本节拍被恰好一次、按顺序、连续认领（分镜级）（E02-01#1 的节拍区间 [null, null] 不合法（该场共 23 拍）；E02-01#2 的节拍区间 [null, null] 不合法（该场共 23 拍）；E02-01#3 的节拍区间 [null, null] 不合法（该场共 23 拍）；E02-01#4 的节拍区间 [null, null] 不合法（该场共 23 拍）；E02-01#5 的节拍区间 [null, null] 不合法（该场共 23 拍）；E02-01#6 的节拍区间 [null, null] 不合法（该场共 23 拍）；E02-02#1 的节拍区间 [null, null] 不合法（该场共 23 拍）；E02-02）
+  ✗ 运镜用 H3 官方词表，且出现在自己的 [Shot k] 段落里（E02-07#1 在 h3Prompt 里找不到对应的 [Shot 1] 段落；E02-07#2 在 h3Prompt 里找不到对应的 [Shot 2] 段落；E02-07#3 在 h3Prompt 里找不到对应的 [Shot 3] 段落；E02-07#4 在 h3Prompt 里找不到对应的 [Shot 4] 段落；E02-07#5 在 h3Prompt 里找不到对应的 [Shot 5] 段落；E02-08#1 在 h3Prompt 里找不到对应的 [Shot 1] 段落；E02-08#2 在 h3Prompt 里找不到对应的 [Shot 2] 段落；E02-08#3 在 h3Prompt ）
+  ✗ H3 首行对齐指令由分镜结构推导逐字对账，切点时刻逐个对（E02-07 首行对齐指令和分镜结构对不上（promptLang=en）；E02-08 首行对齐指令和分镜结构对不上（promptLang=en）；E02-09 首行对齐指令和分镜结构对不上（promptLang=en）；E02-10 首行对齐指令和分镜结构对不上（promptLang=en）；E02-11 首行对齐指令和分镜结构对不上（promptLang=en））
+  ✗ 场次／人物／道具对账剧本（E02-07 的 sceneIndex 3 在剧本第 2 集里不存在；E02-08 的 sceneIndex 3 在剧本第 2 集里不存在；E02-09 的 sceneIndex 3 在剧本第 2 集里不存在；E02-10 的 sceneIndex 3 在剧本第 2 集里不存在；E02-11 的 sceneIndex 4 在剧本第 2 集里不存在）
