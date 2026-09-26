@@ -2975,31 +2975,47 @@ async function renderModelsTab(el) {
   } catch (e) { el.innerHTML = drawerErr(e); }
 }
 
-/* ---- 交付物 ---- */
-async function renderDelivTab(el) {
+/* ---- 交付物（目录树浏览） ---- */
+async function renderDelivTab(el, curPath) {
   el.innerHTML = `<div class="d-empty">加载中…</div>`;
+  curPath = curPath || "";
   try {
-    const data = await apiGet("/api/deliverables");
-    const files = data.files || [];
-    if (!files.length) { el.innerHTML = `<div class="d-empty">暂无交付物</div>`; return; }
-    el.innerHTML = drawerSection("交付物（" + files.length + "）", files.map((f) => `
-      <div class="deliv-item">
-        <span class="dv-name">${escapeHtml(f.name)}</span>
-        <span class="dv-size">${(f.size / 1024).toFixed(1)}KB</span>
-        <button class="d-btn sm" data-act="preview" data-name="${escapeHtml(f.name)}">预览</button>
-        <a class="d-btn sm" href="/api/deliverables/download?name=${encodeURIComponent(f.name)}" download>下载</a>
-      </div>`).join("")) +
-      `<div id="delivPreviewBox"></div>`;
-    $$("[data-act=preview]", el).forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        const name = btn.dataset.name;
-        try {
-          const d = await apiGet(`/api/deliverables/preview?name=${encodeURIComponent(name)}`);
-          const box = $("#delivPreviewBox", el);
-          box.innerHTML = `<div class="d-card"><h4 style="margin-bottom:6px">${escapeHtml(d.name)}</h4><pre class="d-pre">${escapeHtml(d.content || "")}</pre></div>`;
-        } catch (e) { toast(e.message, "error"); }
-      });
-    });
+    const data = await apiGet("/api/deliverables/tree?path=" + encodeURIComponent(curPath));
+    const all = (data.files || []).map((f) => f);
+    const base = curPath ? curPath + "/" : "";
+    const subDirs = new Map();
+    const files = [];
+    for (const f of all) {
+      if (!f.path.startsWith(base)) continue;
+      const rest = f.path.slice(base.length);
+      const idx = rest.indexOf("/");
+      if (idx === -1) { files.push(f); }
+      else { const dn = rest.slice(0, idx); subDirs.set(dn, (subDirs.get(dn) || 0) + 1); }
+    }
+    // 面包屑
+    const crumbs = curPath ? curPath.split("/") : [];
+    let bc = `<span class="dv-crumb" data-crumb="" style="cursor:pointer;color:#4f7cff;text-decoration:underline">📁 根目录</span>`;
+    let acc = "";
+    crumbs.forEach((c, i) => { acc += (i ? "/" : "") + c; bc += ` / <span class="dv-crumb" data-crumb="${escapeHtml(acc)}" style="cursor:pointer;color:#4f7cff;text-decoration:underline">${escapeHtml(c)}</span>`; });
+    let html = `<div class="d-card" style="margin-bottom:8px">${bc}</div>`;
+    if (curPath) {
+      const parent = crumbs.slice(0, -1).join("/");
+      html += `<div class="deliv-item dv-nav" data-nav="${escapeHtml(parent)}" style="cursor:pointer;background:#f5f6fa"><span class="dv-name">⬆ 返回上级</span><span class="d-btn sm" style="display:inline-block;pointer-events:none">进入</span></div>`;
+    }
+    const dirRows = [...subDirs.entries()].sort((a, b) => a[0].localeCompare(b[0], "zh")).map(([dn, cnt]) => {
+      const target = base + dn;
+      return `<div class="deliv-item dv-nav" data-nav="${escapeHtml(target)}" style="cursor:pointer;background:#f5f6fa"><span class="dv-name">📁 ${escapeHtml(dn)}</span><span class="dv-size">${cnt} 项</span><span class="d-btn sm" style="display:inline-block;pointer-events:none">进入</span></div>`;
+    }).join("");
+    const fileRows = files.sort((a, b) => a.name.localeCompare(b.name, "zh")).map((f) => {
+      const dlUrl = "/api/deliverables/download?path=" + encodeURIComponent(f.path);
+      return `<div class="deliv-item"><span class="dv-name">📄 ${escapeHtml(f.name)}</span><span class="dv-size">${(f.size / 1024).toFixed(1)}KB</span><a class="d-btn sm" href="${dlUrl}" download>下载</a></div>`;
+    }).join("");
+    html += drawerSection("目录", (dirRows || `<div class="d-empty">（无子目录）</div>`));
+    html += drawerSection("文件（" + files.length + "）", (fileRows || `<div class="d-empty">（无文件）</div>`));
+    html += `<div id="delivPreviewBox"></div>`;
+    el.innerHTML = html;
+    $$("[data-nav]", el).forEach((n) => n.addEventListener("click", () => renderDelivTab(el, n.dataset.nav)));
+    $$("[data-crumb]", el).forEach((n) => n.addEventListener("click", () => renderDelivTab(el, n.dataset.crumb)));
   } catch (e) { el.innerHTML = drawerErr(e); }
 }
 

@@ -10,7 +10,7 @@
 > **版本**：V6.9.8 轻量版（Lite）**· Agnes 本地化单通道（2026-09-26）**：
 > **V6.9.8（2026-09-26 本地化）**：媒体执行**统一收敛为 agnes 单通道**——出图 = `agnes-image-2.5-flash`、出视频 = `agnes-video-v2.0`（flash 档 `agnes-video-2.5-flash` 备选），
 > 唯一执行入口 = `agnes-media`（`app/skills_builtin/agnes-media/media.py`，内部创作台 127.0.0.1:8081，需注入 `AGENT_INTERNAL_TOKEN`）；
-> 画风强制并入用户三视图人物形象提示词（`references/character-art-style.md` ★权威）；**不再询问模型版本三选一**，
+> 角色形象以各角色资产板/参考图为准；**不再询问模型版本三选一**，
 > Seedance / MiniMax H3 / 即梦 等文档库内容仅作方法论来源，不构成执行契约；出稿机检 C1~C20 保持，`validate_prompt.py --model agnes` 语义化。
 > **V6.9.7（2026-09-19）**：新增**首镜单主体锚定与具象化**（§5.0.2 续增单主体铁律 + §5.0.4 续增抽象形容删除纪律 + 法则 23 + 机检 **C20**——
 > 锚定句只许一个具名主体、禁「X 与 Y 同框」类并列主体句式；指代词必须带归属；抽象形态/程度副词一律删；反光道具零光效描写（C20d）；道具动作与语气一致（C16d））。
@@ -24,7 +24,6 @@
 > ⚠️ **部署铁律（高于一切原生契约）**：
 > - 出图/出视频唯一通道 = **agnes-media `media.py`**；调用前必须 `export AGENT_INTERNAL_TOKEN=$(cat /home/mirror/Agnes-Agent/data/internal_token)`；
 > - A 锁 = **agnes 单通道**（不三选一、不询问模型版本）；B 锁画幅显式指定（默认 16:9，禁止靠默认）；C 交付形态默认 ③ 两者都交付；D 段缝三选一；
-> - 画风并入 `references/character-art-style.md`（★用户三视图人物形象原稿逐字）；
 > - keyframes 为 append 参数：`--keyframes A --keyframes B`（2~3 张，服务端要求 ≥2 张），单 flag 后只跟一张图；
 > - 时长档位 `--duration 3|5|10|18`（→ 81/121/241/441 帧 @24fps），单段上限 18s，由内容倒推、禁拉伸凑满。
 
@@ -95,7 +94,7 @@ short-drama-director/
 └── CHANGELOG.md
 ```
 
-> 媒体通道权威文件：`references/agnes-media-adapter.md`（★）；画风基准：`references/character-art-style.md`（★）。
+> 媒体通道权威文件：`references/agnes-media-adapter.md`（★）；画风选择：`references/art-style-selection.md`（★，任务起始第一步必选）。
 
 ## 📄 License
 

@@ -91,7 +91,7 @@ python3 $M video --prompt "…" --image <f1.png> --duration 5
 python3 $M video --prompt "…" --keyframes <f1.png> --keyframes <fm.png> --keyframes <fe.png> --duration 5
 ```
 
-## 7. 与画风基准的衔接
+## 7. 出图参考与形象一致
 
-出图词必须并入 `character-art-style.md`（★ 画风基准）的布局模板与外观锚词；
-分镜首帧图→资产板/关键帧均按该画风出图后再投喂。
+出图/分镜首帧/关键帧以 `asset-spatial-ledger.md` §二（4 View 资产板布局）与各角色资产板/场景/道具参考图为准（`--ref` 锁形象）；
+角色各年龄段的形象按角色设定推导（继承家族标记，不套用其他年龄段的服饰与气质词）。

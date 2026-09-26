@@ -51,14 +51,13 @@ check("① 可灵不作为正式支持模型（仅 LEGACY/移除声明行可提�
 check("① model-adapters 含可灵 LEGACY 声明", "LEGACY·可灵 (Kling)" in read(os.path.join("references", "model-adapters.md")))
 
 # ---------- ② 4 View 口径 ----------
-# 本地化豁免：character-art-style.md（★画风基准·用户三视图人物形象）与 SKILL/adapter 中的
-# 「画风基准 / 三视图人物形象 / 三视图资产板」语境属画风输入基准，非角色资产标准，不参与 4 View 裁决。
+# 本地化豁免：LEGACY/历史文件中「画风基准 / 三视图」语境属方法论输入，非角色资产标准，不参与 4 View 裁决。
 VIEW_OK = re.compile(r"LEGACY|旧称|旧「|历史|画风基准|三视图人物形象|三视图资产板|角色设定图|三视图角色设定")
 bad_view = []
 for p in scan_md_files():
     rel = os.path.relpath(p, BASE)
-    if rel.startswith("CHANGELOG") or rel.startswith("references/character-art-style"):
-        continue  # 历史沿革文件整体带 LEGACY；画风基准文件整体豁免
+    if rel.startswith("CHANGELOG"):
+        continue  # 历史沿革文件整体带 LEGACY
     for i, line in enumerate(read(rel).splitlines(), 1):
         if "三视图" in line and not VIEW_OK.search(line):
             bad_view.append(f"{rel}:{i}")

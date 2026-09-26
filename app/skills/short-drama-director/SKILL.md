@@ -19,11 +19,11 @@ description: "【漫剧老李AIGC 全流程Skill · V6.9.8 轻量版 · Agnes �
 > 本部署出图/出视频**唯一执行通道 = agnes-media**（`app/skills_builtin/agnes-media/media.py`，
 > 内部创作台 127.0.0.1:8081）——**覆盖下方 A 锁**（模型不再三选一，统一 agnes 单通道：
 > 出图 `agnes-image-2.5-flash`、出视频 `agnes-video-v2.0`）**与 E 法则**（默认直接执行，不再只给提示词）。
-> 画风强制并入《画风基准 · 三视图人物形象＋人物外观设定》（红发/狭长眼尾/黑金属夹克/机车裤/瓷白肌肤/疯批感）。
-> **★ 权威文件：`references/agnes-media-adapter.md`（媒体通道）与 `references/character-art-style.md`（画风基准）。**
+> **★ 权威文件：`references/agnes-media-adapter.md`（媒体通道）。**
+> **★ 画风锁定**：任务开始第一步必须先与用户确认/选择画风（`references/art-style-selection.md`）；画风未定不出任何图/视频，选定后本任务全部出图词并入该画风风格档。
 > 文档库中任何 Seedance / MiniMax H3 / 即梦 等字样仅作**通用创作方法论来源**，不构成执行契约。
 
-## 〇、 任务前置强制锁定：A·模型通道 / B·画幅 / C·交付形态 / D·段缝衔接方式（最高优先级 · 每个任务第一步）
+## 〇、 任务前置强制锁定：A·模型通道 / B·画幅 / C·交付形态 / D·段缝衔接方式 / E·画风（最高优先级 · 每个任务第一步）
 
 > **每个任务动笔前必须先完成 A、B 两道创作锁；多段任务加 D 锁（段缝衔接方式三选一）。任一项用户未指定 = 任务不开始，禁止默认跳过。C·交付形态未指定时默认「③ 两者都交付」，不阻塞创作（见下）。**
 
@@ -113,7 +113,8 @@ skills/short-drama-director/
 │   └── generate_emotion_curve.py            # 12 节拍全片情绪张力折线图自动绘制脚本
 └── references/                              # 底层专业规则库（★=权威总控文件）
     ├── ★ agnes-media-adapter.md            # Agnes 本地化媒体执行总控（★本部署媒体通道唯一权威：出图/出视频/时长档位/参考图）
-    ├── ★ character-art-style.md            # 画风基准 · 三视图人物形象＋人物外观设定（★本部署强制画风）
+
+    ├── ★ art-style-selection.md          # 画风选择机制（★任务起始第一步必选；画风库：原神风·二次元卡通渲 / 摄影写实·东方诗意）
     ├── ★ asset-first-pipeline.md           # Asset-First 六阶段生产管线（★全局总控：P0~P5 唯一生产顺序）
     ├── ★ aspect-ratio-adaptation.md        # 画幅自适应路由（★全局总控：横/竖屏全流程裁决，用户指令优先）
     ├── ★ agent-platform-adapters.md         # 多平台 Agent 架构与国产工作流适配规范 (WorkBuddy/豆包/OpenClaw/Dify)
@@ -171,7 +172,7 @@ skills/short-drama-director/
 - **统一通道**：出图/出视频全部经 `app/skills_builtin/agnes-media/media.py`（内部创作台 127.0.0.1:8081，复用页面 `/api/image/generate` 与 `/api/video/generate` 端点）；调用前必须 `export AGENT_INTERNAL_TOKEN=$(cat /home/mirror/Agnes-Agent/data/internal_token)`；
 - **出图**：默认 `agnes-image-2.5-flash`；`--ratio`（B 锁画幅）、`--size 2K`、`--ref` 多图锁形象；
 - **出视频**：默认 `agnes-video-v2.0`；三模式 img2vid（单图）/ keyframes（2~3 图，关键帧动画）/ ti2vid（纯文本）；`--duration 3|5|10|18`；
-- **投喂正文**：一律 agnes 纯文本（无官方字符、无 H3 字段）；画风并入 `character-art-style.md`；
+- **投喂正文**：一律 agnes 纯文本（无官方字符、无 H3 字段）；
 - **产物落点**：唯一作品库（`data/users/<user>/data/{image|video}_library`，stdout `FILE=`），**不产生 output 重复副本**（已规避 `_sync_skill_outputs` 二次登记）；
 - **红线**：禁现实真人照片素材（画风写实不禁，见〇节 H）。
 
@@ -222,15 +223,15 @@ skills/short-drama-director/
 | **`/剧组产出册`** 或 **`/生成台账`** | 启动 P2 数字资产包：输出《完整资产清单》→ 分批出图（角色/场景/道具）→ 交付《资产图册》（CHR/AUD/PRP/SCN/Uxx 全附资产参考图）。 |
 | **`/数字资产包`** 或 **`/资产图册`** | P2 核心入口：提取全部实体 → 资产清单确认 → 分批出图锁定 → 交付《资产图册》。 |
 | **`/情绪曲线`** 或 **`/情绪节拍`** | 启动 12 节拍情绪量化引擎，输出全片张力诊断表并生成情绪波折折线图。 |
-| **`/角色资产板`** 或 **`/角色遗传推导`** | P2c·第一批：T1 男女主锁定脸模 → 亲缘推导 T2/T3 并**直接出图**（非文字描述）→ 交付 4 View 角色资产参考图（按画风基准出图）。 |
+| **`/角色资产板`** 或 **`/角色遗传推导`** | P2c·第一批：T1 男女主锁定脸模 → 亲缘推导 T2/T3 并**直接出图**（非文字描述）→ 交付 4 View 角色资产参考图。 |
 | **`/顶视图`** 或 **`/机位调度`** | 绘制空间俯视平面机位调度图，标注 CAM1~CAM4 编号与 180° 动作轴线。 |
 | **`/做分镜`** | 自动路由文戏微表情流或武戏 15 格动力链 PREVIS，应用三手法六式衔接；**多段任务先过 D 锁（段缝衔接方式三选一），段缝两侧逐对标接缝式（`segment-splicing.md`）**。**镜长按法则 17 由剧情倒推，禁等分；出稿机检 C13 拦镜长雷同。** |
 | **`/台词诊断`** 或 **`台词体检`** | 启动台词专科医生，输出角色语言指纹、七维诊断与三段式改写。 |
 | **`/微表情`** 或 **`/表情诊断`** | 启动 FACS 微表情引擎：空泛情绪词 → AU 配方替换（四区拆解+强度三档+时序+英文 kernel）；可产出角色情绪库 / FACS cue 表，或按自检清单做表情审查。 |
 | **`/语速自检`** 或 **`台词语速检查`** | 启动 dialogue-speed-check 语速自检：拆句 $\rightarrow$ 计数 $\rightarrow$ 套档 $\rightarrow$ 判定。 |
 | **`/生成视频提示词`** | 输出 agnes 纯文本投喂稿（七段式写作骨架见 `model-adapters.md` §5 方法论，封装与体例一律按 ★ `agnes-media-adapter.md` §3/§4）。（⚠️ 画幅必须以用户指定 16:9 或 9:16 为准，禁止默认回落竖屏）。**投喂前必过清单（按序）：① `agnes-media-adapter.md` §2（时长档位 3/5/10/18 由内容倒推 + `--ratio` 画幅回填）→ ② `aspect-ratio-adaptation`（画幅全流程）→ ③ `camera-specs-15rules`（镜头五要素+景别阶梯）→ ④ 有对白必过 `dialogue-speed-check`（语速自检）+ `wenxi-micro-expression`（金句发酵）+ `model-adapters.md` §5.2 方法论（**语气位必写**）；有 OS/VO 必过 `vo-os-weaving`（声画分离/配额）→ ⑤ 战斗段按档切 `xuanhuan-magic-combat`（R3玄幻）/ `action-previs-15grid`（武侠）→ ⑥ 出稿前过 `quality-gate-review` → ⑦ **出稿机检**跑 `scripts/validate_prompt.py <稿> --model agnes`（C1~C20 agnes 语义），FAIL 清零才交付。完整执行序列见 `references/★ prompt-feeding-checklist.md`。** |
-| **`/生成视频`** 或 **`出视频`** | **Agnes 直接执行**：投喂稿出稿机检通过后**直接调 agnes-media 出视频**（`media.py video`：keyframes 2~3 图 / img2vid / ti2vid；`--duration 3|5|10|18`；关键帧图按 `character-art-style.md` 画风基准出），产物落作品库（`FILE=`），见 `references/agnes-media-adapter.md`。 |
-| **`/生成角色图`** 或 **`出图`** | **Agnes 直接执行**：按 `character-art-style.md` 画风基准（三视图资产板布局＋外观锚）直接调 agnes-media 出图（`media.py image --ratio 9:16 --size 2K`），见 `references/agnes-media-adapter.md`。 |
+| **`/生成视频`** 或 **`出视频`** | **Agnes 直接执行**：投喂稿出稿机检通过后**直接调 agnes-media 出视频**（`media.py video`：keyframes 2~3 图 / img2vid / ti2vid；`--duration 3|5|10|18`；关键帧图按资产/参考图出），产物落作品库（`FILE=`），见 `references/agnes-media-adapter.md`。 |
+| **`/生成角色图`** 或 **`出图`** | **Agnes 直接执行**：按 `asset-spatial-ledger.md` §二 4 View 资产板布局直接调 agnes-media 出图（`media.py image --ratio 9:16 --size 2K`），见 `references/agnes-media-adapter.md`。 |
 | **`/导出工作流参数`** | 导出适用于 WorkBuddy / 豆包工作流 / Canvas / API 的结构化载荷（⚠️ 载荷内 `aspect_ratio` 回填用户指定画幅）。 |
 | **`跳过确认，直接出整集`** | **极速直出模式**：后台静默执行全套工业约束，前台直接输出无后台词污染的成品。 |
 | **`/看板`** 或 **`编译看板`** | 把项目 md 一键编译为**单文件离线分镜看板**（`scripts/build_board_lite.py`，双击即开；规范见 `references/storyboard-board-lite.md`）。 |
