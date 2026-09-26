@@ -17,6 +17,11 @@ if not _tok:
         pass
 if _tok:
     os.environ["AGENT_INTERNAL_TOKEN"] = _tok
+import os
+# 视频暂停门控：存在 video-pause.flag 时立即退出，不生成任何视频
+if os.path.exists("/home/mirror/Agnes-Agent/tools_deliver/video-pause.flag"):
+    print("[video] 已暂停（video-pause.flag 存在），本次退出")
+    sys.exit(0)
 sb_path = sys.argv[1]
 ep = sys.argv[2] if len(sys.argv) > 2 else "all"
 base = os.path.dirname(os.path.abspath(sb_path))

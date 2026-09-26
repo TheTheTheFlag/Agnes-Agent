@@ -23,3 +23,6 @@
 [09:40:49]   -> fix#1 [2026-09-26 09:40:20] FINAL status=done info=null
 [09:40:54]   validate exit=1
 [09:40:55]   sb_fix_auto exit=1 ->   ✗ 剧本节拍被恰好一次、按顺序、连续认领（分镜级）（E03 第 1 场第 47 拍被 E03-12#1 重复认领；E03 第 1 场第 47 拍被 E03-
+[09:49:55]   -> fix#2 [2026-09-26 09:49:54] FINAL status=done info=null
+[09:50:01]   validate exit=1
+[09:50:01]   sb_fix_auto exit=1 -> GATES 16/17 绿   ✗ 剧本节拍被恰好一次、按顺序、连续认领（分镜级）（E03 第 1 场第 46 拍被 E03-10#3 重复认领；E03 第 1 场�
