@@ -60,10 +60,25 @@ _COMPACT_SYS = (
 
 
 def _is_template_compacted(text: str) -> bool:
-    """校验摘要是否具备六小节模板骨架（防模型不遵循模板）。"""
+    """校验摘要是否以 ## Objective 开头且六小节骨架齐全（防模型不遵循模板）。"""
     heads = ["## Objective", "## Requirements", "## Decisions", "## Work State",
              "### Completed", "### Active", "### Blocked", "## Next Move", "## Relevant Files"]
+    if not text or not text.lstrip().startswith("## Objective"):
+        return False
     return all(h in text for h in heads)
+
+
+def _normalize_template(text: str) -> str:
+    """把混合输出收敛为模板段：找到第一个 ## Objective 起截取。
+
+    实测 deepseek-v4-pro 会把旧格式（要点回顾/要点总结）+ 新模板拼接输出；
+    六小节模板段信息质量足够（Completed/Next Move/Relevant Files 全在），
+    裁掉前面的旧格式舶来文本，保证落库的是纯模板。
+    """
+    idx = text.find("## Objective")
+    if idx > 0:
+        return text[idx:]
+    return text
 
 
 def _keep_recent() -> int:
@@ -139,16 +154,22 @@ def compact_in_background(thread_id: str, messages: List, llm, db_path: str, use
 
             resp = _invoke()
             summary = (getattr(resp, "content", "") or "").strip()
-            # 防御：模型可能不遵循模板（如 deepseek-v4-pro 指令遵循弱），
-            # 校验六小节骨架，缺失则重试一次；仍失败则用本次输出（保证不丢信息）。
+            # 防御：模型可能不遵循模板（如 deepseek-v4-pro 指令遵循弱）——
+            # ① 非纯模板（不以 ## Objective 开头）但含模板段 → 裁剪到模板段；
+            # ② 完全无模板段 → 重试一次；仍失败 → 保底本次输出（不丢信息）。
             if summary and not _is_template_compacted(summary):
-                try:
-                    resp2 = _invoke()
-                    s2 = (getattr(resp2, "content", "") or "").strip()
-                    if s2 and _is_template_compacted(s2):
-                        summary = s2
-                except Exception:
-                    pass
+                if "## Objective" in summary:
+                    summary = _normalize_template(summary)
+                else:
+                    try:
+                        resp2 = _invoke()
+                        s2 = (getattr(resp2, "content", "") or "").strip()
+                        if s2 and _is_template_compacted(s2):
+                            summary = s2
+                        elif s2 and "## Objective" in s2:
+                            summary = _normalize_template(s2)
+                    except Exception:
+                        pass
             if summary:
                 # 不再传 llm：避免内部再调一次 LLM 给摘要打分（旧实现的第 3 次调用）
                 mm = MemoryManager(db_path=db_path, thread_id=thread_id)
