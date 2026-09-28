@@ -30,11 +30,13 @@ _INFLIGHT = set()
 
 _COMPACT_SYS = (
     "你是对话记忆压缩器。把【较早的对话】压缩成一份结构化里程碑摘要，供后续轮次继续使用。\n"
-    "严格输出以下五个 markdown 小节（标题保持英文，正文用中文）：\n"
+    "严格输出以下六个 markdown 小节（标题保持英文，正文用中文），顺序与标题必须完全一致：\n"
     "## Objective\n"
     "- 本轮会话当前要达成的目标（一句话）\n"
-    "## Important Details\n"
-    "- 必须记住的关键约束、决策与事实（含用户明确表态的方向/取舍）\n"
+    "## Requirements\n"
+    "- 必须遵守的硬性要求与约束（含用户提出的明确限制与不可逾越的前提）\n"
+    "## Decisions\n"
+    "- 已确定的关键决策与取舍（含用户明确表态的方向/选项）\n"
     "## Work State\n"
     "### Completed\n"
     "- 已完成的事（带简要结果或证据）\n"
@@ -50,7 +52,7 @@ _COMPACT_SYS = (
     "- 逐字保留关键标识：文件路径、命令名、变量名、数字、报错信息，不要泛化\n"
     "- 丢弃寒暄、重复表述与过程性描述\n"
     "- 用中文，总计不超过 600 字\n"
-    "- 只输出摘要本身，不要任何额外说明或前后缀\n"
+    "- 只输出摘要本身，不要任何额外说明或前后缀，六个小节一个都不能少\n"
 )
 
 
@@ -97,7 +99,8 @@ def _messages_to_text(messages) -> str:
 def compact_in_background(thread_id: str, messages: List, llm, db_path: str, user: str = None) -> bool:
     """按需在**后台线程**压缩历史。返回是否已启动（False = 不需要/已在压缩）。
 
-    只写 DB（history_summaries 表），**不改 LangGraph state**——
+    写入 DB（history_summaries 摘要表 + messages 里一条「📦 历史已压缩」系统气泡），
+    **不改 LangGraph state**——
     下一轮 chatbot 通过 `mm.build_context()` / `build_memory_injection` 自然读到新摘要。
     """
     if not should_compact(messages):
@@ -126,6 +129,17 @@ def compact_in_background(thread_id: str, messages: List, llm, db_path: str, use
                 # 不再传 llm：避免内部再调一次 LLM 给摘要打分（旧实现的第 3 次调用）
                 mm = MemoryManager(db_path=db_path, thread_id=thread_id)
                 mm.save_history_summary_scored(thread_id, summary, importance_score=6.0)
+                # 系统气泡：压缩在聊天界面可见（2026-09-28 用户指定 A 方案）。
+                # 写 memory.db messages（role=assistant/kind=chat → /api/messages 渲染为气泡），
+                # 不碰 checkpoint（不影响 LLM 上下文）。文案带时间戳避开 add_message 60s 去重。
+                try:
+                    from datetime import datetime as _dt
+                    _ts = _dt.now().strftime("%H:%M:%S")
+                    mm.add_message(thread_id, "assistant",
+                                   f"📦 历史已压缩（{_ts}）：较早的对话已转为摘要，"
+                                   "最近 30 条保留原文，后续轮次将基于摘要继续。")
+                except Exception:
+                    pass
         except Exception as e:
             try:
                 from app.server import add_log_entry
