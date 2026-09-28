@@ -46,6 +46,27 @@ python3 /home/mirror/Agnes-Agent/app/skills_builtin/agnes-media/media.py video \
 - 超时默认 300s；超时后 **禁止重建任务**，用 `fetch --task-id <TASK_ID>` 续查（后端 6h 内自动重试）。
 - stdout：`TASK_ID=` / `VIDEO_ID=` → 轮询 → `FILE=`（作品库 mp4）、`URL=`。
 
+## 2.1 长任务与防重复（2026-09-28 事故复盘新增 · 铁律）
+
+事故背景：模型以前台方式跑批量脚本（timeout=900），工具超时只杀 shell、脚本孤儿续跑；
+模型误判"任务已死"另写脚本补段，导致同一段重复生成、作品库堆积重复 take。
+
+1. **禁止手写 HTTP 直调生成端点**：出图/出视频只能经 `media.py`。
+   手写 curl/python 直调 `/api/video/generate` 有两个坑：① 该端点响应为
+   `{"ok": true, "count": 1, "items": [item]}`，**顶层没有 `task_id`**（现已兼容补发，
+   但轮询仍应取 `items[0].video_id`）；② 中文 prompt 经 Git Bash 内联参数会乱码。
+   `media.py` 已内置正确的提交+轮询+入库逻辑，直接用。
+2. **长任务必须后台化**：预估耗时 >100s 的脚本（批量出图/出视频）一律
+   `nohup python3 脚本.py > 脚本.log 2>&1 &` 立即返回，再用 `read_file` 轮询日志看进度；
+   **禁止前台 sleep 等待**。若前台命令超时，返回 `killed=True` 且整条进程组已被终止
+   （execute_command 已修复），此时脚本**真的死了**——先读日志判断已完成的部分，
+   再**只补缺段**，不要整批重跑。
+3. **生成前先重读台账**：任何生成动作（出图/出视频）执行前，先读
+   `data/users/Mirror/data/video_library/manifest.json`（图片为 `image_library/manifest.json`），
+   确认目标段/seed 是否已有 `status=completed` 的产物；有则跳过，防重复 take。
+4. **重复判定口径**：以 manifest 条目 `seed` + 段号/用途 为准；同一 seed 多条 completed
+   即重复 take（保留最新一条，旧 take 移入 `_old/`）。
+
 ## 3. 对 E 法则的覆盖（用户已确认）
 
 - 原「E · 默认只出提示词，不直接出图」在本部署 **被覆盖**：**默认直接调用 agnes-media 执行出图、出视频**。

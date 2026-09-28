@@ -175,6 +175,9 @@ skills/short-drama-director/
 - **出视频**：默认 `agnes-video-v2.0`；三模式 img2vid（单图）/ keyframes（2~3 图，关键帧动画）/ ti2vid（纯文本）；`--duration 3|5|10|18`；
 - **投喂正文**：一律 agnes 纯文本（无官方字符、无 H3 字段）；
 - **产物落点**：唯一作品库（`data/users/<user>/data/{image|video}_library`，stdout `FILE=`），**不产生 output 重复副本**（已规避 `_sync_skill_outputs` 二次登记）；
+- **长任务后台化（2026-09-28 铁律）**：批量出图/出视频脚本一律 `nohup python3 脚本.py > 脚本.log 2>&1 &` 立即返回，再用 `read_file` 轮询日志；**禁止前台 sleep 等待**。前台命令超时 = 整条进程组已被强制终止（`killed=True`），先读日志确认已完成部分，**只补缺段、禁止整批重跑**；
+- **防重复生成**：任何生成动作前先重读 `data/users/<user>/data/{image|video}_library/manifest.json`，目标段/seed 已有 `status=completed` 则跳过；重复 take 判定 = 同 seed + 同用途多条 completed；
+- **禁止手写 HTTP 直调**：出图/出视频只走 `media.py`（手写脚本直调 `/api/video/generate` 会因响应顶层无 `task_id` 取到 `None` 而死循环轮询 404，且中文 prompt 经 Git Bash 内联参数会乱码）；
 - **红线**：禁现实真人照片素材（画风写实不禁，见〇节 H）。
 
 ---
@@ -234,7 +237,7 @@ skills/short-drama-director/
 | **`/微表情`** 或 **`/表情诊断`** | 启动 FACS 微表情引擎：空泛情绪词 → AU 配方替换（四区拆解+强度三档+时序+英文 kernel）；可产出角色情绪库 / FACS cue 表，或按自检清单做表情审查。 |
 | **`/语速自检`** 或 **`台词语速检查`** | 启动 dialogue-speed-check 语速自检：拆句 $\rightarrow$ 计数 $\rightarrow$ 套档 $\rightarrow$ 判定。 |
 | **`/生成视频提示词`** | 输出 agnes 纯文本投喂稿（七段式写作骨架见 `model-adapters.md` §5 方法论，封装与体例一律按 ★ `agnes-media-adapter.md` §3/§4）。（⚠️ 画幅必须以用户指定 16:9 或 9:16 为准，禁止默认回落竖屏）。**投喂前必过清单（按序）：① `agnes-media-adapter.md` §2（时长档位 3/5/10/18 由内容倒推 + `--ratio` 画幅回填）→ ② `aspect-ratio-adaptation`（画幅全流程）→ ③ `camera-specs-15rules`（镜头五要素+景别阶梯）→ ④ 有对白必过 `dialogue-speed-check`（语速自检）+ `wenxi-micro-expression`（金句发酵）+ `model-adapters.md` §5.2 方法论（**语气位必写**）；有 OS/VO 必过 `vo-os-weaving`（声画分离/配额）→ ⑤ 战斗段按档切 `xuanhuan-magic-combat`（R3玄幻）/ `action-previs-15grid`（武侠）→ ⑥ 出稿前过 `quality-gate-review` → ⑦ **出稿机检**跑 `scripts/validate_prompt.py <稿> --model agnes`（C1~C20 agnes 语义），FAIL 清零才交付。完整执行序列见 `references/★ prompt-feeding-checklist.md`。** |
-| **`/生成视频`** 或 **`出视频`** | **Agnes 直接执行**：投喂稿出稿机检通过后**直接调 agnes-media 出视频**（`media.py video`：keyframes 2~3 图 / img2vid / ti2vid；`--duration 3|5|10|18`；关键帧图按资产/参考图出），产物落作品库（`FILE=`），见 `references/agnes-media-adapter.md`。 |
+| **`/生成视频`** 或 **`出视频`** | **Agnes 直接执行**：投喂稿出稿机检通过后**直接调 agnes-media 出视频**（`media.py video`：keyframes 2~3 图 / img2vid / ti2vid；`--duration 3|5|10|18`；关键帧图按资产/参考图出），产物落作品库（`FILE=`），见 `references/agnes-media-adapter.md`。**批量多段一律后台化**（`nohup … > 日志 &` + 轮询日志，前台账本见 §二.2）；生成前先重读 manifest 防重复；超时≠失败，用 `fetch --task-id` 续查、禁止重建任务。 |
 | **`/生成角色图`** 或 **`出图`** | **Agnes 直接执行**：按 `asset-spatial-ledger.md` §二 4 View 资产板布局直接调 agnes-media 出图（`media.py image --ratio 9:16 --size 2K`），见 `references/agnes-media-adapter.md`。 |
 | **`/导出工作流参数`** | 导出适用于 WorkBuddy / 豆包工作流 / Canvas / API 的结构化载荷（⚠️ 载荷内 `aspect_ratio` 回填用户指定画幅）。 |
 | **`跳过确认，直接出整集`** | **极速直出模式**：后台静默执行全套工业约束，前台直接输出无后台词污染的成品。 |

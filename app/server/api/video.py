@@ -692,7 +692,7 @@ def generate(payload: dict, request: Request):
 
     username = getattr(getattr(request, "state", None), "username", None) or current_user()
     item = _persist_new(model, mode, prompt, upstream_payload, key_idx, created, username, bparams=p)
-    return {"ok": True, "count": 1, "items": [item]}
+    return {"ok": True, "count": 1, "task_id": item.get("task_id") or item.get("id"), "items": [item]}
 
 
 @router.get("/task/{item_id}")

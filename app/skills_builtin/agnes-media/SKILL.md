@@ -33,6 +33,9 @@ config:
 > **与页面完全相同的端点**（`/api/image/generate + task`、`/api/video/generate + task`），
 > 提交 → 自动重试直到成功 → 产物直接入库当前用户作品库 → 追加日志。
 > **禁止**再手写 `generate_*.py`、内联 curl、或复制固定生成脚本。
+> 原因（2026-09-28 事故）：手写脚本直调 `/api/video/generate` 时，响应顶层无 `task_id`
+> （结构为 `{"ok", "count", "items":[...]}`），取成 `None` 会死循环轮询 404；
+> 且批量脚本前台等待超时后易被误判"已死"而重复生成。`media.py` 已内置正确提交+轮询+入库。
 > 调用参数（prompt / 模型 / 尺寸 / 参考图 / 时长 / seed 等）由你根据用户需求与下文参数表实时构造。
 
 ## 使用前确认
@@ -143,6 +146,16 @@ stdout 的 `FILE=` 复制到交付目录 `<段号>/<段号>.mp4`。逐段执行�
 4. `num_frames` 上限 441 且必须 8n+1（`media.py` 已校验）；`--steps` 后端不支持会被忽略。
 5. 生成失败由后端自动重试（图片 6h 内重试；视频自动重建任务 ≤30 次）；轮询超时用 `fetch` 续查，不要重复创建任务。
 6. 产物在作品库、页面可见；回话附上 `FILE=` 本地路径（可展示），不要把整段 base64 贴进对话。
+7. **长任务必须后台化**（2026-09-28 事故复盘）：批量出图/出视频脚本用
+   `nohup python3 脚本.py > 脚本.log 2>&1 &` 立即返回，再用 `read_file` 轮询 `脚本.log`；
+   **禁止前台 sleep 等待**。前台命令超时时整条进程组会被强制终止（`killed=True`），
+   脚本是真的死了——先读日志确认已完成部分，**只补缺段**，禁止整批重跑。
+8. **生成前重读台账防重复**：执行任何出图/出视频前，先读
+   `data/users/<用户>/data/{image,video}_library/manifest.json`，检查目标段/seed 是否已有
+   `status=completed` 的产物；有则跳过。重复 take 判定：同 seed + 同用途多条 completed。
+9. **超时 ≠ 失败 / 禁止手写 HTTP 直调**：出图出视频只能经 `media.py`（手写 curl/python 直调
+   `/api/video/generate` 会因响应结构取不到 task_id 而轮询 None 死循环，且中文 prompt 经
+   Git Bash 内联参数会乱码）。`media.py` 轮询超时用 `fetch --task-id` 续查，不要重建任务。
 
 ## 参考素材
 

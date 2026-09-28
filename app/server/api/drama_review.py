@@ -19,6 +19,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import threading
 import time
@@ -72,6 +73,50 @@ def _render_env():
     env = _token_env()
     env["KEEP_AUDIO"] = "1"
     return env
+
+
+def _kill_process_tree(proc: subprocess.Popen) -> None:
+    """终止以 proc 为组长的整条进程组：SIGTERM → 最多等 3s → SIGKILL。"""
+    try:
+        pgid = os.getpgid(proc.pid)
+    except (ProcessLookupError, OSError):
+        pgid = None
+    for sig, wait_after in ((signal.SIGTERM, 3), (signal.SIGKILL, 2)):
+        if pgid is not None:
+            try:
+                os.killpg(pgid, sig)
+            except (ProcessLookupError, OSError):
+                break
+        else:
+            try:
+                proc.send_signal(sig)
+            except (ProcessLookupError, OSError):
+                break
+        try:
+            proc.wait(timeout=wait_after)
+            break
+        except subprocess.TimeoutExpired:
+            continue
+
+
+def _run_proc(cmd, timeout: int, env):
+    """subprocess.run 的进程组版：超时先杀整条进程组再抛 TimeoutExpired。
+
+    subprocess.run 超时只杀直接子进程，渲染脚本（gen_kzqs_videos.py）派生的
+    media.py 孙进程会变孤儿继续跑，重试即产生重复 take。
+    """
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, env=env, start_new_session=True)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_process_tree(proc)
+        try:
+            proc.communicate(timeout=5)
+        except Exception:
+            pass
+        raise
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
 
 
 # ==================== 任务登记（前端轮询） ====================
@@ -185,7 +230,7 @@ def assets_regenerate(payload: dict, request: Request):
             if ref and os.path.isfile(ref):
                 cmd += ["--ref", ref]
             _touch(tid, line=f"[{_now()}] media.py image 启动")
-            pr = subprocess.run(cmd, capture_output=True, text=True, timeout=7200, env=_token_env())
+            pr = _run_proc(cmd, 7200, _token_env())
             out = (pr.stdout or "") + (pr.stderr or "")
             fm = re.search(r"FILE=(\S+)", out)
             if pr.returncode == 0 and fm and os.path.isfile(fm.group(1).strip()):
@@ -361,7 +406,7 @@ def segments_render(payload: dict, request: Request):
         _touch(tid, line=f"[{_now()}] 提示词头: {seg_item['prompt'][:60]}…")
         cmd = ["python3", GENERATOR, mpath, seg]
         try:
-            pr = subprocess.run(cmd, capture_output=True, text=True, timeout=7200, env=_render_env())
+            pr = _run_proc(cmd, 7200, _render_env())
         except subprocess.TimeoutExpired:
             _touch(tid, "failed", line=f"[{_now()}] 渲染超时(2h)")
             return
@@ -423,7 +468,7 @@ def segments_cascade(payload: dict, request: Request):
             args = ["python3", GENERATOR, mpath] + (["--from", start_seg] if ep == start_seg[:3] else [])
             _touch(tid, line=f"[{_now()}] {ep}: 启动 {args[-1] if args[-1] != mpath else '全段'}")
             try:
-                pr = subprocess.run(args, capture_output=True, text=True, timeout=10800, env=_render_env())
+                pr = _run_proc(args, 10800, _render_env())
             except subprocess.TimeoutExpired:
                 _touch(tid, line=f"[{_now()}] {ep}: 超时(3h)")
                 failed += ep_segs
@@ -509,7 +554,7 @@ def keyframes_regenerate(payload: dict, request: Request):
             cmd += ["--ref", r]
         _touch(tid, line=f"[{_now()}] media.py image 启动 refs={[os.path.basename(r) for r in refs]}")
         try:
-            pr = subprocess.run(cmd, capture_output=True, text=True, timeout=1800, env=_token_env())
+            pr = _run_proc(cmd, 1800, _token_env())
         except subprocess.TimeoutExpired:
             _touch(tid, "failed", line=f"[{_now()}] 出图超时(30min)")
             return
