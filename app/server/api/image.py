@@ -164,6 +164,26 @@ _SKILL_OUTPUT_DIRS = (
 _IMG_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
 
 
+def _load_deleted_sources(username: str) -> set:
+    """载入该用户已删除源文件的墓碑指纹，防止 _sync_skill_outputs 重新导入。"""
+    fp = os.path.join(str(user_subdir("data_dir")), "deleted_sources_image.json")
+    try:
+        with open(fp, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        return {tuple(x) for x in raw if isinstance(x, list) and len(x) == 3}
+    except Exception:
+        return set()
+
+
+def _save_deleted_sources(username: str, dead: set) -> None:
+    fp = os.path.join(str(user_subdir("data_dir")), "deleted_sources_image.json")
+    try:
+        with open(fp, "w", encoding="utf-8") as f:
+            json.dump([list(x) for x in dead if len(x) == 3], f, ensure_ascii=False)
+    except Exception:
+        pass
+
+
 def _sync_skill_outputs(username: str) -> int:
     """把 agnes-media 技能产出的图片同步进当前用户作品库，返回新增数量。"""
     import shutil
@@ -179,6 +199,7 @@ def _sync_skill_outputs(username: str) -> int:
                     it.get("src_mtime") or 0)
 
         known = {_src_key(it) for it in items}
+        dead = _load_deleted_sources(username)
         for root in _SKILL_OUTPUT_DIRS:
             if not os.path.isdir(root):
                 continue
@@ -193,6 +214,8 @@ def _sync_skill_outputs(username: str) -> int:
                     except Exception:
                         continue
                     if (fn, sz, src_mtime) in known:
+                        continue
+                    if (fn, sz, src_mtime) in dead:
                         continue
                     item_id = uuid.uuid4().hex[:12]
                     ext = os.path.splitext(fn)[1].lower() or ".png"
@@ -566,7 +589,7 @@ async def file(item_id: str, thumb: int = 0, request: Request = None):
 
 @router.post("/delete")
 async def delete(payload: dict, request: Request):
-    """删除作品，仅允许删除自己创建的作品"""
+    """删除作品：移除 manifest 记录 + 物理删除作品库副本 + 登记源文件墓碑（防止 skills 同步复活）"""
     username = getattr(getattr(request, "state", None), "username", None) or current_user()
     ids = set(str(x) for x in ((payload or {}).get("ids") or []) if str(x).strip())
     if not ids:
@@ -574,7 +597,28 @@ async def delete(payload: dict, request: Request):
     with _user_items_lock(username):
         items = _get_user_items(username)
         before = len(items)
+        removed = [it for it in items if it.get("id") in ids]
         items[:] = [it for it in items if it.get("id") not in ids]
         deleted = before - len(items)
+    if removed:
+        dead = _load_deleted_sources(username)
+        changed = False
+        for it in removed:
+            src_name = it.get("src_name") or os.path.basename(it.get("file") or "")
+            if src_name:
+                dead.add((src_name, int(it.get("size_bytes") or 0), int(it.get("src_mtime") or 0)))
+                changed = True
+            # 物理删除作品库副本（源文件保留，但被墓碑挡住不再同步）
+            for f in (it.get("file"), it.get("thumb")):
+                if not f:
+                    continue
+                try:
+                    fp = os.path.join(str(_LIB), os.path.basename(f))
+                    if os.path.isfile(fp):
+                        os.remove(fp)
+                except Exception:
+                    pass
+        if changed:
+            _save_deleted_sources(username, dead)
     _save_user_manifest(username)
     return {"ok": True, "deleted": deleted}

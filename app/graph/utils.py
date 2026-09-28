@@ -210,6 +210,15 @@ def trim_history_by_turns(messages, max_tokens, keep_recent=KEEP_RECENT):
 
 _TRUNCAT_OVER_NOTE = "\n...[内容过大，已截断；如需完整内容，请用 read_file 的 offset/limit 分页读取或改用针对性工具]"
 
+# 工具结果清理（2026-09-28 新增，对齐业界 tool result clearing / context editing）：
+# 早于最近 KEEP_RECENT 条且体积超过该阈值的 ToolMessage 原文，替换为短占位。
+# 覆盖发送给 LLM 的两条路径（prepare_context_messages / ensure_token_limit）。
+_CLEAR_TOOL_RESULT_MIN_CHARS = 800
+_CLEAR_TOOL_RESULT_PLACEHOLDER = (
+    "…[工具结果已清理：该结果体积较大且已完成使命，为控制上下文体量不再保留原文；"
+    "如需原始内容可重新调用同名工具获取]"
+)
+
 
 def truncate_oversized_messages(messages: List, max_tokens: int, min_keep_chars: int = 4000) -> List:
     """兜底：整块回合裁剪仍超预算时，从最大的单条文本消息开始减半并加截断标记，
@@ -233,6 +242,43 @@ def truncate_oversized_messages(messages: List, max_tokens: int, min_keep_chars:
         target.content = target.content[:keep] + _TRUNCAT_OVER_NOTE
         messages[pick_i] = target
     return sanitize_messages(messages)
+
+
+def clear_stale_tool_results(messages, keep_recent=None) -> List:
+    """工具结果清理（2026-09-28 新增，对齐业界 tool result clearing / context editing）：
+
+    把『早于最近 keep_recent 条 + 体积超过阈值』的 ToolMessage 原文替换为短占位，
+    只保留调用记录（tool_call_id / name 不动）。工具结果可重取（只读工具再次调用即得），
+    已完成使命的旧结果无需再携带原文——每轮 input 更小、模型上下文更干净
+    （本部署模型上下文过长容易乱来，需积极瘦身）。
+
+    规则：
+      - 最近 keep_recent 条内的 tool 结果**永远保留原文**（刚产生，当前/下一轮可能引用）；
+      - 较早回合且 content 为 str 且 len > _CLEAR_TOOL_RESULT_MIN_CHARS 才替换；
+      - 深拷贝再改，绝不污染会话历史里的原始 state 消息；
+      - 不拆散 assistant↔ToolMessage 配对（tool_call_id 保留，sanitize 仍能配对）。
+    """
+    if not messages:
+        return messages
+    keep = keep_recent if keep_recent is not None else KEEP_RECENT
+    out = []
+    cut = max(len(messages) - keep, 0)  # 位置 < cut 的为"较早"段
+    for i, m in enumerate(messages):
+        if not _is_tool_message(m) or i >= cut:
+            # 非工具消息、或处于"最近"段（可能被当前/下一轮引用）→ 原样保留
+            out.append(m)
+            continue
+        c = getattr(m, "content", "")
+        if not isinstance(c, str) or len(c) <= _CLEAR_TOOL_RESULT_MIN_CHARS:
+            out.append(m)
+            continue
+        new = copy.deepcopy(m)
+        tname = getattr(new, "name", "") or ""
+        new.content = _CLEAR_TOOL_RESULT_PLACEHOLDER
+        if tname:
+            new.content = f"[工具 `{tname}`]" + new.content
+        out.append(new)
+    return out
 
 
 def build_recent_work_summary(messages, max_items=8):
@@ -395,8 +441,9 @@ def apply_reply_guard(history, content):
 
 def prepare_context_messages(messages, system_text, keep_recent=KEEP_RECENT):
     """组装发给 LLM 的上下文（业界组合拳）：
-    退化文案清理 → 结构清洗 → 按完整回合裁剪到 token 预算 → 前置 system。"""
+    退化文案清理 → 结构清洗 → 过期大工具结果清理 → 按完整回合裁剪到 token 预算 → 前置 system。"""
     cleaned = sanitize_messages(strip_degenerate_replies(messages))
+    cleaned = clear_stale_tool_results(cleaned, keep_recent=keep_recent)
     system_tokens = count_tokens([SystemMessage(content=system_text)])
     max_other = max(TOKEN_LIMIT - system_tokens, 1)
     history = trim_history_by_turns(cleaned, max_other, keep_recent=keep_recent)
@@ -455,6 +502,7 @@ def ensure_token_limit(messages: List, system_text: str, thread_id: str = None) 
     现改为：预算不足时先结构清洗、再按完整回合从最早历史裁剪（摘要压缩不再参与每轮
     同步路径；如需摘要由 MemoryManager.update_summary 单独负责）。
     """
+    messages = clear_stale_tool_results(messages)
     system_msg = SystemMessage(content=system_text)
     system_tokens = count_tokens([system_msg])
     max_other_tokens = max(TOKEN_LIMIT - system_tokens, 1)

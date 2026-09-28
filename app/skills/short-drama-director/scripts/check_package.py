@@ -38,7 +38,7 @@ def check(name, cond, detail=""):
 skill = read("SKILL.md")
 check("SKILL.md frontmatter name", "name: short-drama-director" in skill)
 refs = [f for f in os.listdir(os.path.join(BASE, "references")) if f.endswith(".md")]
-check("references 规则库完整（43 份）", len(refs) == 43, f"实际 {len(refs)} 份")
+check("references 规则库完整（44 份）", len(refs) == 44, f"实际 {len(refs)} 份")
 
 # ---------- ① 可灵残留 ----------
 KLING_OK = re.compile(r"LEGACY|不再|已移除|历史|移除可灵|去可灵")
@@ -356,8 +356,8 @@ check("⑱ SKILL 架构树挂线 h3-adapter（历史兼容标注）",
       "h3-adapter.md" in skill and "历史兼容" in skill and "ags 单通道" in skill.replace("agnes 单通道", "ags 单通道"))
 check("⑱ model-adapters 含 §二 H3 特性行与 §三 第 8 条（历史档案）",
       "MiniMax H3**（格式支线）" in ma and "A 锁选 MiniMax H3 时另加" in ma)
-check("⑱ README 含 agnes 单通道与 43 份规则库",
-      "agnes-media-adapter" in readme and "43 个专业规则库" in readme)
+check("⑱ README 含 agnes 单通道与 44 份规则库",
+      "agnes-media-adapter" in readme and "44 个专业规则库" in readme)
 if os.path.exists(vp):
     check("⑱ validate_prompt 含 H 系列门（H1~H12）",
           "H1 Ref2VA 缺段" in vp_src and "H8 七段式栏名泄漏" in vp_src and "H12" in vp_src)

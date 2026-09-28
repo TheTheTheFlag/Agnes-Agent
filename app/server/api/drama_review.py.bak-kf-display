@@ -1,0 +1,453 @@
+"""app.server.api.drama_review — 短剧审核台 API。
+
+在 8081 创作工作台「短剧审核」tab 上提供：
+  · 资产审核：列出 assets/manifest.json 的角色/场景/道具（提示词 + 出图），
+    可改提示词重新生成（media.py image --ref 锁形象），产物回写 manifest。
+  · 分镜审核：逐集解析投喂稿，列出每段分镜提示词与已产出视频；
+    可「直接重渲」或「修改提示词后重渲」单段（gen_kzqs_videos.py 单段跑），
+    确认后合并成完整视频（ffmpeg concat，整集 + 连播）。
+
+渲染链路约定（2026-09-27 升级）：
+  段视频生成后由 gen_kzqs_videos.py 统一去掉模型自带音轨（-an）；
+  配音在完成后由本地 Qwen3-TTS（local-tts-dubbing skill）按 SRT 生成并混入，
+  不再依赖模型原生配音（根治个别段落被模型说成英文的问题）。
+"""
+import json
+import os
+import re
+import shutil
+import subprocess
+import threading
+import time
+import uuid
+
+from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
+
+from app.userctx import current_user
+
+router = APIRouter(prefix="/api/drama-review", tags=["drama-review"])
+
+MEDIA = "/home/mirror/Agnes-Agent/app/skills_builtin/agnes-media/media.py"
+GENERATOR = "/home/mirror/Agnes-Agent/tools_deliver/gen_kzqs_videos.py"
+TOKEN_PATH = "/home/mirror/Agnes-Agent/data/internal_token"
+
+_TASKS = {}
+_TASKS_LOCK = threading.RLock()
+
+
+def _username(request) -> str:
+    return getattr(getattr(request, "state", None), "username", None) or current_user() or "Mirror"
+
+
+def _deliv_root() -> str:
+    from app.config import DELIVERABLES_DIR
+    return str(DELIVERABLES_DIR)
+
+
+def _proj_dir(name: str) -> str:
+    root = _deliv_root()
+    base = os.path.normpath(os.path.join(root, "短剧", name))
+    if not base.startswith(root):
+        raise ValueError("非法路径")
+    return base
+
+
+def _token_env():
+    env = dict(os.environ)
+    try:
+        tok = open(TOKEN_PATH, encoding="utf-8").read().strip()
+        if tok:
+            env["AGENT_INTERNAL_TOKEN"] = tok
+    except Exception:
+        pass
+    return env
+
+
+# ==================== 任务登记（前端轮询） ====================
+def _new_task(kind: str, meta: dict) -> str:
+    tid = uuid.uuid4().hex[:12]
+    with _TASKS_LOCK:
+        _TASKS[tid] = {"id": tid, "kind": kind, "meta": meta, "status": "queued",
+                       "log": [], "created": time.time(), "updated": time.time()}
+    return tid
+
+
+def _touch(tid: str, status=None, line=None):
+    with _TASKS_LOCK:
+        t = _TASKS.get(tid)
+        if not t:
+            return
+        if line:
+            t["log"].append(line)
+        if status:
+            t["status"] = status
+        t["updated"] = time.time()
+
+
+def _prune_tasks(max_keep: int = 80):
+    with _TASKS_LOCK:
+        if len(_TASKS) <= max_keep * 2:
+            return
+        for k in sorted(_TASKS, key=lambda x: _TASKS[x]["updated"], reverse=True)[max_keep:]:
+            _TASKS.pop(k, None)
+
+
+def _now() -> str:
+    return time.strftime("%H:%M:%S")
+
+
+# ==================== 项目 / 资产 ====================
+@router.get("/projects")
+async def list_projects(request: Request):
+    root = os.path.join(_deliv_root(), "短剧")
+    out = []
+    if os.path.isdir(root):
+        for n in sorted(os.listdir(root)):
+            p = os.path.join(root, n)
+            if not os.path.isdir(p) or n.startswith("."):
+                continue
+            has_assets = os.path.isfile(os.path.join(p, "assets", "manifest.json"))
+            eps = []
+            feed = os.path.join(p, "投喂稿")
+            if os.path.isdir(feed):
+                eps = sorted(d for d in os.listdir(feed)
+                             if os.path.isfile(os.path.join(feed, d, f"投喂稿-{d}.md")))
+            out.append({"name": n, "has_assets": has_assets, "episodes": eps})
+    return {"projects": out}
+
+
+@router.get("/assets")
+async def list_assets(name: str = "", request: Request = None):
+    pdir = _proj_dir(name)
+    mp = os.path.join(pdir, "assets", "manifest.json")
+    if not os.path.isfile(mp):
+        return {"assets": [], "name": name}
+    data = json.load(open(mp, encoding="utf-8"))
+    root = _deliv_root()
+    out = []
+    for it in data or []:
+        abs_path = it.get("path", "")
+        rel = ""
+        if abs_path and abs_path.startswith(root):
+            rel = os.path.relpath(abs_path, root).replace("\\", "/")
+        out.append({
+            "id": it.get("id"), "type": it.get("type"), "slug": it.get("slug"),
+            "prompt": it.get("prompt", ""), "ratio": it.get("ratio", "16:9"),
+            "status": it.get("status", ""), "path": rel,
+            "file": os.path.basename(abs_path) if abs_path else "",
+            "md5": it.get("md5", ""),
+        })
+    return {"assets": out, "name": name}
+
+
+@router.post("/assets/regenerate")
+def assets_regenerate(payload: dict, request: Request):
+    name = str((payload or {}).get("name") or "")
+    aid = str((payload or {}).get("id") or "")
+    prompt = str((payload or {}).get("prompt") or "").strip()
+    if not name or not aid or not prompt:
+        return JSONResponse({"error": "name/id/prompt 必填"}, status_code=400)
+    pdir = _proj_dir(name)
+    mp = os.path.join(pdir, "assets", "manifest.json")
+    data = []
+    if os.path.isfile(mp):
+        data = json.load(open(mp, encoding="utf-8"))
+    it = next((x for x in data if x.get("id") == aid), None)
+    if it is None:
+        return JSONResponse({"error": f"资产 {aid} 不存在"}, status_code=404)
+
+    tid = _new_task("asset", {"name": name, "id": aid})
+    _prune_tasks()
+
+    def _run():
+        _touch(tid, "running", line=f"[{_now()}] 资产 {aid} 重新生成…")
+        try:
+            it["prompt"] = prompt
+            it["status"] = "regenerating"
+            with open(mp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+
+            cmd = ["python3", MEDIA, "image", "--prompt", prompt,
+                   "--ratio", it.get("ratio") or "16:9", "--size", "2K",
+                   "--timeout", "3600"]
+            ref = it.get("path", "")
+            if ref and os.path.isfile(ref):
+                cmd += ["--ref", ref]
+            _touch(tid, line=f"[{_now()}] media.py image 启动")
+            pr = subprocess.run(cmd, capture_output=True, text=True, timeout=7200, env=_token_env())
+            out = (pr.stdout or "") + (pr.stderr or "")
+            fm = re.search(r"FILE=(\S+)", out)
+            if pr.returncode == 0 and fm and os.path.isfile(fm.group(1).strip()):
+                src = fm.group(1).strip()
+                if ref and os.path.isfile(ref):
+                    dst = ref
+                else:
+                    ext = os.path.splitext(src)[1] or ".png"
+                    slug = it.get("slug") or aid
+                    dst = os.path.join(pdir, "assets", f"{aid}-{slug}{ext}")
+                shutil.copy(src, dst)
+                it["path"] = dst
+                it["status"] = "completed"
+                it["size_kb"] = int(os.path.getsize(dst) // 1024)
+                with open(mp, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                _touch(tid, "done", line=f"[{_now()}] OK -> {dst}")
+            else:
+                tail = out[-500:]
+                _touch(tid, "failed", line=f"[{_now()}] 生成失败: {tail}")
+        except Exception as e:
+            _touch(tid, "failed", line=f"[{_now()}] 异常: {e}")
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"ok": True, "task_id": tid, "asset_id": aid}
+
+
+# ==================== 分镜（解析投喂稿 → manifest 同源 prompt） ====================
+def _extract_field(body: str, name: str) -> str:
+    m = re.search(r"【%s】([^\n]*(?:\n[^\n]*)*?)(?=\n【|\n##|\Z)" % re.escape(name), body)
+    return m.group(1).strip() if m else ""
+
+
+def _build_seg_prompt(body: str) -> str:
+    style = _extract_field(body, "画幅风格")
+    staging = _extract_field(body, "站位声明")
+    timeline = _extract_field(body, "时间轴分镜")
+    sfx = _extract_field(body, "音效")
+
+    tl_clean = re.sub(r"\[镜头\d+\]\s*", "", timeline)
+    tl_clean = re.sub(r"\n", " ", tl_clean).strip()
+    staging_clean = re.sub(r"\n", " ", staging).strip()
+
+    parts = []
+    if style:
+        parts.append(style)
+    if staging_clean:
+        parts.append(f"站位：{staging_clean}")
+    if tl_clean:
+        parts.append(tl_clean)
+    if sfx:
+        parts.append("声音：" + re.sub(r"\n", " ", sfx).strip())
+    prompt = "，".join(parts)
+    prompt = prompt.replace("@", "").replace("【", "").replace("】", "")
+    prompt = re.sub(r"[{}<>]|接续状态|末态继承|拼接节点", "", prompt)
+    prompt = re.sub(r"\s+", " ", prompt).strip()
+    return prompt
+
+
+@router.get("/storyboard")
+async def storyboard(name: str = "", ep: str = "", request: Request = None):
+    pdir = _proj_dir(name)
+    md = os.path.join(pdir, "投喂稿", ep, f"投喂稿-{ep}.md")
+    if not os.path.isfile(md):
+        return JSONResponse({"error": f"投喂稿不存在: {ep}"}, status_code=404)
+    txt = open(md, encoding="utf-8").read()
+    root = _deliv_root()
+    segs = []
+    blocks = re.split(r"\n(?=## )", txt)
+    for blk in blocks:
+        if not re.match(r"## " + re.escape(ep) + r"-\d+", blk):
+            continue
+        head = blk.split("\n", 1)[0]
+        mh = re.match(r"## (" + re.escape(ep) + r"-\d+)(?: · (.*?))?(?:（--duration (\d+)）)?", head)
+        if not mh:
+            continue
+        seg = mh.group(1)
+        title = (mh.group(2) or "").strip()
+        dur = int(mh.group(3)) if mh.group(3) else 10
+        body = blk.split("\n", 1)[1] if "\n" in blk else ""
+        prompt = _build_seg_prompt(body)
+
+        video = os.path.join(pdir, seg, seg + ".mp4")
+        has_video = os.path.isfile(video)
+        vrel = ""
+        if has_video and video.startswith(root):
+            vrel = os.path.relpath(video, root).replace("\\", "/")
+        kf_dir = os.path.join(pdir, "投喂稿", ep, seg)
+        kfs = [f"{kf_dir}/kf{i}.png" for i in (1, 2, 3)
+               if os.path.exists(f"{kf_dir}/kf{i}.png")]
+        vmtime = 0
+        if has_video:
+            try:
+                vmtime = int(os.path.getmtime(video))
+            except Exception:
+                vmtime = 0
+        segs.append({
+            "seg": seg, "title": title, "duration": dur, "prompt": prompt,
+            "has_video": has_video, "video": vrel, "kfs": [os.path.basename(k) for k in kfs],
+            "vmtime": vmtime,
+        })
+    return {"name": name, "ep": ep, "segments": segs}
+
+
+def _rebuild_manifest(pdir: str, ep: str) -> dict:
+    """从投喂稿重建 manifest（与 rebuild_manifest.sh 同源逻辑）。"""
+    md = os.path.join(pdir, "投喂稿", ep, f"投喂稿-{ep}.md")
+    if not os.path.isfile(md):
+        raise FileNotFoundError(md)
+    txt = open(md, encoding="utf-8").read()
+    segs = []
+    blocks = re.split(r"\n(?=## )", txt)
+    for blk in blocks:
+        if not re.match(r"## " + re.escape(ep) + r"-\d+", blk):
+            continue
+        head = blk.split("\n", 1)[0]
+        mh = re.match(r"## (" + re.escape(ep) + r"-\d+).*?(?:（--duration (\d+)）)?", head)
+        if not mh:
+            continue
+        seg = mh.group(1)
+        dur = int(mh.group(2)) if mh.group(2) else 10
+        if dur not in (3, 5, 10, 18):
+            dur = 10
+        body = blk.split("\n", 1)[1] if "\n" in blk else ""
+        prompt = _build_seg_prompt(body)
+        kf_dir = os.path.join(pdir, "投喂稿", ep, seg)
+        kfs = [f"{kf_dir}/kf{i}.png" for i in (1, 2, 3)
+               if os.path.exists(f"{kf_dir}/kf{i}.png")]
+        segs.append({"seg": seg, "prompt": prompt, "duration": dur, "keyframes": kfs})
+    os.makedirs(os.path.join(pdir, "投喂稿", ep), exist_ok=True)
+    return {"episode": ep, "project_dir": pdir, "segments": segs}
+
+
+@router.post("/segments/render")
+def segments_render(payload: dict, request: Request):
+    name = str((payload or {}).get("name") or "")
+    ep = str((payload or {}).get("ep") or "")
+    seg = str((payload or {}).get("seg") or "")
+    override_prompt = str((payload or {}).get("prompt") or "").strip()
+    if not name or not ep or not seg:
+        return JSONResponse({"error": "name/ep/seg 必填"}, status_code=400)
+    pdir = _proj_dir(name)
+
+    try:
+        manifest = _rebuild_manifest(pdir, ep)
+    except Exception as e:
+        return JSONResponse({"error": f"重建 manifest 失败: {e}"}, status_code=500)
+
+    seg_item = next((s for s in manifest["segments"] if s["seg"] == seg), None)
+    if seg_item is None:
+        return JSONResponse({"error": f"{ep} 中无 {seg}"}, status_code=404)
+    if override_prompt:
+        seg_item["prompt"] = override_prompt
+
+    # 覆盖词时写独立的临时 manifest，避免污染投喂稿重建来源
+    os.makedirs(os.path.join(pdir, ".review"), exist_ok=True)
+    mpath = os.path.join(pdir, ".review", f"{ep}.manifest.json")
+    with open(mpath, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2)
+
+    tid = _new_task("segment", {"name": name, "ep": ep, "seg": seg})
+    _prune_tasks()
+
+    def _run():
+        _touch(tid, "running", line=f"[{_now()}] {seg} 渲染开始 (dur={seg_item['duration']}s)")
+        _touch(tid, line=f"[{_now()}] 提示词头: {seg_item['prompt'][:60]}…")
+        cmd = ["python3", GENERATOR, mpath, seg]
+        try:
+            pr = subprocess.run(cmd, capture_output=True, text=True, timeout=7200, env=_token_env())
+        except subprocess.TimeoutExpired:
+            _touch(tid, "failed", line=f"[{_now()}] 渲染超时(2h)")
+            return
+        if pr.returncode == 0:
+            _touch(tid, "done", line=f"[{_now()}] {seg} 渲染完成")
+        else:
+            _touch(tid, "failed", line=f"[{_now()}] rc={pr.returncode} {((pr.stdout or '')+(pr.stderr or ''))[-500:]}")
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"ok": True, "task_id": tid, "seg": seg}
+
+
+# ==================== 合并（确认后） ====================
+def _concat_mp4(files, out):
+    lst = os.path.join(os.path.dirname(out), ".concat_tmp.txt")
+    with open(lst, "w", encoding="utf-8") as f:
+        for fp in files:
+            f.write(f"file '{fp}'\n")
+    try:
+        r = subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", lst,
+                            "-c", "copy", out], capture_output=True, text=True, timeout=3600)
+        if r.returncode != 0:
+            r = subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", lst,
+                                "-c:v", "libx264", "-crf", "20", "-preset", "veryfast", out],
+                               capture_output=True, text=True, timeout=7200)
+        return r.returncode == 0 and os.path.isfile(out)
+    except Exception:
+        return False
+    finally:
+        try:
+            os.remove(lst)
+        except Exception:
+            pass
+
+
+@router.post("/merge")
+def merge(payload: dict, request: Request):
+    name = str((payload or {}).get("name") or "")
+    eps = [str(x) for x in (payload or {}).get("eps") or [] if str(x).strip()]
+    if not name or not eps:
+        return JSONResponse({"error": "name/eps 必填"}, status_code=400)
+    pdir = _proj_dir(name)
+    tid = _new_task("merge", {"name": name, "eps": eps})
+    _prune_tasks()
+
+    def _run():
+        _touch(tid, "running", line=f"[{_now()}] 合并 {', '.join(eps)} 开始")
+        # 备份将被覆盖的原始整集/连播文件（保留带音轨源，勿破坏真相源）
+        bk = os.path.join(pdir, ".review", "merge_backup")
+        os.makedirs(bk, exist_ok=True)
+        for fn in list(eps) + [f"{len(eps)}集连播.mp4"]:
+            src = os.path.join(pdir, fn + ".mp4")
+            if os.path.isfile(src):
+                dst = os.path.join(bk, fn + ".mp4")
+                try:
+                    import shutil as _sh
+                    _sh.copy2(src, dst)
+                    _touch(tid, line=f"[{_now()}] 已备份 {fn}.mp4 -> .review/merge_backup/")
+                except Exception:
+                    pass
+        for ep in eps:
+            seg_dirs = sorted(
+                d for d in os.listdir(pdir)
+                if re.match(rf"^{re.escape(ep)}-0(\d+)$", d)
+                and os.path.isfile(os.path.join(pdir, d, f"{d}.mp4"))
+            )
+            if not seg_dirs:
+                _touch(tid, line=f"[{_now()}] {ep}: 无段视频，跳过")
+                continue
+            files = [os.path.join(pdir, d, f"{d}.mp4") for d in seg_dirs]
+            out = os.path.join(pdir, f"{ep}.mp4")
+            ok = _concat_mp4(files, out)
+            _touch(tid, line=f"[{_now()}] {ep}: {'OK' if ok and os.path.exists(out) else '失败'}"
+                             f"（{len(files)} 段）")
+        eps_ok = [ep for ep in eps if os.path.exists(os.path.join(pdir, f"{ep}.mp4"))]
+        if len(eps_ok) >= 2:
+            full = os.path.join(pdir, f"{len(eps_ok)}集连播.mp4")
+            ok = _concat_mp4([os.path.join(pdir, f"{ep}.mp4") for ep in eps_ok], full)
+            if ok:
+                _touch(tid, line=f"[{_now()}] 连播版 -> {os.path.basename(full)}")
+        _touch(tid, "done", line=f"[{_now()}] 合并完成")
+        try:
+            from app.server.api import git as _git_api
+        except Exception:
+            pass
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"ok": True, "task_id": tid}
+
+
+# ==================== 任务查询 ====================
+@router.get("/tasks")
+async def tasks(request: Request):
+    with _TASKS_LOCK:
+        items = [dict(t, log=list(t["log"])) for t in
+                 sorted(_TASKS.values(), key=lambda x: x["updated"], reverse=True)[:20]]
+    return {"tasks": items}
+
+
+@router.get("/tasks/{tid}")
+async def task(tid: str, request: Request = None):
+    with _TASKS_LOCK:
+        t = _TASKS.get(tid)
+        if t is None:
+            return JSONResponse({"error": "任务不存在"}, status_code=404)
+        return dict(t, log=list(t["log"]))

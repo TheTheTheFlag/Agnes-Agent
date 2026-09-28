@@ -159,12 +159,13 @@
       </button>
       <div class="studio-title">
         <div class="studio-name">创作工作台</div>
-        <div class="studio-meta">创作工作台（短剧创作 · 系统级技能驱动） · Agnes Image · Agnes Video</div>
+        <div class="studio-meta">Agnes 创作工作台 · Agnes Image · Agnes Video</div>
       </div>
       <div class="studio-seg" id="studioSeg">
-        <button data-tab="drama" class="active">🎭 短剧创作</button>
+        <button data-tab="drama" class="active" style="display:none" title="已隐藏">🎭 短剧创作</button>
         <button data-tab="image">🖼 图片创作</button>
         <button data-tab="video">🎬 视频创作</button>
+        <button data-tab="review">🎬 短剧审核</button>
       </div>
       <div style="flex:1"></div>
       <button id="btnStudioSettings" class="btn-ghost" title="设置面板">
@@ -176,6 +177,7 @@
       <section id="studioDramaPanel" class="studio-panel hidden"></section>
       <section id="studioImagePanel" class="studio-panel hidden"></section>
       <section id="studioVideoPanel" class="studio-panel hidden"></section>
+      <section id="studioReviewPanel" class="studio-panel hidden"></section>
     </div>
   </main>
 
@@ -227,6 +229,7 @@
 <script src="/static/video-studio.js?v=20260921_1"></script>
 <script src="/static/image-studio.js?v=20260926_pollfix"></script>
 <script src="/static/drama-studio.js?v=20260925_copyfix"></script>
+<script src="/static/drama-review.js?v=20260927_1"></script>
 <script src="/static/app.js?v=20260926_delivtree"></script>
 </body>
 </html>

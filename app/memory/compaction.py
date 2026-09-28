@@ -2,9 +2,9 @@
 
 对齐业界做法（LangGraph summarization / Anthropic context compaction / MemGPT 虚拟上下文）：
 
-  触发：按**实际发送预算**（TOKEN_LIMIT）的占比，不再用"距上次 N 秒"这类时间兜底。
-        （时间触发是反模式——对话短就不该压缩。旧实现阈值用了 MODEL_CONTEXT_LIMIT×0.8，
-         比实际工作上限 TOKEN_LIMIT 还高，导致条件永不成立、退化成"每 120 秒必压一次"。）
+  触发：固定阈值 **20k tokens**（2026-09-28 用户指定；更接近业界「早压优于晚压」共识——
+        不再用"距上次 N 秒"这类时间兜底，也不再被发送预算占比放大，
+        旧实现 max(20k, TOKEN_LIMIT×0.6) 在本部署被 ratio 顶到 ~220k，压缩形同虚设）。
   对象：只压缩 messages[:-KEEP_RECENT]，最近 KEEP_RECENT 条**永远保留原文**。
         摘要会丢精确信息（文件路径/命令/变量名），而最近的消息最可能需要它们。
   代价：**单次 LLM 调用**产出结构化摘要。旧实现一次触发要 3 次调用
@@ -17,8 +17,11 @@ from typing import List
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-# 触发阈值：占实际工作预算的比例；再加一个绝对下限，避免短对话被误压
-_COMPACT_RATIO = 0.6
+# 触发阈值（2026-09-28 用户指定）：固定 20000 tokens。
+# 旧实现 max(_COMPACT_MIN_TOKENS, TOKEN_LIMIT×0.6)——本部署 MODEL_CONTEXT_LIMIT=512k
+# → TOKEN_LIMIT≈367k → 实际触发点被 ratio 顶到 ~220k，远高于 20k 预期，压缩形同虚设。
+# 现改为固定 20k 触发：更接近业界「早压优于晚压」共识（不要在 90%+ 才 compact）。
+_COMPACT_RATIO = 0.6   # LEGACY：已停用（曾与 TOKEN_LIMIT 相乘抬高阈值）
 _COMPACT_MIN_TOKENS = 20000
 
 # 同一会话同时在压缩时跳过（防重入）
@@ -51,15 +54,6 @@ _COMPACT_SYS = (
 )
 
 
-def _budget_tokens() -> int:
-    """实际工作预算（延迟导入，避免与 app.graph.utils 形成导入环）。"""
-    try:
-        from app.graph.utils import TOKEN_LIMIT
-        return int(TOKEN_LIMIT)
-    except Exception:
-        return 0
-
-
 def _keep_recent() -> int:
     try:
         from app.graph.utils import KEEP_RECENT
@@ -69,7 +63,10 @@ def _keep_recent() -> int:
 
 
 def should_compact(messages) -> bool:
-    """是否值得压缩：只看"实际发送预算的占比"，不看时间。"""
+    """是否值得压缩：历史 token 数是否 ≥ 固定阈值（20k）。
+
+    2026-09-28 起不再按"发送预算占比"放大——固定 20k 触发（用户指定）。
+    """
     if not messages:
         return False
     keep = _keep_recent()
@@ -80,9 +77,7 @@ def should_compact(messages) -> bool:
         tokens = count_tokens(list(messages))
     except Exception:
         return False
-    budget = _budget_tokens()
-    threshold = max(_COMPACT_MIN_TOKENS, int(budget * _COMPACT_RATIO)) if budget else _COMPACT_MIN_TOKENS
-    return tokens >= threshold
+    return tokens >= _COMPACT_MIN_TOKENS
 
 
 def _messages_to_text(messages) -> str:

@@ -41,6 +41,8 @@ const Studio = {
   perPage: 50,        // items per page
   activeTab: false,
   pollers: {},        // id -> timer（生成任务轮询）
+  selMode: false,     // 批量删除选择模式
+  sel: new Set(),     // 已勾选 id 集合
 };
 
 const _UPLOAD_TIMEOUT = 60000;    // 参考图上传超时 60s
@@ -105,7 +107,14 @@ window.renderStudioTab = async function renderStudioTab(el) {
           <div class="st-gallery-hd">
             <span class="st-gallery-title">🗂 作品库</span>
             <span class="d-empty" style="margin:0" id="stCountLbl"></span>
+            <span class="d-empty" style="margin:0 8px;color:#c0392b;display:none" id="stSelLbl"></span>
             <div style="flex:1"></div>
+            <span id="stSelBar" style="display:none">
+              <button class="d-btn sm" id="stSelAll">全选</button>
+              <button class="d-btn sm danger" id="stSelDel" disabled>删除选中</button>
+              <button class="d-btn sm" id="stSelCancel">取消</button>
+            </span>
+            <button class="d-btn sm danger" id="stBatchDel">🗑 批量删除</button>
             <button class="d-btn sm" id="stRefresh">⟳ 刷新</button>
           </div>
           <div id="stGrid" class="st-grid"><div class="d-empty">加载中…</div></div>
@@ -123,6 +132,7 @@ window.renderStudioTab = async function renderStudioTab(el) {
     countLbl: $("#stCountLbl", el), banner: $("#stKeyBanner", el), refBlock: $("#stRefBlock", el),
     refNote: $("#stRefNoteRow", el),
     pagination: $("#stPagination", el),
+    selLbl: $("#stSelLbl", el), selBar: $("#stSelBar", el), selDel: $("#stSelDel", el),
   };
 
   // —— 状态 ——
@@ -159,6 +169,40 @@ window.renderStudioTab = async function renderStudioTab(el) {
   Studio.el.ratio.addEventListener("change", paintRatioList);
   $("#stRefresh", el).addEventListener("click", () => loadGallery());
   Studio.el.gen.addEventListener("click", generate);
+
+  // —— 批量删除 ——
+  $("#stBatchDel", el).addEventListener("click", () => {
+    if (Studio.selMode) { Studio.selMode = false; Studio.sel.clear(); }
+    else { Studio.selMode = true; }
+    paintSelBar();
+    paintGallery();
+  });
+  $("#stSelAll", el).addEventListener("click", () => {
+    const { items } = getPaginatedItems();
+    items.forEach((i) => Studio.sel.add(i.id));
+    paintSelBar();
+    paintGallery();
+  });
+  $("#stSelDel", el).addEventListener("click", async () => {
+    const ids = [...Studio.sel];
+    if (!ids.length) return;
+    if (!confirm(`确认删除选中的 ${ids.length} 件作品？`)) return;
+    try {
+      const r = await apiPost("/api/image/delete", { ids });
+      if (!r.ok) throw new Error(r.error || "删除失败");
+      Studio.gallery = Studio.gallery.filter((g) => !Studio.sel.has(g.id));
+      Studio.sel.clear();
+      Studio.selMode = false;
+      paintSelBar();
+      paintGallery();
+      toast(`已删除 ${r.deleted || ids.length} 件作品`, "success");
+    } catch (e) { toast("删除失败: " + e.message, "error"); }
+  });
+  $("#stSelCancel", el).addEventListener("click", () => {
+    Studio.selMode = false; Studio.sel.clear();
+    paintSelBar();
+    paintGallery();
+  });
 
   await loadGallery();
 }
@@ -411,10 +455,13 @@ function paintGallery() {
   const { items, page, totalPages, total } = getPaginatedItems();
   Studio.el.countLbl.textContent = total ? `共 ${total} 件 · 第 ${page}/${totalPages} 页` : "";
   if (!total) {
+    if (Studio.selMode) { Studio.selMode = false; Studio.sel.clear(); }
+    paintSelBar();
     Studio.el.grid.innerHTML = `<div class="d-empty" style="padding:36px 0;text-align:center">作品库为空 —— 从左侧创作台生成第一张图吧。</div>`;
     Studio.el.pagination.style.display = "none";
     return;
   }
+  const selOn = Studio.selMode;
   Studio.el.grid.innerHTML = items.map((it) => {
     const st = it.status || "completed";
     const running = st === "queued" || st === "running";
@@ -436,7 +483,8 @@ function paintGallery() {
       body = `<div class="st-card-img"><img loading="lazy" src="${src}" alt=""></div>`;
     }
     return `
-    <figure class="st-card" data-id="${escapeHtml(it.id)}">
+    <figure class="st-card" data-id="${escapeHtml(it.id)}"${selOn ? ` style="position:relative${Studio.sel.has(it.id) ? ";outline:2px solid #c0392b;outline-offset:-2px" : ""}"` : ""}>
+      ${selOn ? `<label class="st-card-cb" style="position:absolute;top:6px;left:6px;z-index:6;background:rgba(0,0,0,0.55);border-radius:4px;padding:2px;line-height:1;cursor:pointer"><input type="checkbox" data-sel="${escapeHtml(it.id)}" ${Studio.sel.has(it.id) ? "checked" : ""} style="width:16px;height:16px;cursor:pointer;accent-color:#c0392b"></label>` : ""}
       ${body}
       <figcaption class="st-card-meta">
         <span class="st-card-chip">${escapeHtml(IMAGE_MODE_LBL[it.mode] || it.mode)}</span>
@@ -444,7 +492,7 @@ function paintGallery() {
         <span class="st-card-time">${escapeHtml(fmtAgo(it.created_at))}</span>
       </figcaption>
       <div class="st-card-prompt">${escapeHtml(truncate(it.prompt || "", 80))}</div>
-      <div class="st-card-ops">
+      <div class="st-card-ops"${selOn ? ' style="display:none"' : ""}>
         <button class="d-btn sm" data-act="open" ${done ? "" : "disabled"}>查看</button>
         <button class="d-btn sm" data-act="reuse" ${done ? "" : "disabled"}>用图继续</button>
         <button class="d-btn sm" data-act="copy">复用提示词</button>
@@ -454,15 +502,41 @@ function paintGallery() {
     </figure>`;
   }).join("");
 
+  const syncCardSel = (card, checked) => {
+    if (checked) { card.style.outline = "2px solid #c0392b"; card.style.outlineOffset = "-2px"; }
+    else { card.style.outline = ""; card.style.outlineOffset = ""; }
+  };
   $$(".st-card", Studio.el.grid).forEach((card) => {
     const item = items.find((g) => g.id === card.dataset.id);
     if (!item) return;
     const done = (item.status || "completed") === "completed";
-    // 点击图片区域也能打开灯箱（仅完成的图片可打开）
-    const cardImg = $$(".st-card-img", card)[0];
-    if (cardImg && done) {
-      cardImg.style.cursor = "zoom-in";
-      cardImg.addEventListener("click", () => openLightbox(item));
+    if (selOn) {
+      // 批量选择模式：点卡片或勾选切换选中
+      card.style.cursor = "pointer";
+      const toggle = (cb) => {
+        if (!cb) return;
+        const checked = cb.checked;
+        if (checked) Studio.sel.add(cb.dataset.sel); else Studio.sel.delete(cb.dataset.sel);
+        syncCardSel(card, checked);
+        paintSelBar();
+      };
+      $$(".st-card-cb input", card).forEach((cb) => cb.addEventListener("click", (e) => {
+        e.stopPropagation();
+        toggle(cb);
+      }));
+      card.addEventListener("click", () => {
+        const cb = $(".st-card-cb input", card);
+        if (!cb) return;
+        cb.checked = !cb.checked;
+        toggle(cb);
+      });
+    } else {
+      // 点击图片区域也能打开灯箱（仅完成的图片可打开）
+      const cardImg = $$(".st-card-img", card)[0];
+      if (cardImg && done) {
+        cardImg.style.cursor = "zoom-in";
+        cardImg.addEventListener("click", () => openLightbox(item));
+      }
     }
     $$("[data-act]", card).forEach((b) => b.addEventListener("click", async () => {
       try {
@@ -497,6 +571,7 @@ function paintGallery() {
 
   // 渲染分页控件
   paintPagination(totalPages, page);
+  paintSelBar();
 }
 
 function paintPagination(totalPages, currentPage) {
@@ -529,6 +604,16 @@ function paintPagination(totalPages, currentPage) {
   $(".st-page-input", Studio.el.pagination).addEventListener("keydown", (e) => {
     if (e.key === "Enter") $("[data-page='go']", Studio.el.pagination).click();
   });
+}
+
+function paintSelBar() {
+  const n = Studio.sel.size;
+  if (Studio.el.selLbl) {
+    Studio.el.selLbl.style.display = Studio.selMode ? "" : "none";
+    Studio.el.selLbl.textContent = `已选 ${n}`;
+  }
+  if (Studio.el.selBar) Studio.el.selBar.style.display = Studio.selMode ? "" : "none";
+  if (Studio.el.selDel) Studio.el.selDel.disabled = n === 0;
 }
 
 function openLightbox(item) {

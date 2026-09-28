@@ -102,8 +102,10 @@ async def api_deliverables_view(name: str = "", path: str = ""):
         return HTMLResponse("<pre style='white-space:pre-wrap;word-break:break-all;font-size:12px'>"
                              + _pre_escape(content) + "</pre>")
     if low.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4", ".webm")):
-        return FileResponse(p, media_type="application/octet-stream")
-    return FileResponse(p, media_type="application/octet-stream")
+        return FileResponse(p, media_type="application/octet-stream",
+                            headers={"Cache-Control": "public, max-age=86400"})
+    return FileResponse(p, media_type="application/octet-stream",
+                        headers={"Cache-Control": "public, max-age=86400"})
 
 
 def _pre_escape(t: str) -> str:

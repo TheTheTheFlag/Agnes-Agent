@@ -33,6 +33,10 @@ const VideoStudio = {
   gallery: [],
   pollers: {},         // id -> timer
   el: null,
+  selMode: false,      // 批量删除选择模式
+  sel: new Set(),      // 已勾选 id 集合
+  page: 1,             // 当前页
+  perPage: 50,         // 每页条数（与图片作品库一致）
 };
 
 /* ---------- 主渲染 ---------- */
@@ -90,10 +94,18 @@ async function renderVideoTab(el) {
           <div class="st-gallery-hd">
             <span class="st-gallery-title">🗂 视频作品库</span>
             <span class="d-empty" style="margin:0" id="vsCountLbl"></span>
+            <span class="d-empty" style="margin:0 8px;color:#c0392b;display:none" id="vsSelLbl"></span>
             <div style="flex:1"></div>
+            <span id="vsSelBar" style="display:none">
+              <button class="d-btn sm" id="vsSelAll">全选</button>
+              <button class="d-btn sm danger" id="vsSelDel" disabled>删除选中</button>
+              <button class="d-btn sm" id="vsSelCancel">取消</button>
+            </span>
+            <button class="d-btn sm danger" id="vsBatchDel">🗑 批量删除</button>
             <button class="d-btn sm" id="vsRefresh">⟳ 刷新</button>
           </div>
           <div id="vsGrid" class="st-grid"><div class="d-empty">加载中…</div></div>
+          <div id="vsPagination" class="st-pagination" style="display:none"></div>
         </section>
       </div>
     </div>`;
@@ -105,6 +117,8 @@ async function renderVideoTab(el) {
     prompt: $("#vsPrompt", el), promptHint: $("#vsPromptHint", el),
     params: $("#vsParams", el), gen: $("#vsGen", el), busy: $("#vsBusy", el),
     grid: $("#vsGrid", el), countLbl: $("#vsCountLbl", el), banner: $("#vsKeyBanner", el),
+    selLbl: $("#vsSelLbl", el), selBar: $("#vsSelBar", el), selDel: $("#vsSelDel", el),
+    pagination: $("#vsPagination", el),
   };
 
   try {
@@ -155,6 +169,39 @@ async function renderVideoTab(el) {
   });
   $("#vsRefresh", el).addEventListener("click", () => loadVideoGallery());
   VideoStudio.el.gen.addEventListener("click", generateVideo);
+
+  // —— 批量删除 ——
+  $("#vsBatchDel", el).addEventListener("click", () => {
+    if (VideoStudio.selMode) { VideoStudio.selMode = false; VideoStudio.sel.clear(); }
+    else { VideoStudio.selMode = true; }
+    paintVsSelBar();
+    paintVideoGallery();
+  });
+  $("#vsSelAll", el).addEventListener("click", () => {
+    getVsPaginatedItems().items.forEach((i) => VideoStudio.sel.add(i.id));
+    paintVsSelBar();
+    paintVideoGallery();
+  });
+  $("#vsSelDel", el).addEventListener("click", async () => {
+    const ids = [...VideoStudio.sel];
+    if (!ids.length) return;
+    if (!confirm(`确认删除选中的 ${ids.length} 条视频（含服务器文件）？`)) return;
+    try {
+      const r = await apiPost("/api/video/delete", { ids });
+      if (!r.ok) throw new Error(r.error || "删除失败");
+      VideoStudio.gallery = VideoStudio.gallery.filter((g) => !VideoStudio.sel.has(g.id));
+      VideoStudio.sel.clear();
+      VideoStudio.selMode = false;
+      paintVsSelBar();
+      paintVideoGallery();
+      toast(`已删除 ${r.deleted || ids.length} 条视频`, "success");
+    } catch (e) { toast("删除失败: " + e.message, "error"); }
+  });
+  $("#vsSelCancel", el).addEventListener("click", () => {
+    VideoStudio.selMode = false; VideoStudio.sel.clear();
+    paintVsSelBar();
+    paintVideoGallery();
+  });
 
   await loadVideoGallery();
   resumeVideoPolling();
@@ -625,12 +672,23 @@ function pollVideoTask(id) {
 
 /* ---------- 作品库 ---------- */
 async function loadVideoGallery() {
+  VideoStudio.page = 1;
   try {
-    const r = await apiGet("/api/video/history?limit=120");
+    // 后端上限 _MAX_GALLERY=200，一次取全量，前端分页显示
+    const r = await apiGet("/api/video/history?limit=200");
     VideoStudio.gallery = r.items || [];
   } catch (e) { /* 保留现有视图 */ }
   paintVideoGallery();
   resumeVideoPolling();
+}
+
+function getVsPaginatedItems() {
+  const total = VideoStudio.gallery.length;
+  if (total <= VideoStudio.perPage) return { items: VideoStudio.gallery, page: 1, totalPages: 1, total };
+  const start = (VideoStudio.page - 1) * VideoStudio.perPage;
+  const items = VideoStudio.gallery.slice(start, start + VideoStudio.perPage);
+  const totalPages = Math.ceil(total / VideoStudio.perPage);
+  return { items, page: VideoStudio.page, totalPages, total };
 }
 
 function videoStatusBadge(it) {
@@ -641,12 +699,17 @@ function videoStatusBadge(it) {
 
 function paintVideoGallery() {
   if (!VideoStudio.el) return;
-  VideoStudio.el.countLbl.textContent = VideoStudio.gallery.length ? `共 ${VideoStudio.gallery.length} 件` : "";
-  if (!VideoStudio.gallery.length) {
+  const { items, page, totalPages, total } = getVsPaginatedItems();
+  VideoStudio.el.countLbl.textContent = total ? `共 ${total} 件 · 第 ${page}/${totalPages} 页` : "";
+  if (!total) {
+    if (VideoStudio.selMode) { VideoStudio.selMode = false; VideoStudio.sel.clear(); }
+    paintVsSelBar();
+    VideoStudio.el.pagination.style.display = "none";
     VideoStudio.el.grid.innerHTML = `<div class="d-empty" style="padding:36px 0;text-align:center">视频作品库为空 —— 从左侧创作台生成第一条视频吧。</div>`;
     return;
   }
-  VideoStudio.el.grid.innerHTML = VideoStudio.gallery.map((it) => {
+  const selOn = VideoStudio.selMode;
+  VideoStudio.el.grid.innerHTML = items.map((it) => {
     const done = it.status === "completed" && it.file;
     const poster = it.thumb ? `/api/video/file/${it.id}?thumb=1` : "";
     const media = done
@@ -655,7 +718,8 @@ function paintVideoGallery() {
       : `<div class="vs-ph">${videoStatusBadge(it)}<span class="vs-ph-hint">${escapeHtml(it.status === "failed" ? (it.error || "生成失败") : "视频生成中…")}</span></div>`;
     const dl = done ? `href="/api/video/file/${it.id}" download="${escapeHtml(it.id)}.mp4"` : `href="#" onclick="return false"`;
     return `
-    <figure class="st-card" data-id="${escapeHtml(it.id)}">
+    <figure class="st-card" data-id="${escapeHtml(it.id)}"${selOn ? ` style="position:relative${VideoStudio.sel.has(it.id) ? ";outline:2px solid #c0392b;outline-offset:-2px" : ""}"` : ""}>
+      ${selOn ? `<label class="st-card-cb" style="position:absolute;top:6px;left:6px;z-index:6;background:rgba(0,0,0,0.55);border-radius:4px;padding:2px;line-height:1;cursor:pointer"><input type="checkbox" data-sel="${escapeHtml(it.id)}" ${VideoStudio.sel.has(it.id) ? "checked" : ""} style="width:16px;height:16px;cursor:pointer;accent-color:#c0392b"></label>` : ""}
       <div class="st-card-img vs-card-vid">${media}</div>
       <figcaption class="st-card-meta">
         <span class="st-card-chip">${escapeHtml(modelShort(it.model))}</span>
@@ -663,7 +727,7 @@ function paintVideoGallery() {
         <span class="st-card-time">${escapeHtml(fmtAgo(it.created_at))}</span>
       </figcaption>
       <div class="st-card-prompt">${escapeHtml(truncate(it.prompt || "", 80))}</div>
-      <div class="st-card-ops">
+      <div class="st-card-ops"${selOn ? ' style="display:none"' : ""}>
         <button class="d-btn sm" data-act="open" ${done ? "" : "disabled"}>播放</button>
         <a class="d-btn sm" data-act="dl" ${dl}>下载</a>
         <button class="d-btn sm" data-act="copy">复用提示词</button>
@@ -674,10 +738,11 @@ function paintVideoGallery() {
 
   // 点击卡片图片区域或播放按钮都能打开灯箱
   const openFromCard = (e) => {
+    if (VideoStudio.selMode) return;
     if (e.target.closest("[data-act]")) return;
     const c = e.target.closest(".st-card");
     if (!c) return;
-    const item = VideoStudio.gallery.find((g) => g.id === c.dataset.id);
+    const item = items.find((g) => g.id === c.dataset.id);
     if (item) openVideoLightbox(item);
   };
   $$(".st-card-img", VideoStudio.el.grid).forEach((img) => {
@@ -690,8 +755,33 @@ function paintVideoGallery() {
   });
 
   $$(".st-card", VideoStudio.el.grid).forEach((card) => {
-    const item = VideoStudio.gallery.find((g) => g.id === card.dataset.id);
+    const item = items.find((g) => g.id === card.dataset.id);
     if (!item) return;
+    if (selOn) {
+      // 批量选择模式：点卡片或勾选切换选中
+      card.style.cursor = "pointer";
+      const syncCardSel = (checked) => {
+        if (checked) { card.style.outline = "2px solid #c0392b"; card.style.outlineOffset = "-2px"; }
+        else { card.style.outline = ""; card.style.outlineOffset = ""; }
+      };
+      const toggle = (cb) => {
+        if (!cb) return;
+        const checked = cb.checked;
+        if (checked) VideoStudio.sel.add(cb.dataset.sel); else VideoStudio.sel.delete(cb.dataset.sel);
+        syncCardSel(checked);
+        paintVsSelBar();
+      };
+      $$(".st-card-cb input", card).forEach((cb) => cb.addEventListener("click", (e) => {
+        e.stopPropagation();
+        toggle(cb);
+      }));
+      card.addEventListener("click", () => {
+        const cb = $(".st-card-cb input", card);
+        if (!cb) return;
+        cb.checked = !cb.checked;
+        toggle(cb);
+      });
+    }
     $$("[data-act]", card).forEach((b) => b.addEventListener("click", async (ev) => {
       ev.stopPropagation();
       try {
@@ -707,6 +797,51 @@ function paintVideoGallery() {
       } catch (e) { toast("操作失败: " + e.message, "error"); }
     }));
   });
+
+  // 渲染分页控件
+  paintVsPagination(totalPages, page);
+}
+
+function paintVsPagination(totalPages, currentPage) {
+  if (totalPages <= 1) {
+    VideoStudio.el.pagination.style.display = "none";
+    return;
+  }
+  VideoStudio.el.pagination.style.display = "flex";
+  VideoStudio.el.pagination.innerHTML = `
+    <button class="d-btn sm ${currentPage === 1 ? 'disabled' : ''}" data-page="prev" ${currentPage === 1 ? 'disabled' : ''}>‹ 上一页</button>
+    <span class="st-page-info">第 ${currentPage} / ${totalPages} 页</span>
+    <input type="number" class="st-page-input" min="1" max="${totalPages}" value="${currentPage}" placeholder="页码">
+    <button class="d-btn sm" data-page="go">跳转</button>
+    <button class="d-btn sm ${currentPage === totalPages ? 'disabled' : ''}" data-page="next" ${currentPage === totalPages ? 'disabled' : ''}>下一页 ›</button>
+  `;
+  $("[data-page='prev']", VideoStudio.el.pagination).addEventListener("click", () => {
+    if (currentPage > 1) { VideoStudio.page--; paintVideoGallery(); }
+  });
+  $("[data-page='next']", VideoStudio.el.pagination).addEventListener("click", () => {
+    if (currentPage < totalPages) { VideoStudio.page++; paintVideoGallery(); }
+  });
+  $("[data-page='go']", VideoStudio.el.pagination).addEventListener("click", () => {
+    const input = $(".st-page-input", VideoStudio.el.pagination);
+    const p = parseInt(input.value);
+    if (!isNaN(p) && p >= 1 && p <= totalPages && p !== currentPage) {
+      VideoStudio.page = p; paintVideoGallery();
+    }
+  });
+  // 回车跳转
+  $(".st-page-input", VideoStudio.el.pagination).addEventListener("keydown", (e) => {
+    if (e.key === "Enter") $("[data-page='go']", VideoStudio.el.pagination).click();
+  });
+}
+
+function paintVsSelBar() {
+  const n = VideoStudio.sel.size;
+  if (VideoStudio.el.selLbl) {
+    VideoStudio.el.selLbl.style.display = VideoStudio.selMode ? "" : "none";
+    VideoStudio.el.selLbl.textContent = `已选 ${n}`;
+  }
+  if (VideoStudio.el.selBar) VideoStudio.el.selBar.style.display = VideoStudio.selMode ? "" : "none";
+  if (VideoStudio.el.selDel) VideoStudio.el.selDel.disabled = n === 0;
 }
 
 function modelShort(id) {

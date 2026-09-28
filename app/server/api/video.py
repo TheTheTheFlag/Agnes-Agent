@@ -195,6 +195,26 @@ _SKILL_OUTPUT_DIRS = (
 _VIDEO_EXTS = (".mp4", ".webm", ".mov", ".mkv")
 
 
+def _load_deleted_sources(username: str) -> set:
+    """载入该用户已删除源文件的墓碑指纹，防止 _sync_skill_outputs 重新导入。"""
+    fp = os.path.join(str(user_subdir("data_dir")), "deleted_sources_video.json")
+    try:
+        with open(fp, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        return {tuple(x) for x in raw if isinstance(x, list) and len(x) == 3}
+    except Exception:
+        return set()
+
+
+def _save_deleted_sources(username: str, dead: set) -> None:
+    fp = os.path.join(str(user_subdir("data_dir")), "deleted_sources_video.json")
+    try:
+        with open(fp, "w", encoding="utf-8") as f:
+            json.dump([list(x) for x in dead if len(x) == 3], f, ensure_ascii=False)
+    except Exception:
+        pass
+
+
 def _sync_skill_outputs(username: str) -> int:
     """把 agnes-media 技能产出的视频同步进当前用户作品库（幂等），返回新增数量。"""
     added = 0
@@ -209,6 +229,7 @@ def _sync_skill_outputs(username: str) -> int:
                     it.get("src_mtime") or 0)
 
         known = {_src_key(it) for it in items}
+        dead = _load_deleted_sources(username)
         for root in _SKILL_OUTPUT_DIRS:
             if not os.path.isdir(root):
                 continue
@@ -223,6 +244,8 @@ def _sync_skill_outputs(username: str) -> int:
                     except Exception:
                         continue
                     if (fn, sz, src_mtime) in known:
+                        continue
+                    if (fn, sz, src_mtime) in dead:
                         continue
                     item_id = uuid.uuid4().hex[:12]
                     ext = os.path.splitext(fn)[1].lower() or ".mp4"
@@ -797,6 +820,16 @@ def delete(payload: dict, request: Request = None):
                 keep.append(it)
         items[:] = keep
     _save_user_manifest(username)
+    if removed:
+        dead = _load_deleted_sources(username)
+        changed = False
+        for it in removed:
+            src_name = it.get("src_name") or os.path.basename(it.get("file") or "")
+            if src_name:
+                dead.add((src_name, int(it.get("size_bytes") or 0), int(it.get("src_mtime") or 0)))
+                changed = True
+        if changed:
+            _save_deleted_sources(username, dead)
     for it in removed:
         for key in ("file", "thumb"):
             name = it.get(key)

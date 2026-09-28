@@ -2404,7 +2404,7 @@ function drawerErr(e) {
 }
 
 /* ==================== 创作工作台视图（短剧 / 图片 / 视频） ==================== */
-let _studioTab = "drama";
+let _studioTab = "image"; // 短剧创作 tab 已隐藏（2026-09-27），默认停图片创作
 let _studioImageReady = false;
 let _studioVideoReady = false;
 let _studioDramaReady = false;
@@ -2459,9 +2459,11 @@ async function switchStudioTab(tab) {
   const drmP = $("#studioDramaPanel");
   const imgP = $("#studioImagePanel");
   const vidP = $("#studioVideoPanel");
+  const revP = $("#studioReviewPanel");
   drmP.classList.toggle("hidden", tab !== "drama");
   imgP.classList.toggle("hidden", tab !== "image");
   vidP.classList.toggle("hidden", tab !== "video");
+  if (revP) revP.classList.toggle("hidden", tab !== "review");
   try {
     if (tab === "drama") {
       const loaded = await waitForFn("renderDramaStudioTab");
@@ -2480,6 +2482,14 @@ async function switchStudioTab(tab) {
       }
       const fn = window.renderStudioTab || renderStudioTab;
       if (!_studioImageReady) { _studioImageReady = true; await fn(imgP); }
+    } else if (tab === "review") {
+      const loaded = await waitForFn("renderReviewTab");
+      if (!loaded) {
+        revP.innerHTML = drawerErr(new Error("短剧审核模块加载超时，请刷新页面重试"));
+        return;
+      }
+      const fn = window.renderReviewTab || renderReviewTab;
+      await fn(revP);
     } else if (!_studioVideoReady) {
       _studioVideoReady = true;
       await renderVideoTab(vidP);

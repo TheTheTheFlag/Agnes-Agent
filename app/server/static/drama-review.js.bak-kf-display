@@ -1,0 +1,327 @@
+/* ============================================================================
+   短剧审核台（工作台「短剧审核」tab）
+   ----------------------------------------------------------------------------
+   资产审核：列出项目的 角色/场景/道具 资产（提示词 + 出图），可改提示词重新生成
+   （后端 media.py image --ref 锁形象，产物回写 manifest）。
+   分镜审核：逐集解析投喂稿，列出每段分镜提示词与已产出视频；可「直接重渲」或
+   「修改提示词后重渲」单段；全部确认后「合并成完整视频」（整集 + N集连播）。
+   依赖全局工具：$ / $$ / apiGet / apiPost / escapeHtml / toast。
+   ============================================================================ */
+"use strict";
+
+/* 独立样式（不污染全局 style.css） */
+(function () {
+  if (document.getElementById("drvStyle")) return;
+  const st = document.createElement("style");
+  st.id = "drvStyle";
+  st.textContent = `
+    .drv { padding: 14px 16px; }
+    .drv .st-cols { display: grid; grid-template-columns: 300px 1fr; gap: 14px; align-items: start; }
+    .drv .st-left > .st-block { margin-bottom: 12px; }
+    .drv .drv-proj-sel { width: 100%; }
+    .drv .d-row { display: flex; gap: 6px; }
+    .drv .drv-body { padding: 4px 2px; }
+    .drv-card {
+      border: 1px solid #e3e6ef; border-radius: 10px; padding: 10px;
+      margin-bottom: 12px; background: #fff;
+    }
+    .drv-card-top {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 8px; font-size: 13px;
+    }
+    .drv-status { font-size: 12px; color: #8a90a5; }
+    .drv-card-img img, .drv-card-img video {
+      width: 100%; max-height: 300px; object-fit: contain;
+      border-radius: 8px; background: #f2f4f9; margin-bottom: 8px;
+    }
+    .drv-prompt { width: 100%; font-size: 12px; line-height: 1.5; }
+    .drv-card-actions { display: flex; gap: 6px; align-items: center; margin-top: 8px; }
+    .drv-tasklog { font-size: 11px; color: #6a7090; flex: 1; word-break: break-all; }
+    .drv-segbar {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 8px 2px; font-weight: 600;
+    }
+    .drv-segs { display: grid; gap: 12px; }
+    .drv-seg { border: 1px solid #e3e6ef; border-radius: 10px; padding: 10px; background: #fff; }
+  `;
+  document.head.appendChild(st);
+})();
+
+let DRV = { project: "", mode: "assets", ep: "", tasks: new Map() };
+
+function drvPlugin() {
+  return {
+    tab: "review"
+  };
+}
+window.drvPlugin = drvPlugin;
+
+/* ==================== 项目选择 ==================== */
+async function drvLoadProjects() {
+  const sel = $("#drvProjectSel");
+  try {
+    const data = await apiGet("/api/drama-review/projects");
+    const list = data.projects || [];
+    sel.innerHTML = '<option value="">— 选择作品 —</option>' + list.map((p) =>
+      `<option value="${escapeHtml(p.name)}" ${p.name === DRV.project ? "selected" : ""}">${escapeHtml(p.name)}` +
+      (p.episodes && p.episodes.length ? `（${p.episodes.length}集）` : "") + "</option>"
+    ).join("");
+    if (!DRV.project && list.length) { DRV.project = list[0].name; sel.value = DRV.project; }
+  } catch (e) {
+    sel.innerHTML = '<option value="">加载失败</option>';
+    console.error("[drv] projects", e);
+  }
+}
+
+function drvSelectProject() {
+  DRV.project = $("#drvProjectSel").value;
+  DRV.ep = "";
+  drvRender();
+}
+
+/* ==================== 资产模式渲染 ==================== */
+async function drvRenderAssets() {
+  const box = $("#drvBody");
+  box.innerHTML = '<div class="d-empty">加载资产…</div>';
+  try {
+    const data = await apiGet("/api/drama-review/assets?name=" + encodeURIComponent(DRV.project));
+    const list = data.assets || [];
+    if (!list.length) {
+      box.innerHTML = '<div class="d-empty">未找到 assets/manifest.json</div>';
+      return;
+    }
+    box.innerHTML = list.map((a) => `
+      <div class="drv-card" data-id="${escapeHtml(a.id)}">
+        <div class="drv-card-top">
+          <b>${escapeHtml(a.type)} · ${escapeHtml(a.id)}</b>
+          <span class="drv-status" id="drvSt_${escapeHtml(a.id)}">${escapeHtml(a.status || "")}</span>
+        </div>
+        <div class="drv-card-img">
+          ${a.path ? `<img src="/api/deliverables/view?path=${encodeURIComponent(a.path)}${a.md5 ? '&v=' + a.md5 : ''}" alt="${escapeHtml(a.id)}" loading="lazy">` : '<div class="d-empty">无出图</div>'}
+        </div>
+        <textarea id="drvP_${escapeHtml(a.id)}" class="d-input drv-prompt" rows="4" spellcheck="false">${escapeHtml(a.prompt || "")}</textarea>
+        <div class="drv-card-actions">
+          <button class="d-btn sm primary" data-act="regen" data-id="${escapeHtml(a.id)}">🖼 用此提示词重新生成</button>
+          <span class="drv-tasklog" id="drvLog_${escapeHtml(a.id)}"></span>
+        </div>
+      </div>`).join("");
+    $$(".drv-card [data-act=regen]", box).forEach((b) =>
+      b.addEventListener("click", () => drvRegenAsset(b.dataset.id)));
+  } catch (e) {
+    box.innerHTML = `<div class="d-empty">加载失败: ${escapeHtml(e.message || e)}</div>`;
+  }
+}
+
+async function drvRegenAsset(id) {
+  const prompt = ($(`#drvP_${id}`).value || "").trim();
+  if (!prompt) { toast("提示词不能为空", "warn"); return; }
+  try {
+    const r = await apiPost("/api/drama-review/assets/regenerate", { name: DRV.project, id, prompt });
+    if (!r.ok) { toast(r.error || "启动失败", "warn"); return; }
+    DRV.tasks.set(r.task_id, { kind: "asset", id, cb: drvRenderAssets });
+    toast("已启动重新生成", "ok");
+    drvPoll(r.task_id);
+  } catch (e) {
+    toast("启动失败: " + (e.message || e), "warn");
+  }
+}
+
+/* ==================== 分镜模式渲染 ==================== */
+function drvSegKeyName(seg) {
+  return seg.replace(/-(\d+)$/, "");
+}
+
+async function drvLoadEpisodes() {
+  try {
+    const data = await apiGet("/api/drama-review/projects");
+    const proj = (data.projects || []).find((p) => p.name === DRV.project);
+    return (proj && proj.episodes) || [];
+  } catch (e) {
+    return [];
+  }
+}
+
+async function drvRenderSegments() {
+  const box = $("#drvBody");
+  box.innerHTML = '<div class="d-empty">加载分镜…</div>';
+  try {
+    const data = await apiGet(
+      "/api/drama-review/storyboard?name=" + encodeURIComponent(DRV.project) + "&ep=" + encodeURIComponent(DRV.ep));
+    const segs = data.segments || [];
+    box.innerHTML = `
+      <div class="drv-segbar">
+        <span class="drv-segbar-title">${escapeHtml(DRV.ep)} · ${segs.length} 段</span>
+        <button class="d-btn sm primary" id="drvMergeAll">✅ 确认合并本集（${escapeHtml(DRV.ep)}）</button>
+      </div>
+      <div class="drv-segs">
+        ${segs.map((s) => `
+        <div class="drv-seg" data-seg="${escapeHtml(s.seg)}">
+          <div class="drv-card-top">
+            <b>${escapeHtml(s.seg)} · ${escapeHtml(s.title || "")}</b>
+            <span class="drv-status">${s.duration}s ${s.has_video ? "✅已出片" : "⏳未出片"}</span>
+          </div>
+          ${s.has_video && s.video ? `
+          <div class="drv-card-img drv-video">
+            <video controls preload="metadata" src="/api/deliverables/view?path=${encodeURIComponent(s.video)}${s.vmtime ? '&v=' + s.vmtime : ''}"></video>
+          </div>` : `<div class="drv-card-img"><div class="d-empty">无视频（${s.kfs && s.kfs.length ? s.kfs.length + " 张关键帧就绪" : "缺关键帧"}）</div></div>`}
+          <textarea id="drvSegP_${escapeHtml(s.seg)}" class="d-input drv-prompt" rows="4" spellcheck="false">${escapeHtml(s.prompt || "")}</textarea>
+          <div class="drv-card-actions">
+            <button class="d-btn sm" data-act="rerender" data-seg="${escapeHtml(s.seg)}">🎬 直接重渲此段</button>
+            <button class="d-btn sm primary" data-act="rerender2" data-seg="${escapeHtml(s.seg)}">✏ 按上方提示词重渲</button>
+            <span class="drv-tasklog" id="drvSegLog_${escapeHtml(s.seg)}"></span>
+          </div>
+        </div>`).join("")}
+      </div>`;
+    $$("[data-act=rerender]", box).forEach((b) =>
+      b.addEventListener("click", () => drvRerender(b.dataset.seg, "")));
+    $$("[data-act=rerender2]", box).forEach((b) =>
+      b.addEventListener("click", () => drvRerender(b.dataset.seg, "use_prompt")));
+    $("#drvMergeAll", box).addEventListener("click", () => drvMerge([DRV.ep]));
+  } catch (e) {
+    box.innerHTML = `<div class="d-empty">加载失败: ${escapeHtml(e.message || e)}</div>`;
+  }
+}
+
+async function drvRerender(seg, usePrompt) {
+  let prompt = "";
+  if (usePrompt) {
+    prompt = ($(`#drvSegP_${seg}`).value || "").trim();
+    if (!prompt) { toast("提示词不能为空", "warn"); return; }
+  }
+  try {
+    const r = await apiPost("/api/drama-review/segments/render", {
+      name: DRV.project, ep: DRV.ep, seg, prompt });
+    if (!r.ok) { toast(r.error || "启动失败", "warn"); return; }
+    DRV.tasks.set(r.task_id, { kind: "seg", id: seg, cb: drvRenderSegments });
+    toast("已启动重渲 " + seg, "ok");
+    drvPoll(r.task_id);
+  } catch (e) {
+    toast("启动失败: " + (e.message || e), "warn");
+  }
+}
+
+async function drvMerge(eps) {
+  try {
+    const r = await apiPost("/api/drama-review/merge", { name: DRV.project, eps });
+    if (!r.ok) { toast(r.error || "启动失败", "warn"); return; }
+    DRV.tasks.set(r.task_id, { kind: "merge", id: eps.join(","), cb: drvRenderSegments });
+    toast("已启动合并 " + eps.join(","), "ok");
+    drvPoll(r.task_id);
+  } catch (e) {
+    toast("启动失败: " + (e.message || e), "warn");
+  }
+}
+
+/* ==================== 任务轮询 ==================== */
+function drvPoll(tid) {
+  if (typeof window.__drvPollingActive === "undefined") window.__drvPollingActive = setInterval(drvPollStep, 3000);
+}
+
+async function drvPollStep() {
+  if (!DRV.tasks.size) { clearInterval(window.__drvPollingActive); window.__drvPollingActive = undefined; return; }
+  for (const [tid, meta] of [...DRV.tasks.entries()]) {
+    try {
+      const t = await apiGet("/api/drama-review/tasks/" + tid);
+      const target = meta.kind === "asset" ? `#drvLog_${meta.id}` : `#drvSegLog_${meta.id}`;
+      const el = $(target);
+      if (el) {
+        const last = (t.log || []).slice(-1)[0] || "";
+        el.textContent = (t.status === "running" ? "⏳" : t.status === "done" ? "✅" : t.status === "failed" ? "❌" : "") + " " + last;
+      }
+      if (t.status === "done" || t.status === "failed") {
+        if (meta.cb) meta.cb();
+        DRV.tasks.delete(tid);
+      }
+    } catch (e) { /* 单任务失败不阻断 */ }
+  }
+}
+
+/* ==================== 主渲染 ==================== */
+function drvRender() {
+  const box = $("#drvBody");
+  if (!DRV.project) { box.innerHTML = '<div class="d-empty">请先选择作品</div>'; return; }
+  if (DRV.mode === "assets") {
+    drvRenderAssets();
+  } else {
+    if (!DRV.ep) {
+      box.innerHTML = '<div class="d-empty">请选择要审核的集</div>';
+      return;
+    }
+    drvRenderSegments();
+  }
+}
+
+async function renderReviewTab(el) {
+  el.innerHTML = `
+    <div class="st drv">
+      <div class="st-head">
+        <div class="st-head-title">🎬 短剧审核台</div>
+        <div class="st-head-hint">资产审核：改提示词重新生成角色/场景/道具图（--ref 锁形象）。分镜审核：逐集列出分镜提示词与成片，可直接重渲或改词重渲；确认后合并成完整视频。</div>
+      </div>
+      <div class="st-cols">
+        <section class="st-left">
+          <div class="st-block">
+            <div class="st-block-hd"><span>选择作品</span></div>
+            <select id="drvProjectSel" class="d-input drv-proj-sel"></select>
+            <div class="d-row" style="margin-top:8px">
+              <button class="d-btn sm" id="drvRefresh">⟳ 刷新</button>
+            </div>
+          </div>
+          <div class="st-block">
+            <div class="st-block-hd"><span>审核模式</span></div>
+            <div class="d-row" id="drvModeSeg">
+              <button class="d-btn sm" data-mode="assets">🖼 资产审核</button>
+              <button class="d-btn sm" data-mode="segments">🎬 分镜审核</button>
+            </div>
+            <div class="d-row" id="drvEpRow" style="margin-top:8px;flex-wrap:wrap"></div>
+          </div>
+          <button class="d-btn sm" id="drvMergeFull" style="margin-top:8px">✅ 合并全部集为连播</button>
+        </section>
+        <section class="st-right">
+          <div id="drvBody" class="drv-body"></div>
+        </section>
+      </div>
+    </div>`;
+
+  DRV.mode = "assets";
+  drvLoadProjects().then(() => {
+    drvSetupModes(el);
+    drvSetupEps(el).then(() => drvRender());
+  });
+}
+
+function drvSetupModes(el) {
+  $$("#drvModeSeg button", el).forEach((b) => {
+    b.addEventListener("click", () => {
+      DRV.mode = b.dataset.mode;
+      $$("#drvModeSeg button", el).forEach((x) => x.classList.toggle("primary", x === b));
+      drvSetupEps(el).then(() => drvRender());
+    });
+  });
+  $("#drvRefresh", el).addEventListener("click", () => { drvLoadProjects().then(() => drvRender()); });
+  $("#drvProjectSel", el).addEventListener("change", drvSelectProject);
+  $("#drvMergeFull", el).addEventListener("click", async () => {
+    const eps = await drvLoadEpisodes();
+    if (!eps.length) { toast("无集可合并", "warn"); return; }
+    drvMerge(eps);
+  });
+}
+
+async function drvSetupEps(el) {
+  const row = $("#drvEpRow", el);
+  if (DRV.mode !== "segments") { row.innerHTML = ""; DRV.ep = ""; return; }
+  const eps = await drvLoadEpisodes();
+  if (!eps.length) { row.innerHTML = '<span class="d-empty">无投喂稿</span>'; return; }
+  if (!DRV.ep && eps.length) DRV.ep = eps[0];
+  row.innerHTML = eps.map((e) =>
+    `<button class="d-btn sm ${e === DRV.ep ? "primary" : ""}" data-ep="${escapeHtml(e)}">${escapeHtml(e)}</button>`
+  ).join("");
+  $$("button[data-ep]", row).forEach((b) => b.addEventListener("click", () => {
+    DRV.ep = b.dataset.ep;
+    $$("button[data-ep]", row).forEach((x) => x.classList.toggle("primary", x === b));
+    drvRender();
+  }));
+}
+
+window.renderReviewTab = renderReviewTab;
+window.__drvPollingActive = undefined;

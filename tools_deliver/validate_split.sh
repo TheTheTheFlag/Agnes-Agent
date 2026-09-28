@@ -12,11 +12,11 @@ python3 - "$MD" "$TMP" <<'PYEOF'
 import re, os, sys
 txt = open(sys.argv[1], encoding="utf-8").read()
 tmp = sys.argv[2]
-parts = re.split(r"(?m)^## (E01-\d+)\s*·", txt)
+parts = re.split(r"(?m)^## (E0\d-\d+)\s*·", txt)
 segs = {}
 cur = None
 for tok in parts:
-    if re.fullmatch(r"E01-\d+", tok):
+    if re.fullmatch(r"E0\d-\d+", tok):
         cur = tok; segs[cur] = []
     elif cur is not None:
         segs[cur].append(tok)

@@ -51,7 +51,7 @@
 
 ## 🧮 常用指令（SKILL 内注册）
 
-`/写剧本` · `/台词诊断` · `/数字资产包` · `/做分镜` · `/语速自检` · `/生成视频提示词` · `/导出工作流参数` · `/看板` · `/微表情` · `/审查` · `跳过确认，直接出整集`
+`/写剧本` · `/台词诊断` · `/数字资产包` · `/做分镜` · `/语速自检` · `/生成视频提示词` · `/导出工作流参数` · `/看板` · `/微表情` · `/审查` · `/角色概念设计` · `跳过确认，直接出整集`
 
 > 完整指令路由（含 `/剧组产出册` `/资产图册` `/情绪曲线` `/角色资产板` `/顶视图` 等）见 `SKILL.md` 四、快速指令路由。
 
@@ -74,7 +74,7 @@ openclaw skills install ./short-drama-director --as short-drama-director
 python3 scripts/check_package.py
 ```
 
-检查：SKILL frontmatter 完整性、references 清单（43 份）、语义回归（可灵残留 / 4 View 口径 / Prompt 格式命名 / LEGACY 标记 / README-SKILL 版本一致 / agnes 单通道 / 机检 C1~C20）。
+检查：SKILL frontmatter 完整性、references 清单（44 份）、语义回归（可灵残留 / 4 View 口径 / Prompt 格式命名 / LEGACY 标记 / README-SKILL 版本一致 / agnes 单通道 / 机检 C1~C20）。
 
 ---
 
@@ -83,7 +83,7 @@ python3 scripts/check_package.py
 ```
 short-drama-director/
 ├── SKILL.md                     # 总控路由 + 工作法 + 模块清单
-├── references/                  # 43 个专业规则库
+├── references/                  # 44 个专业规则库
 ├── scripts/
 │   ├── check_package.py         # 包级静态规则与完整性校验脚本（打包/出厂时跑）
 │   ├── validate_prompt.py       # 稿件级投喂词机检门禁（C1~C20，`--model agnes`；`--model h3` 历史兼容）
