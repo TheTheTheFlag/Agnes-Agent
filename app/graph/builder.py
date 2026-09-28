@@ -188,10 +188,23 @@ def chatbot(state: State, config: RunnableConfig):
     def on_tool_before(name, params):
         if name in _APPROVAL_TOOLS:
             cmd = params.get('command', '')
-            for d in ['rm -rf /', 'dd ', 'mkfs', 'format', 'shutdown']:
-                if d in cmd:
+            if cmd:
+                # 递归删除（rm -r/-rf）：目标须位于当前用户工作区内——区内全权
+                # （deliverables/ 等可自由删除重建），区外仍拦截（见 path_guard）
+                from app.tools.path_guard import rm_recursive_outside_workspace
+                _esc = rm_recursive_outside_workspace(cmd)
+                if _esc:
                     print(f"⚠️ [安全] 阻止: {cmd}")
-                    return False
+                    return False, (
+                        f"[安全策略] 递归删除目标「{_esc}」不在你的工作区内，已拒绝。"
+                        f"你的工作区是 {_up.root}/，区内路径可自由删除；"
+                        "请改用区内绝对路径重试，或在同一条命令中先 cd 到工作区内再删"
+                        "（工作区根、自身 data/ 等运行时文件不可删）。"
+                    )
+                for d in ['dd ', 'mkfs', 'format', 'shutdown']:
+                    if d in cmd:
+                        print(f"⚠️ [安全] 阻止: {cmd}")
+                        return False, f"[安全策略] 命令包含系统级危险操作「{d.strip()}」，已拒绝。"
         return True
 
     # 工具调用后的副作用写入

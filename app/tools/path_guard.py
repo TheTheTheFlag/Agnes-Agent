@@ -135,3 +135,127 @@ def command_targets_protected(cmd: str) -> bool:
         if kw in hay:
             return True
     return False
+
+
+# ==================== 递归删除的工作区边界（2026-09-28） ====================
+# 背景：前置门禁原以子串 'rm -rf /' 拦截，凡「rm -rf + 绝对路径」一律误杀——
+# 连本用户工作区内的合法删除/重建（deliverables/ 下剧目目录）也被拦，且拒因含糊，
+# 模型改参数反复重试触发「连续 3 次被拒」纪律终止。现改为路径级判定：
+# 递归删除（rm -r/-rf/--recursive）的目标必须全部位于当前用户工作区内
+# （data/users/<用户名>/，区内全权）；区外、工作区根、运行时受保护文件仍拒绝，
+# 并返回具体目标 token 供拒因提示（模型凭此可直接改正）。
+
+# shell 操作符：把命令切成「简单命令」段（含后台 &）
+_OP_SPLIT_RE = re.compile(r"&&|\|\||;|\||&")
+# 重定向构造（2>&1、>out、>>log、<<EOF 等）：先整体剔除再切段，
+# 避免 fd 数字（如 2>&1 的 "2"）与重定向文件名混入 rm 目标
+_REDIR_RE = re.compile(r"(?:>>|\d*>|<|&>)\s*(?:&\s*\d+|\d+|\S*)")
+# cd 参数不可静态判定（变量/命令替换/通配）时的特征 → cwd 置为未知（相对目标保守拒绝）
+_CD_UNSAFE_RE = re.compile(r"[$`*?\[\]]")
+# 段首 rm（含 bash -c "rm -rf …" 这类引号内命令被拆出的 token）
+_RM_START_RE = re.compile(r"^rm\s")
+
+
+def _segments(cmd: str) -> list:
+    """按 shell 操作符切段、分词；引号内本身是命令（bash -c "rm -rf …"）时拆开继续分析。"""
+    segs = []
+    for part in _OP_SPLIT_RE.split(_REDIR_RE.sub(" ", cmd or "")):
+        toks = []
+        for t in _shell_tokens(part or ""):
+            if t == "rm" or _RM_START_RE.match(t):
+                toks.extend(t.split())
+            else:
+                toks.append(t)
+        if toks:
+            segs.append(toks)
+    return segs
+
+
+def _abs_in_workspace(path: str, ws: str) -> bool:
+    """绝对路径是否位于当前用户工作区内（工作区根与运行时受保护文件视为区外）。"""
+    rel = os.path.relpath(os.path.realpath(path), os.path.realpath(BASE_DIR)).replace("\\", "/").lower()
+    if ws and (rel == ws or rel.startswith(ws + "/")):
+        return not _workspace_runtime_protected(rel, ws)
+    return False
+
+
+def _rm_target_in_workspace(tok: str, cwd: Optional[str], ws: str) -> bool:
+    """递归删除的单个目标 token 是否位于工作区内（保守：无法静态判定=区外）。"""
+    if not tok or "$" in tok or "`" in tok:
+        return False
+    # 通配符安全：* ? [ 只能展开为「前缀目录」内的条目（不会跨 /），前缀在区内才放行
+    cut = len(tok)
+    for ch in ("*", "?", "["):
+        i = tok.find(ch)
+        if i != -1:
+            cut = min(cut, i)
+    core = tok[:cut]
+    if not core:
+        return False
+    if core.startswith("~"):
+        p = os.path.expanduser(core)
+    elif os.path.isabs(core):
+        p = core
+    elif cwd:
+        p = os.path.join(cwd, core)
+    else:
+        return False
+    return _abs_in_workspace(p, ws)
+
+
+def rm_recursive_outside_workspace(cmd: str) -> Optional[str]:
+    """检出「递归删除且目标逃出当前用户工作区」的命令。
+
+    返回首个区外目标 token（供拒因提示）；全部安全（含非递归 rm、无目标）返回 None。
+    工作区=data/users/<用户名>/：区内普通路径（deliverables/ uploads/ skills/ 等）
+    全权放行（含删后重建）；区外所有路径（/、~、他人目录、相对越界、含变量/命令
+    替换的不可判定目标）与工作区根、自身 data/、.thread_id、.approval_mode 仍拦截。
+    支持 `cd <区内路径> && rm -r <相对路径>` 的 cwd 跟踪。
+    """
+    if not cmd:
+        return None
+    ws = _current_workspace_rel() or ""
+    cwd = os.path.realpath(BASE_DIR)
+    for toks in _segments(cmd):
+        # cd 跟踪：让「cd 区内目录 && rm -r 相对路径」判定正确
+        if toks[0] == "cd" and len(toks) == 2:
+            arg = toks[1]
+            if _CD_UNSAFE_RE.search(arg) or arg.startswith("-"):
+                cwd = None
+            elif arg.startswith("~"):
+                cwd = os.path.expanduser(arg)
+            elif os.path.isabs(arg):
+                cwd = arg
+            else:
+                cwd = os.path.join(cwd, arg) if cwd else None
+            continue
+        # rm 允许出现在段内任意位置（sudo rm / /bin/rm / $(rm …)）
+        idx = -1
+        for i, t in enumerate(toks):
+            if t == "rm" or t.endswith("/rm") or t in ("$(rm", "`rm"):
+                idx = i
+                break
+        if idx < 0:
+            continue
+        recursive = False
+        targets = []
+        seen_dashdash = False
+        for t in toks[idx + 1:]:
+            if not seen_dashdash and t == "--":
+                seen_dashdash = True
+                continue
+            if not seen_dashdash and t.startswith("--"):
+                if t.startswith("--recursive"):
+                    recursive = True
+                continue
+            if not seen_dashdash and t.startswith("-") and len(t) > 1:
+                if "r" in t[1:] or "R" in t[1:]:
+                    recursive = True
+                continue
+            targets.append(t)
+        if not recursive or not targets:
+            continue
+        for tgt in targets:
+            if not _rm_target_in_workspace(tgt, cwd, ws):
+                return tgt
+    return None

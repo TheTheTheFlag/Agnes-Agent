@@ -166,7 +166,16 @@ def _run_node(thread_id: str, task_plan_id: int, node: Dict, goal: str,
         """
         if name == "execute_command":
             cmd = params.get("command", "")
-            for d in ("rm -rf /", "dd ", "mkfs", "format", "shutdown"):
+            # 递归删除：目标须位于当前用户工作区内（区内全权）；区外拒绝并给出具体目标
+            from app.tools.path_guard import rm_recursive_outside_workspace
+            _esc = rm_recursive_outside_workspace(cmd)
+            if _esc:
+                return False, (
+                    f"[安全策略] 递归删除目标「{_esc}」不在你的工作区内，已拒绝。"
+                    "请改用工作区（data/users/<当前用户>/）内的绝对路径重试；"
+                    "工作区根、自身 data/ 等运行时文件不可删。"
+                )
+            for d in ("dd ", "mkfs", "format", "shutdown"):
                 if d in cmd:
                     return False, f"[安全策略] execute_command 命令 '{cmd[:80]}' 包含危险关键字 '{d}'，已被拒绝。"
         if name == "complete_node":

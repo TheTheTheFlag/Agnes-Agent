@@ -39,13 +39,16 @@ def execute_command(command: str, timeout: int = 60) -> str:
       timeout: 超时秒数（默认 60）
 
     返回: {"command", "returncode", "stdout", "stderr"}
-    注意: 该工具需要人工审批；请避免使用危险命令（rm -rf / 等）。
+    注意: 该工具需要人工审批；rm -rf 只允许删除工作区内的路径（工作区外与工作区根一律拒绝）。
     """
     result = {"command": command, "returncode": 0, "stdout": "", "stderr": ""}
     # 命令可能绕过文件工具写核心路径（如 copy/del 到 static/data/.env 等）→ 拦截
-    from app.tools.path_guard import command_targets_protected
+    from app.tools.path_guard import command_targets_protected, rm_recursive_outside_workspace
     if command_targets_protected(command):
         return json.dumps({"error": "命令涉及受保护路径（app/server/static、data/、.env、.git 等），已拒绝执行。产出请写入 deliverables/。", "command": command}, ensure_ascii=False)
+    _esc = rm_recursive_outside_workspace(command)
+    if _esc:
+        return json.dumps({"error": f"递归删除目标「{_esc}」不在你的工作区内，已拒绝。工作区内绝对路径可自由删除。", "command": command}, ensure_ascii=False)
     try:
         proc = subprocess.run(
             command, shell=True, capture_output=True, env=_SUBPROC_ENV, timeout=timeout
