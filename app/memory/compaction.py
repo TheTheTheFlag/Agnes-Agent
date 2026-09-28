@@ -109,7 +109,7 @@ def _messages_to_text(messages) -> str:
 def compact_in_background(thread_id: str, messages: List, llm, db_path: str, user: str = None) -> bool:
     """按需在**后台线程**压缩历史。返回是否已启动（False = 不需要/已在压缩）。
 
-    写入 DB（history_summaries 摘要表 + messages 里一条「📦 历史已压缩」系统气泡），
+    写入 DB（history_summaries 摘要表 + messages 里一条内嵌摘要全文的「📦 历史已压缩」气泡，
     **不改 LangGraph state**——
     下一轮 chatbot 通过 `mm.build_context()` / `build_memory_injection` 自然读到新摘要。
     """
@@ -160,8 +160,7 @@ def compact_in_background(thread_id: str, messages: List, llm, db_path: str, use
                     from datetime import datetime as _dt
                     _ts = _dt.now().strftime("%H:%M:%S")
                     mm.add_message(thread_id, "assistant",
-                                   f"📦 历史已压缩（{_ts}）：较早的对话已转为摘要，"
-                                   "最近 30 条保留原文，后续轮次将基于摘要继续。")
+                                   f"📦 历史已压缩（{_ts}）：较早的对话已转为摘要，\n\n{summary}")
                 except Exception:
                     pass
         except Exception as e:
