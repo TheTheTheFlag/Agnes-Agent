@@ -30,30 +30,40 @@ _INFLIGHT = set()
 
 _COMPACT_SYS = (
     "你是对话记忆压缩器。把【较早的对话】压缩成一份结构化里程碑摘要，供后续轮次继续使用。\n"
-    "严格输出以下六个 markdown 小节（标题保持英文，正文用中文），顺序与标题必须完全一致：\n"
+    "先看一个严格格式示例（示例内容仅供参考，请按真实对话填充，不要输出示例本身）：\n"
     "## Objective\n"
-    "- 本轮会话当前要达成的目标（一句话）\n"
+    "- 完成 A 项目的 B 功能\n"
     "## Requirements\n"
-    "- 必须遵守的硬性要求与约束（含用户提出的明确限制与不可逾越的前提）\n"
+    "- 不改动 C 模块；数据必须落在 D 路径\n"
     "## Decisions\n"
-    "- 已确定的关键决策与取舍（含用户明确表态的方向/选项）\n"
+    "- 采用方案 X；备份命名规则 Y\n"
     "## Work State\n"
     "### Completed\n"
-    "- 已完成的事（带简要结果或证据）\n"
+    "- 完成 B 功能，结果已验收\n"
     "### Active\n"
-    "- 正在做、尚未收尾的事\n"
+    "- 进行中：联调 E 模块\n"
     "### Blocked\n"
-    "- 卡住的事与原因（若有则写，无则写 (none)）\n"
+    "- (none)\n"
     "## Next Move\n"
-    "- 下一步 1-2 条（编号列表）\n"
+    "1. 推进 E 联调\n"
+    "2. 补充测试用例\n"
     "## Relevant Files\n"
-    "- 提到过的文件路径，每行一个 `- 路径 — 说明`\n"
-    "要求：\n"
+    "- /path/to/file — 说明\n"
+    "现在请对【较早的对话】输出同款六小节摘要（小节标题必须为：## Objective / ## Requirements / ## Decisions /"
+    " ## Work State（内含 ### Completed / ### Active / ### Blocked）/ ## Next Move / ## Relevant Files，"
+    "一个都不能少、顺序不能乱），规则：\n"
     "- 逐字保留关键标识：文件路径、命令名、变量名、数字、报错信息，不要泛化\n"
-    "- 丢弃寒暄、重复表述与过程性描述\n"
+    "- 丢弃寒暄、重复表述与过程性描述，不要复述原回复的排版\n"
     "- 用中文，总计不超过 600 字\n"
-    "- 只输出摘要本身，不要任何额外说明或前后缀，六个小节一个都不能少\n"
+    "- 只输出摘要本身，不要任何额外说明或前后缀\n"
 )
+
+
+def _is_template_compacted(text: str) -> bool:
+    """校验摘要是否具备六小节模板骨架（防模型不遵循模板）。"""
+    heads = ["## Objective", "## Requirements", "## Decisions", "## Work State",
+             "### Completed", "### Active", "### Blocked", "## Next Move", "## Relevant Files"]
+    return all(h in text for h in heads)
 
 
 def _keep_recent() -> int:
@@ -120,11 +130,25 @@ def compact_in_background(thread_id: str, messages: List, llm, db_path: str, use
         try:
             from app.memory.memory_manager import MemoryManager
             text = _messages_to_text(older)
-            resp = llm.invoke([
-                SystemMessage(content=_COMPACT_SYS),
-                HumanMessage(content=text[:60000]),
-            ])
+
+            def _invoke():
+                return llm.invoke([
+                    SystemMessage(content=_COMPACT_SYS),
+                    HumanMessage(content=text[:60000]),
+                ])
+
+            resp = _invoke()
             summary = (getattr(resp, "content", "") or "").strip()
+            # 防御：模型可能不遵循模板（如 deepseek-v4-pro 指令遵循弱），
+            # 校验六小节骨架，缺失则重试一次；仍失败则用本次输出（保证不丢信息）。
+            if summary and not _is_template_compacted(summary):
+                try:
+                    resp2 = _invoke()
+                    s2 = (getattr(resp2, "content", "") or "").strip()
+                    if s2 and _is_template_compacted(s2):
+                        summary = s2
+                except Exception:
+                    pass
             if summary:
                 # 不再传 llm：避免内部再调一次 LLM 给摘要打分（旧实现的第 3 次调用）
                 mm = MemoryManager(db_path=db_path, thread_id=thread_id)
