@@ -8,9 +8,11 @@ Agnes AI 媒体统一生成脚本（skill: agnes-media）
   image  →  POST /api/image/generate（异步任务）→ GET /api/image/task/{id} 轮询 → 产物已入库
   video  →  POST /api/video/generate（异步任务）→ GET /api/video/task/{id} 轮询 → 产物已入库
   fetch  →  GET /api/video/task/{id} / /api/image/task/{id} 查询任务状态
+  cancel →  POST /api/{video,image}/cancel 取消任务（停止自动重试/重建）
 
 - 生成失败由后端自动重试直到成功（图片 worker 线程；视频失败自动重建任务）；
-  脚本侧在轮询超限前一直等待，超时应改用 fetch 续查、不要重新创建任务。
+  脚本侧在轮询超限前一直等待，超时应改用 fetch 续查、不要重新创建任务；
+  需要停止时用 cancel 子命令（停止后续重试/重建；在途上游请求无法中断）。
 - 产物直接落在创建任务的用户「作品库」（data/.../image_library|video_library），
   创作台页面与本脚本产物唯一、不重复。stdout 输出 FILE=（作品库绝对路径）供后续处理。
 - 日志仍追加写 <skill_dir>/output/YYYYMMDD/log.md（只写日志，不重复落产物文件）。
@@ -198,28 +200,55 @@ def _api_download(path: str, dst: Path) -> None:
 
 
 # ==================== 轮询（复用页面 task 端点） ====================
+def _attempt_of(item: dict) -> int:
+    """尝试次数：图片任务用 attempt；视频旧条目无 attempt 时用 rebuild_count + 1 回落。"""
+    try:
+        a = int(item.get("attempt") or 0)
+    except (TypeError, ValueError):
+        a = 0
+    if a:
+        return a
+    try:
+        return int(item.get("rebuild_count") or 0) + 1
+    except (TypeError, ValueError):
+        return 1
+
+
 def poll_task(kind: str, item_id: str, interval: int, max_wait: int) -> dict:
-    """轮询 /api/{kind}/task/{id} 直到 completed/failed；超时抛错提示 fetch 续查。"""
+    """轮询 /api/{kind}/task/{id} 直到 completed/failed/cancelled；超时抛错提示 fetch 续查。"""
     t0 = time.time()
     last_st = ""
+    last_attempt = 0
     while True:
         r = _api_get(f"/api/{kind}/task/{item_id}")
         item = r.get("item") or {}
         st = item.get("status") or "queued"
-        if st != last_st:
+        attempt = _attempt_of(item)
+        hb = item.get("last_heartbeat") or ""
+        if st != last_st or attempt != last_attempt:
             line = f"[media] {kind} 任务状态: {st}"
             if item.get("progress"):
                 line += f" {item['progress']}%"
+            if attempt > 1:
+                line += f"（第 {attempt} 次尝试）"
+            if hb:
+                line += f" 心跳 {hb}"
             if item.get("error"):
                 line += f"（{item['error']}）"
             print(line, file=sys.stderr)
+            if attempt > last_attempt > 0:
+                print(f"[media] {kind} 后端自动重试中（第 {attempt} 次尝试），无需重建任务", file=sys.stderr)
             last_st = st
+            last_attempt = attempt
         if st == "completed" and item.get("file"):
             return item
+        if st == "cancelled":
+            raise SystemExit(f"[media] 任务已取消: {item.get('error') or '（不再自动重试）'}（TASK_ID={item_id}）")
         if st == "failed":
             raise SystemExit(f"[media] 任务失败: {item.get('error') or '未知错误'}（TASK_ID={item_id}，多次自动重试仍未成功）")
         if time.time() - t0 > max_wait:
-            raise SystemExit(f"[media] 轮询超时（{max_wait}s），TASK_ID={item_id}，可稍后用 fetch 子命令续查（后端仍在自动重试）")
+            raise SystemExit(f"[media] 轮询超时（{max_wait}s），TASK_ID={item_id}，可稍后用 fetch 子命令续查（后端仍在自动重试）；"
+                             f"确认不再需要时用 cancel 停止（不再重试/重建）")
         time.sleep(interval)
 
 
@@ -426,6 +455,27 @@ def cmd_fetch(args) -> int:
     raise SystemExit(f"[media] 未找到任务: {ident}")
 
 
+def cmd_cancel(args) -> int:
+    """取消任务（video 优先，其次 image）：停止后端自动重试/重建。在途上游请求无法中断。"""
+    ident = (args.video_id or args.task_id or "").strip()
+    if not ident:
+        raise SystemExit("[media] cancel 需要 --video-id 或 --task-id")
+    for kind in ("video", "image"):
+        r = _api_get(f"/api/{kind}/task/{ident}", allow_404=True)
+        if not r:
+            continue
+        item = r.get("item") or {}
+        iid = item.get("id") or ident
+        st = item.get("status") or ""
+        if st in ("completed", "failed", "cancelled"):
+            print(f"[media] {kind} 任务已是终态（{st}），无需取消: {iid}")
+            return 0
+        out = _api_post(f"/api/{kind}/cancel", {"ids": [iid]})
+        print(f"[media] {kind} 取消已提交: cancelled={out.get('cancelled')} ids={out.get('ids')}")
+        return 0
+    raise SystemExit(f"[media] 未找到任务: {ident}")
+
+
 # ==================== CLI ====================
 def add_common_image_args(p):
     p.add_argument("--prompt", required=True, help="图像描述 / 编辑指令")
@@ -440,7 +490,8 @@ def add_common_image_args(p):
     p.add_argument("--return-base64", action="store_true", help="文生图直接以 Base64 返回（并入异步入库，恒为 FILE）")
     p.add_argument("--extra", default="", help='附加参数 JSON（如 \'{"seed":42}\'）')
     p.add_argument("--interval", type=int, default=5, help="轮询间隔秒数（默认 5）")
-    p.add_argument("--timeout", type=int, default=600, help="最大等待秒数（默认 600；后端 6h 内持续自动重试）")
+    p.add_argument("--timeout", type=int, default=600,
+                   help="最大等待秒数（默认 600；后端 6h 内持续自动重试；超时后用 fetch 续查、不要重建任务）")
     p.add_argument("--dry-run", action="store_true", help="只打印将发送的请求体，不发请求")
 
 
@@ -461,8 +512,8 @@ def add_common_video_args(p):
     p.add_argument("--steps", type=int, default=None, help="num_inference_steps（后端不支持，忽略）")
     p.add_argument("--mode", default="", help="其它生成模式标记（keyframes 请用 --keyframes 自动设置）")
     p.add_argument("--interval", type=int, default=8, help="轮询间隔秒数（默认 8）")
-    p.add_argument("--timeout", type=int, default=HTTP_TIMEOUT,
-                   help="最大等待秒数（默认 300；视频批次脚本可设至 99 小时 = 356400s）")
+    p.add_argument("--timeout", type=int, default=1800,
+                   help="最大等待秒数（默认 1800；视频渲染较慢，超时后用 fetch 续查、不要重建任务）")
     p.add_argument("--extra", default="", help='附加参数 JSON（如 \'{"resolution":"720p"}\'）')
     p.add_argument("--dry-run", action="store_true", help="只打印将发送的请求体，不发请求")
 
@@ -485,6 +536,11 @@ def main() -> int:
     p_fetch.add_argument("--video-id", default="", help="创建任务返回的 video_id / 任务 id")
     p_fetch.add_argument("--task-id", default="", help="task_id（兼容旧版查询）")
     p_fetch.set_defaults(fn=cmd_fetch)
+
+    p_cancel = sub.add_parser("cancel", help="取消任务（停止自动重试/重建；在途上游请求无法中断）")
+    p_cancel.add_argument("--video-id", default="", help="创建任务返回的 video_id / 任务 id")
+    p_cancel.add_argument("--task-id", default="", help="task_id（兼容旧版查询）")
+    p_cancel.set_defaults(fn=cmd_cancel)
 
     args = parser.parse_args()
     return args.fn(args)

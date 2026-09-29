@@ -579,8 +579,12 @@ async function generateVideo() {
       throw new Error("服务器未返回任务信息");
     }
 
-    for (const it of r.items) VideoStudio.gallery.unshift(it);
-    toast(`✅ 任务已提交（${elapsed}ms），正在生成`, "success");
+    for (const it of r.items) {
+      const i = VideoStudio.gallery.findIndex((g) => g.id === it.id);
+      if (i >= 0) VideoStudio.gallery[i] = it; else VideoStudio.gallery.unshift(it);
+    }
+    if (r.deduped) toast("♻️ 检测到同内容任务进行中，已复用该任务（未重复提交）", "info");
+    else toast(`✅ 任务已提交（${elapsed}ms），正在生成`, "success");
     paintVideoGallery();
     (r.items || []).forEach((it) => pollVideoTask(it.id));
   } catch (e) {
@@ -622,13 +626,16 @@ function resumeVideoPolling() {
   pending.forEach((it) => pollVideoTask(it.id));
 }
 
-function isTerminal(s) { return s === "completed" || s === "failed"; }
+function isTerminal(s) { return s === "completed" || s === "failed" || s === "cancelled"; }
 
 function pollVideoTask(id) {
   if (!VideoStudio.pollers) VideoStudio.pollers = {};
   if (VideoStudio.pollers[id]) return;
   
   let retryCount = 0;
+  let lastSig = "";              // 进度签名：status|progress|attempt|last_heartbeat|error
+  let lastChangeAt = Date.now(); // 最近一次有进展的时间
+  let slowed = false;            // 长时间无进展 → 降为低频查询
   const maxRetries = 10; // 最多重试 10 次
   
   const tick = async () => {
@@ -640,11 +647,14 @@ function pollVideoTask(id) {
         if (i >= 0) VideoStudio.gallery[i] = it; else VideoStudio.gallery.unshift(it);
         paintVideoGallery();
         retryCount = 0; // 成功则重置重试计数
+        const sig = [it.status, it.progress, it.attempt, it.last_heartbeat, it.error].join("|");
+        if (sig !== lastSig) { lastSig = sig; lastChangeAt = Date.now(); }
         
         if (isTerminal(it.status)) {
           clearTimeout(VideoStudio.pollers[id]);
           delete VideoStudio.pollers[id];
           if (it.status === "completed") toast("✅ 视频已生成并入库", "success");
+          else if (it.status === "cancelled") toast("⏹ 任务已取消（不再重试）", "info");
           else toast("❌ 生成失败: " + (it.error || ""), "error");
           return;
         }
@@ -661,8 +671,12 @@ function pollVideoTask(id) {
       console.warn("[pollVideoTask] 轮询失败，重试", retryCount, "/", maxRetries, ":", e.message);
     }
     
-    // 指数退避：前几次快速重试，后面逐渐延长时间
-    const delay = Math.min(1500 * Math.pow(2, Math.min(retryCount, 3)), 15000);
+    // 指数退避：前几次快速重试，后面逐渐延长时间；30 分钟无进展则降频续查
+    let delay = Math.min(1500 * Math.pow(2, Math.min(retryCount, 3)), 15000);
+    if (Date.now() - lastChangeAt > 30 * 60 * 1000) {
+      delay = 60000;   // 后端仍在自动重试，降为低频查询、不放弃轮询
+      if (!slowed) { slowed = true; toast("🐢 任务长时间无进展（后端仍在自动重试），已切换为低频查询", "info"); }
+    }
     VideoStudio.pollers[id] = setTimeout(tick, delay);
   };
   

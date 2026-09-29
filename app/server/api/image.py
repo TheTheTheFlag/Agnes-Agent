@@ -9,6 +9,7 @@
 全部端点受登录中间件保护。
 """
 import base64
+import hashlib
 import json
 import mimetypes
 import os
@@ -53,6 +54,45 @@ _RETRY_TOTAL_MAX = 6 * 3600      # 任务重试总时长上限 6 小时
 _RETRY_START_SLEEP = 5           # 首轮失败后的等待（秒）
 _RETRY_429_SLEEP = 300           # 上游限流（429）冷却等待
 _RETRY_CAP_SLEEP = 120           # 普通失败退避上限
+
+# 提交去重：同一入参（含参考图内容哈希）在窗口内的在途任务只保留一个（防重复扣费）
+_DEDUP_WINDOW = 300              # 秒；窗口内同内容且在途（queued/running）视为重复提交
+
+
+def _dedup_key(payload: dict, mode: str, count: int) -> str:
+    """提交指纹：入参 JSON 规范化 + 模式/张数；参考图 Data URI 使去重按图片内容而非文件名。"""
+    blob = json.dumps(payload, ensure_ascii=False, sort_keys=True) + f"|mode={mode}|count={count}"
+    return hashlib.sha1(blob.encode("utf-8")).hexdigest()
+
+
+def _find_dedup(username: str, key: str) -> list:
+    """窗口内同指纹且在途的任务列表（命中则复用返回，不再新建）。"""
+    if not key:
+        return []
+    now = time.time()
+    out = []
+    with _user_items_lock(username):
+        for it in _get_user_items(username):
+            if it.get("dedup_key") != key:
+                continue
+            if it.get("status") not in ("queued", "running"):
+                continue
+            try:
+                created = time.mktime(time.strptime(it.get("created_at") or "", "%Y-%m-%d %H:%M:%S"))
+            except ValueError:
+                created = now
+            if now - created <= _DEDUP_WINDOW:
+                out.append(it)
+    return out
+
+
+def _task_cancelled(username: str, item_id: str) -> bool:
+    """任务是否已取消/被删除（worker 每轮检查，命中即停止继续重试）。"""
+    with _user_items_lock(username):
+        for it in _get_user_items(username):
+            if it.get("id") == item_id:
+                return it.get("status") == "cancelled"
+    return True   # 条目已被删除：也没有继续重试的必要
 
 
 def _agnes_keys() -> list:
@@ -322,7 +362,7 @@ def _call_generate(key: str, payload: dict) -> dict:
 
 
 def _create_pending(mode: str, model: str, prompt: str, size: str, ratio: str,
-                    n_refs: int, username: str) -> dict:
+                    n_refs: int, username: str, dedup_key: str = "") -> dict:
     """创建「生成中」占位条目并落盘 manifest，立即返回给前端展示。"""
     item = {
         "id": uuid.uuid4().hex[:12],
@@ -337,6 +377,8 @@ def _create_pending(mode: str, model: str, prompt: str, size: str, ratio: str,
         "status": "queued",
         "progress": 0,
         "attempt": 0,
+        "last_heartbeat": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "dedup_key": dedup_key,
         "error": "",
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "completed_at": "",
@@ -351,10 +393,16 @@ def _create_pending(mode: str, model: str, prompt: str, size: str, ratio: str,
 
 
 def _update_pending(username: str, item_id: str, **fields):
-    """按 id 更新占位条目（status/progress/error 等），仅当任务未被删除时生效。"""
+    """按 id 更新占位条目（status/progress/error 等），仅当任务未被删除时生效。
+
+    已取消任务是粘性状态：除「真成功(completed)」外任何回写都不覆盖 cancelled，
+    避免取消后旧线程把状态改回 running 造成「取消无效」。
+    """
     with _user_items_lock(username):
         for it in _get_user_items(username):
             if it.get("id") == item_id:
+                if it.get("status") == "cancelled" and fields.get("status") != "completed":
+                    break
                 it.update(fields)
                 break
     _save_user_manifest(username)
@@ -406,15 +454,20 @@ def _finish_pending(username: str, item_id: str, got: dict) -> None:
 
 
 def _worker_run(payload: dict, keys: list, username: str, item_id: str) -> None:
-    """单任务后台执行：轮换 key + 失败自动重试直到成功/超时。"""
+    """单任务后台执行：轮换 key + 失败自动重试直到成功/超时；每轮检查取消标记。"""
     t0 = time.time()
     sleep = _RETRY_START_SLEEP
     attempt = 0
     while True:
+        if _task_cancelled(username, item_id):
+            return                             # 已取消：停止继续重试（在途上游请求无法中断）
         attempt += 1
-        _update_pending(username, item_id, status="running", progress=0, attempt=attempt)
+        _update_pending(username, item_id, status="running", progress=0, attempt=attempt,
+                        last_heartbeat=time.strftime("%Y-%m-%d %H:%M:%S"))
         last_err = ""
         for key in keys:
+            if _task_cancelled(username, item_id):
+                return
             try:
                 got = _call_generate(key, payload)
                 _finish_pending(username, item_id, got)
@@ -429,7 +482,8 @@ def _worker_run(payload: dict, keys: list, username: str, item_id: str) -> None:
                     sleep = _RETRY_START_SLEEP         # 密钥失效：换下个 key
                     continue
                 break                                  # 其它错误（5xx/网络等）：本 key 失败换下个 key
-        _update_pending(username, item_id, status="running", error=last_err[:200])
+        _update_pending(username, item_id, status="running", error=last_err[:200],
+                        last_heartbeat=time.strftime("%Y-%m-%d %H:%M:%S"))
         if time.time() - t0 > _RETRY_TOTAL_MAX:
             _update_pending(username, item_id, status="failed", progress=0,
                             error=f"重试超过 {_RETRY_TOTAL_MAX // 3600}h 仍未成功，最后错误: {last_err[:200]}",
@@ -517,6 +571,12 @@ def generate(payload: dict, request: Request):
     else:
         base_payload["return_base64"] = True
 
+    dedup_key = _dedup_key(base_payload, mode, count)
+    if not p.get("allow_duplicate"):
+        dups = _find_dedup(username, dedup_key)
+        if dups:
+            return {"ok": True, "count": len(dups), "items": dups, "async": True, "deduped": True}
+
     # 异步化：立即创建占位任务并启动后台线程（失败自动重试直到成功）
     jobs = []
     items = []
@@ -525,7 +585,7 @@ def generate(payload: dict, request: Request):
         if count > 1:
             payload_dup["prompt"] = prompt.replace("#i", "").replace("{i}", "") or prompt
         item = _create_pending(mode, model, payload_dup["prompt"], size, ratio,
-                               len(data_uris), username)
+                               len(data_uris), username, dedup_key=dedup_key)
         jobs.append({"item": item, "payload": payload_dup})
         items.append(item)
     _start_worker(username, jobs)
@@ -622,3 +682,24 @@ async def delete(payload: dict, request: Request):
             _save_deleted_sources(username, dead)
     _save_user_manifest(username)
     return {"ok": True, "deleted": deleted}
+
+
+@router.post("/cancel")
+async def cancel(payload: dict, request: Request = None):
+    """取消任务：仅阻止后端继续自动重试（在途上游请求无法中断，可能仍产生一次扣费）。"""
+    username = getattr(getattr(request, "state", None), "username", None) or current_user()
+    ids = set(str(x) for x in ((payload or {}).get("ids") or []) if str(x).strip())
+    if not ids:
+        return JSONResponse({"error": "ids 必填"}, status_code=400)
+    done = []
+    with _user_items_lock(username):
+        for it in _get_user_items(username):
+            if it.get("id") not in ids:
+                continue
+            if it.get("status") in ("queued", "running"):
+                it["status"] = "cancelled"
+                it["error"] = "已取消（不再自动重试）"
+                it["completed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                done.append(it.get("id"))
+    _save_user_manifest(username)
+    return {"ok": True, "cancelled": len(done), "ids": done}

@@ -15,6 +15,7 @@
   E01-01 为全片唯一独立首帧（kf1.png 出图），每段 kf2.png 仍是 AI 出图（叙事落点，可改词重出）。
   级联重渲：POST /segments/cascade 自某段起串行重渲到片尾，跨集自动接力。
 """
+import hashlib
 import json
 import os
 import re
@@ -35,6 +36,7 @@ router = APIRouter(prefix="/api/drama-review", tags=["drama-review"])
 MEDIA = "/home/mirror/Agnes-Agent/app/skills_builtin/agnes-media/media.py"
 GENERATOR = "/home/mirror/Agnes-Agent/tools_deliver/gen_kzqs_videos.py"
 TOKEN_PATH = "/home/mirror/Agnes-Agent/data/internal_token"
+AGNES_ROOT = "/home/mirror/Agnes-Agent"
 
 _TASKS = {}
 _TASKS_LOCK = threading.RLock()
@@ -172,24 +174,125 @@ async def list_projects(request: Request):
     return {"projects": out}
 
 
+# ==================== 资产 manifest 结构容错 ====================
+# 历史 manifest 为 {assets:{characters,scenes,props}} 嵌套（条目含 views[].file），
+# 新契约为顶层扁平列表（§2c·补）。审核台必须两种都能读、都能回写，
+# 且回写不得改变原结构形状（legacy 继续 legacy）。
+_TYPE_ALIAS = {"characters": "character", "character": "character",
+               "scenes": "scene", "scene": "scene",
+               "interior": "scene", "exterior": "scene", "location": "scene",
+               "props": "prop", "prop": "prop", "item": "prop"}
+
+
+def _normalize_asset_type(t, cat=None):
+    """type 越界时回落分类键（单数化），最终缺省 prop。"""
+    t = _TYPE_ALIAS.get(str(t or "").strip(), str(t or "").strip())
+    if t in ("character", "scene", "prop"):
+        return t
+    return _TYPE_ALIAS.get(str(cat or "").strip(), "prop")
+
+
+def _asset_items(data):
+    """→ (pairs: [(cat|None, item)], shape)，shape ∈ flat|wrapped|categorized|unknown。
+
+    item 为原结构内对象的引用，就地改即写回原形状。
+    """
+    if isinstance(data, list):
+        return [(None, x) for x in data if isinstance(x, dict)], "flat"
+    if isinstance(data, dict):
+        v = data.get("items")
+        if isinstance(v, list):
+            return [(None, x) for x in v if isinstance(x, dict)], "wrapped"
+        v = data.get("assets")
+        if isinstance(v, list):
+            return [(None, x) for x in v if isinstance(x, dict)], "flat"
+        if isinstance(v, dict):
+            out = []
+            for cat, lst in v.items():
+                if isinstance(lst, list):
+                    out += [(cat, x) for x in lst if isinstance(x, dict)]
+            return out, "categorized"
+    return [], "unknown"
+
+
+def _asset_raw_ref(data, aid):
+    """在原始结构里就地定位 id/code == aid 的条目（回写它 = 不改结构形状）。"""
+    for _cat, it in _asset_items(data)[0]:
+        if (it.get("id") or it.get("code")) == aid:
+            return it
+    return None
+
+
+def _asset_abs_path(it, pdir):
+    """把条目里各种历史形式的图片引用解析成实际存在的绝对路径（找不到 → ""）。
+
+    候选来源：path 字段 + views[].file/image/path + 顶层 file；
+    候选基准：原值（绝对直用）→ 项目根 → DELIVERABLES 根 → Agnes 根。
+    """
+    vals = []
+    for k in ("path", "file"):
+        v = it.get(k)
+        if isinstance(v, str) and v.strip():
+            vals.append(v.strip())
+    for v in it.get("views") or []:
+        if isinstance(v, dict):
+            for k in ("file", "image", "path"):
+                x = v.get(k)
+                if isinstance(x, str) and x.strip():
+                    vals.append(x.strip())
+    cands = []
+    for v in vals:
+        v = v.replace("\\", "/")
+        if os.path.isabs(v):
+            cands.append(v)
+        else:
+            cands.append(os.path.join(pdir, v))
+            cands.append(os.path.join(_deliv_root(), v))
+            cands.append(os.path.join(AGNES_ROOT, v))
+    for c in dict.fromkeys(cands):
+        c = os.path.normpath(c)
+        if os.path.isfile(c):
+            return c
+    return ""
+
+
+def _dump_manifest(mp, obj):
+    """原子写回：先写 .tmp 再 os.replace，避免审核台读到半截 JSON。"""
+    tmp = mp + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, mp)
+
+
 @router.get("/assets")
 async def list_assets(name: str = "", request: Request = None):
     pdir = _proj_dir(name)
     mp = os.path.join(pdir, "assets", "manifest.json")
     if not os.path.isfile(mp):
         return {"assets": [], "name": name}
-    data = json.load(open(mp, encoding="utf-8"))
+    try:
+        data = json.load(open(mp, encoding="utf-8"))
+    except Exception as e:
+        return JSONResponse({"error": f"manifest 解析失败: {e}"}, status_code=500)
+    pairs, _shape = _asset_items(data)
     root = _deliv_root()
     out = []
-    for it in data or []:
-        abs_path = it.get("path", "")
-        rel = ""
-        if abs_path and abs_path.startswith(root):
-            rel = os.path.relpath(abs_path, root).replace("\\", "/")
+    for cat, it in pairs:
+        abs_path = _asset_abs_path(it, pdir)
+        rel = os.path.relpath(abs_path, root).replace("\\", "/") if abs_path.startswith(root) else ""
+        st = str(it.get("status") or it.get("asset_status") or "")
+        if st == "completed":
+            st = "ready"
+        # ready 但图解析不到 → 降为 draft（不为已消失的图显示「就绪」，与 qa_manifest 口径一致）
+        if st in ("", "ready"):
+            st = "ready" if abs_path else "draft"
         out.append({
-            "id": it.get("id"), "type": it.get("type"), "slug": it.get("slug"),
-            "prompt": it.get("prompt", ""), "ratio": it.get("ratio", "16:9"),
-            "status": it.get("status", ""), "path": rel,
+            "id": it.get("id") or it.get("code"),
+            "type": _normalize_asset_type(it.get("type"), cat),
+            "slug": it.get("slug", ""),
+            "prompt": it.get("prompt") or it.get("prompt_zh") or "",
+            "ratio": it.get("ratio", "16:9"),
+            "status": st, "path": rel,
             "file": os.path.basename(abs_path) if abs_path else "",
             "md5": it.get("md5", ""),
         })
@@ -208,7 +311,7 @@ def assets_regenerate(payload: dict, request: Request):
     data = []
     if os.path.isfile(mp):
         data = json.load(open(mp, encoding="utf-8"))
-    it = next((x for x in data if x.get("id") == aid), None)
+    it = _asset_raw_ref(data, aid)
     if it is None:
         return JSONResponse({"error": f"资产 {aid} 不存在"}, status_code=404)
 
@@ -220,14 +323,13 @@ def assets_regenerate(payload: dict, request: Request):
         try:
             it["prompt"] = prompt
             it["status"] = "regenerating"
-            with open(mp, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            _dump_manifest(mp, data)
 
             cmd = ["python3", MEDIA, "image", "--prompt", prompt,
                    "--ratio", it.get("ratio") or "16:9", "--size", "2K",
                    "--timeout", "3600"]
-            ref = it.get("path", "")
-            if ref and os.path.isfile(ref):
+            ref = _asset_abs_path(it, pdir)
+            if ref:
                 cmd += ["--ref", ref]
             _touch(tid, line=f"[{_now()}] media.py image 启动")
             pr = _run_proc(cmd, 7200, _token_env())
@@ -235,18 +337,16 @@ def assets_regenerate(payload: dict, request: Request):
             fm = re.search(r"FILE=(\S+)", out)
             if pr.returncode == 0 and fm and os.path.isfile(fm.group(1).strip()):
                 src = fm.group(1).strip()
-                if ref and os.path.isfile(ref):
-                    dst = ref
-                else:
-                    ext = os.path.splitext(src)[1] or ".png"
-                    slug = it.get("slug") or aid
-                    dst = os.path.join(pdir, "assets", f"{aid}-{slug}{ext}")
+                ext = os.path.splitext(src)[1] or ".png"
+                slug = it.get("slug") or aid
+                dst = os.path.join(pdir, "assets", "images", f"{slug}{ext}")
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
                 shutil.copy(src, dst)
-                it["path"] = dst
-                it["status"] = "completed"
+                it["path"] = f"assets/images/{slug}{ext}"
+                it["status"] = "ready"
+                it["md5"] = hashlib.md5(open(dst, "rb").read()).hexdigest()
                 it["size_kb"] = int(os.path.getsize(dst) // 1024)
-                with open(mp, "w", encoding="utf-8") as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
+                _dump_manifest(mp, data)
                 _touch(tid, "done", line=f"[{_now()}] OK -> {dst}")
             else:
                 tail = out[-500:]

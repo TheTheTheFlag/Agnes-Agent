@@ -13,6 +13,7 @@
 全部端点受登录中间件保护（/pub/video-ref 除外，仅供上游抓取参考图）。
 """
 import base64
+import hashlib
 import json
 import mimetypes
 import os
@@ -48,6 +49,38 @@ _REF_KEEP_SEC = 3 * 24 * 3600   # 参考图临时文件保留 3 天
 _REBUILD_MAX = 30            # 单个任务自动重建次数上限
 _REBUILD_TTL = 6 * 3600      # 任务从创建起最长存活 6 小时
 _CREATE_RETRY = 3            # 创建阶段 429/5xx/网络错误自动重试次数
+
+# 提交去重：同一入参（含参考图内容哈希）在窗口内的在途任务只保留一个（防重复扣费）
+_DEDUP_WINDOW = 300          # 秒；窗口内同内容且在途（queued/running）视为重复提交
+
+
+def _dedup_key(payload: dict) -> str:
+    """提交指纹：入参 JSON 规范化（参考图 Data URI 使去重按图片内容而非文件名）。"""
+    blob = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha1(blob.encode("utf-8")).hexdigest()
+
+
+def _find_dedup(username: str, key: str) -> list:
+    """窗口内同指纹且在途的任务列表（命中则复用返回，不再新建）。"""
+    if not key:
+        return []
+    now = time.time()
+    out = []
+    with _user_items_lock(username):
+        for it in _get_user_items(username):
+            if it.get("dedup_key") != key:
+                continue
+            if it.get("status") not in ("queued", "running"):
+                continue
+            if not (it.get("video_id") or it.get("task_id")):
+                continue
+            try:
+                created = time.mktime(time.strptime(it.get("created_at") or "", "%Y-%m-%d %H:%M:%S"))
+            except ValueError:
+                created = now
+            if now - created <= _DEDUP_WINDOW:
+                out.append(it)
+    return out
 
 # 模型 / 模式 / 参数（与官方文档一致）
 VIDEO_MODELS = {
@@ -513,7 +546,7 @@ def _build_payload(model: str, mode: str, payload: dict, request, use_public: bo
     return out
 
 
-def _persist_new(model: str, mode: str, prompt: str, payload: dict, key_idx: int, created: dict, username: str, bparams: dict = None) -> dict:
+def _persist_new(model: str, mode: str, prompt: str, payload: dict, key_idx: int, created: dict, username: str, bparams: dict = None, dedup_key: str = "") -> dict:
     item = {
         "id": uuid.uuid4().hex[:12],
         "model": model,
@@ -521,6 +554,9 @@ def _persist_new(model: str, mode: str, prompt: str, payload: dict, key_idx: int
         "prompt": prompt[:1000],
         "status": created.get("status") or "queued",
         "progress": int(created.get("progress") or 0),
+        "attempt": 1,                # 已尝试次数（初建=1，每次自动重建 +1）
+        "last_heartbeat": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "dedup_key": dedup_key,
         "video_id": created.get("video_id") or "",
         "task_id": created.get("task_id") or created.get("id") or "",
         "key_idx": key_idx,
@@ -599,8 +635,10 @@ def _maybe_rebuild(request, item: dict) -> str:
     item["task_id"] = created.get("task_id") or created.get("id") or ""
     item["key_idx"] = key_idx
     item["rebuild_count"] = int(item.get("rebuild_count") or 0) + 1
+    item["attempt"] = int(item.get("attempt") or 1) + 1
     item["progress"] = 0
     item["error"] = ""
+    item["last_heartbeat"] = time.strftime("%Y-%m-%d %H:%M:%S")
     return "ok"
 
 
@@ -659,6 +697,12 @@ def generate(payload: dict, request: Request):
         return JSONResponse({"error": str(e)}, status_code=400)
 
     _prune_refs()
+    username = getattr(getattr(request, "state", None), "username", None) or current_user()
+    dedup_key = _dedup_key(upstream_payload)
+    if not p.get("allow_duplicate"):
+        dups = _find_dedup(username, dedup_key)
+        if dups:
+            return {"ok": True, "count": len(dups), "items": dups, "deduped": True, "async": True}
     key_idx = None
     created = None
     create_msg = ""
@@ -690,8 +734,8 @@ def generate(payload: dict, request: Request):
     if key_idx is None:
         return JSONResponse({"error": create_msg}, status_code=502)
 
-    username = getattr(getattr(request, "state", None), "username", None) or current_user()
-    item = _persist_new(model, mode, prompt, upstream_payload, key_idx, created, username, bparams=p)
+    item = _persist_new(model, mode, prompt, upstream_payload, key_idx, created, username,
+                        bparams=p, dedup_key=dedup_key)
     return {"ok": True, "count": 1, "task_id": item.get("task_id") or item.get("id"), "items": [item]}
 
 
@@ -708,6 +752,8 @@ def task(item_id: str, request: Request = None):
                          if it.get("video_id") == item_id or it.get("task_id") == item_id), None)
     if not item:
         return JSONResponse({"error": "任务不存在"}, status_code=404)
+    if item.get("status") == "cancelled":
+        return {"ok": True, "item": item}
     if item.get("status") in ("completed", "failed") and item.get("file"):
         return {"ok": True, "item": item}
 
@@ -731,6 +777,7 @@ def task(item_id: str, request: Request = None):
         item["seconds"] = str(data.get("seconds"))
     if data.get("size"):
         item["size"] = str(data.get("size"))
+    item["last_heartbeat"] = time.strftime("%Y-%m-%d %H:%M:%S")
 
     if st == "failed":
         err = data.get("error")
@@ -839,3 +886,24 @@ def delete(payload: dict, request: Request = None):
                 except OSError:
                     pass
     return {"ok": True, "deleted": len(removed)}
+
+
+@router.post("/cancel")
+def cancel(payload: dict, request: Request = None):
+    """取消任务：停止后续自动重建/查询（在途上游任务无法中断，可能仍产生一次扣费）。"""
+    username = getattr(getattr(request, "state", None), "username", None) or current_user()
+    ids = set(str(x) for x in ((payload or {}).get("ids") or []) if str(x).strip())
+    if not ids:
+        return JSONResponse({"error": "ids 必填"}, status_code=400)
+    done = []
+    with _user_items_lock(username):
+        for it in _get_user_items(username):
+            if it.get("id") not in ids:
+                continue
+            if it.get("status") not in ("completed", "failed", "cancelled"):
+                it["status"] = "cancelled"
+                it["error"] = "已取消（不再自动重建）"
+                it["completed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                done.append(it.get("id"))
+    _save_user_manifest(username)
+    return {"ok": True, "cancelled": len(done), "ids": done}

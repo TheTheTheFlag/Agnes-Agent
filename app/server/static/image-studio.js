@@ -351,8 +351,12 @@ async function generate() {
     clearTimeout(timeoutId);
 
     if (!r || !r.items || r.items.length === 0) throw new Error("服务器未返回任务信息");
-    for (const it of r.items) Studio.gallery.unshift(it);
-    toast(`✅ 任务已提交（${elapsed}ms），生成中（失败自动重试），完成后入库`, "success");
+    for (const it of r.items) {
+      const i = Studio.gallery.findIndex((g) => g.id === it.id);
+      if (i >= 0) Studio.gallery[i] = it; else Studio.gallery.unshift(it);
+    }
+    if (r.deduped) toast("♻️ 检测到同内容任务进行中，已复用该任务（未重复提交）", "info");
+    else toast(`✅ 任务已提交（${elapsed}ms），生成中（失败自动重试），完成后入库`, "success");
     paintGallery();
     (r.items || []).forEach((it) => pollImageTask(it.id));
   } catch (e) {
@@ -375,7 +379,7 @@ async function generate() {
 }
 
 /* ---------- 生成任务轮询（与视频创作页同构） ---------- */
-function imgTerminal(s) { return !s || s === "completed" || s === "failed"; }
+function imgTerminal(s) { return !s || s === "completed" || s === "failed" || s === "cancelled"; }
 
 function resumeImagePolling() {
   Object.keys(Studio.pollers || {}).forEach((id) => clearTimeout(Studio.pollers[id]));
@@ -388,6 +392,9 @@ function pollImageTask(id) {
   if (!Studio.pollers) Studio.pollers = {};
   if (Studio.pollers[id]) return;
   let retryCount = 0;
+  let lastSig = "";              // 进度签名：status|progress|attempt|last_heartbeat|error
+  let lastChangeAt = Date.now(); // 最近一次有进展的时间
+  let slowed = false;            // 长时间无进展 → 降为低频查询
   const maxRetries = 10;   // 最多重试 10 次；后端 worker 一直在跑，大不了刷新页面
   const tick = async () => {
     try {
@@ -405,10 +412,13 @@ function pollImageTask(id) {
           paintGallery();
         }
         retryCount = 0;    // 成功则重置重试计数
+        const sig = [it.status, it.progress, it.attempt, it.last_heartbeat, it.error].join("|");
+        if (sig !== lastSig) { lastSig = sig; lastChangeAt = Date.now(); }
         if (imgTerminal(it.status)) {
           clearTimeout(Studio.pollers[id]);
           delete Studio.pollers[id];
           if (it.status === "completed") toast("✅ 图片已生成并入库", "success");
+          else if (it.status === "cancelled") toast("⏹ 任务已取消（不再重试）", "info");
           else toast("❌ 生成失败: " + (it.error || ""), "error");
           return;
         }
@@ -423,7 +433,11 @@ function pollImageTask(id) {
       }
       console.warn("[pollImageTask] 轮询失败，重试", retryCount, "/", maxRetries, ":", e.message);
     }
-    const delay = Math.min(1500 * Math.pow(2, Math.min(retryCount, 3)), 15000);
+    let delay = Math.min(1500 * Math.pow(2, Math.min(retryCount, 3)), 15000);
+    if (Date.now() - lastChangeAt > 30 * 60 * 1000) {
+      delay = 60000;   // 30 分钟无进展：后端仍在自动重试，降为低频查询、不放弃轮询
+      if (!slowed) { slowed = true; toast("🐢 任务长时间无进展（后端仍在自动重试），已切换为低频查询", "info"); }
+    }
     Studio.pollers[id] = setTimeout(tick, delay);
   };
   Studio.pollers[id] = setTimeout(tick, 1500);
