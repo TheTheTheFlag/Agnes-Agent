@@ -7,9 +7,10 @@
     可「直接重渲」或「修改提示词后重渲」单段（gen_kzqs_videos.py 单段跑），
     确认后合并成完整视频（ffmpeg concat，整集 + 连播）。
 
-渲染链路约定（2026-09-27 尾帧接力版）：
-  段视频默认保留模型自带音轨（KEEP_AUDIO=1，本项目特例，QA 需确认含音频流），
-  不再默认 -an 去音轨；配音由 local-tts-dubbing（Qwen3-TTS）按需接入。
+渲染链路约定（2026-09-29 反转，配音 = 视频自带音轨）：
+  段视频默认保留模型自带音轨（不 -an）；配音随视频生成自带，角色音色与中文发音锁写进视频词
+  （drama-pipeline `SKILL.md` §9 / `render-contracts.md` §8）。
+  _render_env 设 `KEEP_AUDIO=1` 为冗余保险（新驱动默认即保留，兼容旧驱动）。
   段缝采用「尾帧接力」：段 N 渲染时首帧=ffmpeg 抽段 N-1 视频真实末帧（resize 2K 覆盖 kf1.png），
   段 N-1 实际渲染末帧 100% 成为段 N 首帧，段缝像素级一致。
   E01-01 为全片唯一独立首帧（kf1.png 出图），每段 kf2.png 仍是 AI 出图（叙事落点，可改词重出）。
@@ -67,11 +68,13 @@ def _token_env():
             env["AGENT_INTERNAL_TOKEN"] = tok
     except Exception:
         pass
+    # 审核页重渲也属于短剧流程产物：打标后创作台作品库隐藏、仅短剧审核可见
+    env["AGENT_MEDIA_SOURCE"] = "short-drama-director"
     return env
 
 
 def _render_env():
-    """渲染子进程环境：token + KEEP_AUDIO=1（本项目保留模型音轨，不与默认去音轨口径冲突）。"""
+    """渲染子进程环境：token + KEEP_AUDIO=1（新口径默认保留音轨，此值为冗余保险，兼容新旧驱动）。"""
     env = _token_env()
     env["KEEP_AUDIO"] = "1"
     return env

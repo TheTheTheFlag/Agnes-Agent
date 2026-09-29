@@ -193,6 +193,18 @@ class DAGStorage:
                 "replan_count": row[3], "status": row[4],
             }
 
+    def count_plans(self, thread_id: str) -> int:
+        """该 thread 历史上创建过的计划总数（含已覆盖删除的）。
+
+        用于"防重复规划"：只要线程历史上已规划过（哪怕旧计划被覆盖/删除），
+        chatbot 就不再从历史消息嗅探 `已接收规划请求` 重新触发 planner——
+        重规划只允许用户显式 request_planning，避免同一目标被反复规划。
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            return conn.execute(
+                "SELECT COUNT(*) FROM dag_plans WHERE thread_id = ?", (thread_id,)
+            ).fetchone()[0]
+
     def delete_plan(self, plan_id: int):
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("UPDATE dag_plans SET status = 'deleted', updated_at = ? WHERE id = ?",

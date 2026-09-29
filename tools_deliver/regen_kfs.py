@@ -82,6 +82,7 @@ except Exception:
 env = dict(os.environ)
 if tok:
     env["AGENT_INTERNAL_TOKEN"] = tok
+env["AGENT_MEDIA_SOURCE"] = "short-drama-director"
 
 ok_cnt = fail_cnt = 0
 for seg, frame, prompt, refs in jobs:

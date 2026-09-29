@@ -49,6 +49,7 @@ def log(s):
 
 env = dict(os.environ)
 env["KEEP_AUDIO"] = "1"   # 本项目特例：保留模型自带音轨
+env["AGENT_MEDIA_SOURCE"] = "short-drama-director"
 tok = ""
 try:
     tok = open(TOKFILE, encoding="utf-8").read().strip()

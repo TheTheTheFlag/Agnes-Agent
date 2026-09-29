@@ -393,10 +393,11 @@ class ReActLoop:
                         content=self._bounded_tool_result(result_str), tool_call_id=tool_id))
                     # write_file/edit_file 连续缺 content 升级引导：模型反复只带 path/空参时，
                     # 是闪档模型在长会话下的典型输出劣化（content 没进工具参数）。
-                    # 第 2 次起注入决定性方案，避免空转到「连续 3 次相同调用」被一刀切终止。
-                    if tool_name in ("write_file", "edit_file") and "缺少必填参数" in result_str and "content" in result_str:
-                        self._wf_missing_content = getattr(self, "_wf_missing_content", 0) + 1
-                        if self._wf_missing_content >= 2:
+                    # 计数已在 _execute_tool 的缺参分支递增（self._wf_missing_content 唯一来源），
+                    # 这里只做阈值判断 → 注入决定性方案，避免空转到「连续 3 次相同调用」被一刀切终止。
+                    if (tool_name in ("write_file", "edit_file") and "缺少必填参数" in result_str
+                            and "content" in result_str):
+                        if getattr(self, "_wf_missing_content", 0) >= 2:
                             messages = inject_user_prefix(messages,
                                 "[写文件参数修复] 你已连续多次发起 write_file 但参数里始终缺 content，"
                                 "这些调用都未执行成功。请按顺序选一种可立即执行的方式继续，"
@@ -757,17 +758,40 @@ class ReActLoop:
 
     def _execute_tool(self, tool_name, params, tools, state, tool_id=None):
         # 参数完整性前置检查：模型/gateway 偶尔只带 path 漏 content（或完全空参数），
-        # 提前给出可操作的报错，让模型下一轮针对性补全，而不是等到 pydantic 校验才失败。
+        # 或一次生成的 content 超长被截断（截到空/半截），提前给出可操作的报错，
+        # 让模型下一轮针对性补全，而不是等到 pydantic 校验才失败。
         if tool_name in ("write_file", "edit_file"):
             params = self._normalize_tool_args(params or {})
-            missing = [k for k in ("path", "content") if not str((params or {}).get(k) or "").strip()]
-            if missing:
-                return (
-                    f"工具参数错误: {tool_name} 缺少必填参数 {', '.join(missing)}。"
-                    f"{tool_name} 需要 path（目标文件路径）和 content（文件完整内容，作为 JSON string 放进工具参数，"
-                    f"不能写在消息正文里）。若内容太大一次写不全，请改用 execute_command 运行对应技能脚本生成文件，"
-                    f"或在收尾前分块写入。"
-                )
+            if tool_name == "write_file":
+                path_v = str((params or {}).get("path") or "").strip()
+                content_v = str((params or {}).get("content") or "").strip()
+                # 长内容硬护栏：单次 write_file 超过阈值，大概率是模型试图一次写超大文件
+                # 导致生成被截断（缺参数/半截 content）——直接挡下并按"分块/脚本"路线引导。
+                if len(content_v) > 8000:
+                    return (
+                        f"工具参数错误: write_file 的 content 长度 {len(content_v)} 超过单次 8000 字符上限。"
+                        f"单次直接写超大文件会使参数被截断。请立即改用以下方式之一，"
+                        f"不要再发起带超长 content 的 write_file：\n"
+                        f"1) 拆成 2–4 个小文件分别 write_file（每个 content 控制在 2KB 内），"
+                        f"再用 execute_command 运行 node 单行脚本把碎片合并为目标文件：\n"
+                        f"   node -e \"const fs=require('fs');`"
+                        f"fs.writeFileSync('目标',['碎片1','碎片2'].map(f=>fs.readFileSync(f,'utf8')).join('\\n'))\"\n"
+                        f"2) 优先用 execute_command 运行对应技能脚本生成文件（脚本自己写盘，见 SKILL.md 必填参数）。"
+                    )
+                missing = [k for k in ("path", "content") if not str((params or {}).get(k) or "").strip()]
+                if missing:
+                    cur = getattr(self, "_wf_missing_content", 0) + 1
+                    self._wf_missing_content = cur
+                    return (
+                        f"工具参数错误: {tool_name} 缺少必填参数 {', '.join(missing)}。"
+                        f"{tool_name} 需要 path（目标文件路径）和 content（文件完整内容，作为 JSON string 放进工具参数，"
+                        f"不能写在消息正文里）。\n"
+                        f"你现在是第 {cur} 次缺参——根因通常是 content 过长在生成时被截断。"
+                        f"立刻按顺序选一种可立即执行的方式（禁止再次发起只带 path 或缺 content 的 {tool_name}）：\n"
+                        f"1) 拆成 2–4 个小文件分别 write_file（每个 content 控制在 2KB 内），"
+                        f"再 execute_command 用 node 单行脚本合并；\n"
+                        f"2) 直接 execute_command 运行对应技能脚本生成文件（脚本写盘，不用手工拼完整 JSON）。"
+                    )
         for tool in tools:
             if tool.name == tool_name:
                 try:

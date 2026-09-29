@@ -372,6 +372,7 @@ async function uploadFileToBar(file) {
     if (State.pendingAttachments.length >= 6) throw new Error("一次最多挂 6 个附件");
     State.pendingAttachments.push({ path: d.path, name: d.name || d.path, isImg: imgLike, size: d.size || 0 });
     renderAttachBar();
+    updateComposer();
     chatInput.focus();
   } catch (e) {
     toast("上传失败: " + e.message);
@@ -394,6 +395,7 @@ function renderAttachBar() {
   $$(".attach-remove", bar).forEach((b) => b.addEventListener("click", () => {
     State.pendingAttachments.splice(+b.dataset.i, 1);
     renderAttachBar();
+    updateComposer();
   }));
   refreshComposerStats(null, false);
 }
@@ -1738,6 +1740,105 @@ function stopChat() {
   updateComposer();
 }
 
+/* 执行期插话（2026-09-29）：DAG 多节点执行时该 thread 的 main SSE 一直 open、
+   State.streaming 恒真。用户在输入框继续发消息，走这里"插话入队"：
+   - 不在前端读跑批 SSE（那条归停住的主链路）；只发 POST /api/chat 拿轻量 SSE
+   - 后端 run_registry 判定同 thread 有 run 在执行 → 消息入队，返回"已入队"轻流
+   - 正在执行的 executor 引擎下批节点消费该补充并注入 prompt */
+async function sendSupplement(text) {
+  if (!text || !State.threadId) return;
+  // 展示用户气泡 + 清空输入框（与 sendMessage 的新消息分支一致）
+  const _inner = messagesInner();
+  if ($(".welcome", _inner)) {
+    _inner.innerHTML = "";
+    updateChatTitle(text);
+  }
+  addUserBubble(text);
+  $("#chatInput").value = "";
+  autosizeInput();
+  hideCmdMenu();
+  updateComposer();  // 空输入 → 恢复「⏹ 停止」（若仍在 streaming）
+
+  const body = { message: text, thread_id: State.threadId, selected_kbs: kbSelectionForSend() };
+  try {
+    const resp = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      addErrorBubble(err.error || `HTTP ${resp.status}`);
+      return;
+    }
+    if (!resp.body) return;
+    // 读回执流。两种可能：
+    //   A. 执行期插话被接受 → 轻量流：final（入队文案）→ done
+    //   B. 上一 run 恰在这时结束、锁已释放 → 变成了一个完整新 run
+    //      此时事件流以 node/dag_push 等开头，须转交 handleChatEvent 全量处理
+    //      （否则 todo 面板、过程气泡都会丢）。
+    // 按第一个业务事件决定模式：final 开头 = 插话回执；否则 = 真 run。
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    let mode = "auto";
+    let sawFinal = false;
+    while (true) {
+      let { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf("\n\n")) >= 0) {
+        const chunk = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        const line = chunk.split("\n").find((l) => l.startsWith("data:"));
+        if (!line) continue;
+        let evt;
+        try { evt = JSON.parse(line.slice(5).trim()); } catch (e) { continue; }
+        const step = evt.step || "";
+        if (mode === "auto") {
+          if (step === "node" || step === "dag_push" || step === "node_status"
+              || step === "llm_call" || step === "retrieval" || step === "tool") {
+            mode = "run";
+          } else if (step === "final") {
+            mode = "ack";
+          } else {
+            continue; // heartbeat 等忽略
+          }
+        }
+        if (mode === "run") {
+          // 真 run：说明上一轮刚结束、锁已释放，本条变成了完整新一跑。
+          // 先收敛旧链路（若有），防止两个 SSE 同时写 DOM；事件全部转交主处理器。
+          if (State.streaming) stopChat();
+          handleChatEvent(evt);
+          continue;
+        }
+        // ack 模式：final（入队文案）→ done；done 到达即可结束
+        if (step === "final" && evt.text && !sawFinal) {
+          sawFinal = true;
+          if (window.drmOnSupplementInline && typeof window.drmOnSupplementInline === "function") {
+            window.drmOnSupplementInline(evt.text);
+            continue;
+          }
+          const el = addAssistantBubble("");
+          el.classList.remove("pending", "streaming");
+          const box = $(".msg-text", el);
+          if (box) {
+            box.innerHTML = renderMarkdown(evt.text);
+            box.querySelectorAll(".typing-dots").forEach((n) => n.remove());
+          }
+          scrollToBottom();
+        } else if (step === "done" || step === "error") {
+          try { reader.cancel(); } catch (e2) {}
+          return;
+        }
+      }
+    }
+  } catch (e) {
+    addErrorBubble(e.message || "补充消息发送失败");
+  }
+}
+
 /* ==================== 历史消息加载 ==================== */
 async function loadHistory(tid) {
   const inner = messagesInner();
@@ -2258,10 +2359,24 @@ function autosizeInput() {
   chatInput.style.height = Math.min(chatInput.scrollHeight, 200) + "px";
 }
 
+function _composerHasInput() {
+  // 发送按钮是否"有内容可发"：输入框有文字，或挂了待发送附件。
+  return !!((chatInput.value || "").trim() || (State.pendingAttachments || []).length);
+}
+
 function updateComposer() {
   const sending = State.streaming;
-  $("#btnSend").classList.toggle("hidden", sending);
-  $("#btnStop").classList.toggle("hidden", !sending);
+  if (sending) {
+    // 执行期间：空输入 → 显示「⏹ 停止」；一旦输入内容/挂附件 → 切成「发送」
+    // （该消息走"插话入队"，交给正在执行的 executor 下批节点消费）。
+    const hasInput = _composerHasInput();
+    $("#btnSend").classList.toggle("hidden", !hasInput);
+    $("#btnStop").classList.toggle("hidden", hasInput);
+  } else {
+    // 空闲：永远显示发送按钮
+    $("#btnSend").classList.toggle("hidden", false);
+    $("#btnStop").classList.toggle("hidden", true);
+  }
   chatInput.disabled = false;
 }
 
@@ -2309,6 +2424,7 @@ function applyCmdSel() {
 chatInput.addEventListener("input", () => {
   autosizeInput();
   showCmdMenu();
+  updateComposer();
 });
 
 chatInput.addEventListener("keydown", (e) => {
@@ -2337,7 +2453,6 @@ $("#cmdMenu").addEventListener("mousedown", (e) => {
 function sendFromComposer() {
   const val = chatInput.value.trim();
   const atts = State.pendingAttachments || [];
-  if (State.streaming) return;
   if (!val && !atts.length) return;
   if (val.startsWith("/") && !atts.length) { runCommand(val); return; }
   // 有附件：把附件 markdown 拼进消息（图片渲染 + Agent 可读 uploads/ 路径），随本次输入一起发送
@@ -2349,6 +2464,12 @@ function sendFromComposer() {
     text = attText + (val ? "\n\n" + val : "");
     State.pendingAttachments = [];
     renderAttachBar();
+  }
+  // 正在执行中（DAG 多节点长跑）：本消息作为"插话入队"发送，交给正在执行的
+  // executor 下批节点消费，前端回一条"已加入进行中任务"；不动主链路 streaming 状态。
+  if (State.streaming) {
+    sendSupplement(text);
+    return;
   }
   sendMessage(text);
 }

@@ -546,12 +546,13 @@ def _build_payload(model: str, mode: str, payload: dict, request, use_public: bo
     return out
 
 
-def _persist_new(model: str, mode: str, prompt: str, payload: dict, key_idx: int, created: dict, username: str, bparams: dict = None, dedup_key: str = "") -> dict:
+def _persist_new(model: str, mode: str, prompt: str, payload: dict, key_idx: int, created: dict, username: str, bparams: dict = None, dedup_key: str = "", source: str = "") -> dict:
     item = {
         "id": uuid.uuid4().hex[:12],
         "model": model,
         "mode": mode,
         "prompt": prompt[:1000],
+        "source": source,
         "status": created.get("status") or "queued",
         "progress": int(created.get("progress") or 0),
         "attempt": 1,                # 已尝试次数（初建=1，每次自动重建 +1）
@@ -735,7 +736,7 @@ def generate(payload: dict, request: Request):
         return JSONResponse({"error": create_msg}, status_code=502)
 
     item = _persist_new(model, mode, prompt, upstream_payload, key_idx, created, username,
-                        bparams=p, dedup_key=dedup_key)
+                        bparams=p, dedup_key=dedup_key, source=str(p.get("source") or ""))
     return {"ok": True, "count": 1, "task_id": item.get("task_id") or item.get("id"), "items": [item]}
 
 
@@ -817,7 +818,9 @@ def task(item_id: str, request: Request = None):
 
 
 @router.get("/history")
-def history(limit: int = 60, offset: int = 0, request: Request = None):
+def history(limit: int = 60, offset: int = 0, exclude_source: str = "", request: Request = None):
+    """返回当前用户的作品列表。exclude_source=逗号分隔的 source 列表（如 short-drama-director）。
+    被排除的条目仍在 video_library 内（短剧审核依赖 /task /file 端点），只是不在创作台作品库展示。"""
     username = getattr(getattr(request, "state", None), "username", None) or current_user()
     # 打开作品库前先把 agnes-media 技能产出的视频同步进来（幂等）
     try:
@@ -826,8 +829,11 @@ def history(limit: int = 60, offset: int = 0, request: Request = None):
         pass
     limit = max(1, min(limit, _MAX_GALLERY))
     offset = max(0, offset)
+    excluded = {x for x in (exclude_source or "").split(",") if x}
     with _user_items_lock(username):
         items = _get_user_items(username)
+    if excluded:
+        items = [it for it in items if it.get("source") not in excluded]
     return {"ok": True, "total": len(items), "items": items[offset: offset + limit]}
 
 

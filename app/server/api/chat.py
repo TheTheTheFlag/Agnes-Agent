@@ -53,6 +53,40 @@ def _filter_internal_tokens(node: str, run_id, text: str, state: dict) -> str:
         return ""
     return text
 
+
+def _supplement_sse_response(thread_id: str, message: str):
+    """DAG 执行期插话的轻量 SSE：不启动第二个 graph run，只回一句"已入队"，
+    然后立即 done，让前端本轮结算、解锁发送器，等正在执行的 executor 消费补充。
+    与 chatbot 入队文案保持一致（builder.py 的 _ 分支），用户感知统一。
+    """
+    _pui = message.strip()[:2000]
+    _note = (
+        f"收到，已将你的消息加入进行中的任务，执行器会在处理下一节点时结合它继续推进"
+        f"（计划完成前我不会另起炉灶）：\n\n> {_pui}"
+    )
+    try:
+        add_log_entry("info", f"DAG 执行中收到补充消息并入队: {_pui[:80]}")
+    except Exception:
+        pass
+    # 与 chatbot 分流路径保持一致的落库：用户消息 + 入队提示都写进 messages 表，
+    # 让 /api/messages 回放与前端展示一致（切会话/刷新后能看到这条插话）。
+    try:
+        from app.memory import MemoryManager as _MM
+        _mm = _MM(db_path=DB_PATH, thread_id=thread_id)
+        _mm.add_message(thread_id, "user", _pui)
+        _mm.add_message(thread_id, "assistant", _note)
+    except Exception:
+        pass
+
+    async def _gen():
+        yield "data: " + json.dumps({"step": "final", "node": "chatbot", "text": _note},
+                                    ensure_ascii=False) + "\n\n"
+        yield "data: " + json.dumps({"step": "done"}, ensure_ascii=False) + "\n\n"
+
+    return StreamingResponse(_gen(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache", "Connection": "keep-alive", "Access-Control-Allow-Origin": "*",
+    })
+
 @router.post("/api/chat")
 async def chat_endpoint(payload: dict, request: Request = None):
     """主对话窗口的发送端点（流式 SSE 推送 token）。
@@ -92,6 +126,14 @@ async def chat_endpoint(payload: dict, request: Request = None):
         if not message:
             return JSONResponse({"error": "message 不能为空"}, status_code=400)
         inputs = {"messages": [("user", message)]}
+        # 每轮新用户消息显式清空单次 run 的手握信号（PendingPlan/PendingUserInput）。
+        # 它们只允许在本次 run 内由 chatbot/工具写入并消费；若从 checkpointer 恢复的
+        # state 里残留上一 run 的 pending_plan（LangGraph SqliteSaver 重启/中断后可能把
+        # 半程 writes 回到 state），route_after_chatbot 会误判去 planner，用旧目标重规划、
+        # 覆盖正在执行的任务——2026-09-29 线上根因（用户插话被拉去 planner 建旧目标新计划）。
+        # resume（审批续跑）分支保持原样，因为中断恢复需保留 run 内状态。
+        inputs["pending_plan"] = None
+        inputs["pending_user_input"] = None
 
     # 每用户当前会话：普通数据一律落在该用户自己的 .thread_id，不读全局 _CONFIG
     try:
@@ -108,6 +150,29 @@ async def chat_endpoint(payload: dict, request: Request = None):
         _kb_list = [str(k) for k in _kbs if str(k or "").strip()]
         if _kb_list:
             config["configurable"]["selected_kbs"] = _kb_list
+
+    # 同 thread 运行保护（2026-09-29 插话入院）：DAG 多节点执行期间，该 thread
+    # 的 graph.run 一直在跑（SSE 长连接，几分钟到几十分钟）。此时前端仍允许发新消息
+    # （插话），后端不能再启动第二个 run（并发写 checkpointer 冲突 + state 互相覆盖）；
+    # 改走"执行期插话入队"通道：消息进队列，正在执行的 executor 下批节点消费注入，
+    # 本请求立即返回一条"已加入进行中任务"的轻量 SSE（前端借此结算本轮）。
+    # run 真正启动时才占用锁（try_lock_run 拿不到 = 已有 run），
+    # 释放放在 run_graph() 的 finally 里（只有真正跑起来的 run 才需要释放）。
+    from app.graph.run_registry import try_lock_run, push_supplement as _push_supplement
+    _run_owned = try_lock_run(thread_id)
+    if not _run_owned:
+        if is_resume:
+            # resume（审批续跑）无法入队补充——上一 run 已中断且锁被 finally 释放，
+            # 正常不会出现在锁占用中；出现则说明有并发 run，提示稍后再试。
+            return JSONResponse({"error": "同一会话已有任务在执行，请稍后再试"}, status_code=409)
+        # 仅当线程确有"未收敛的进行中计划"时才把新消息当作执行期插话入队；
+        # 若只是普通对话轮次在跑（几秒即结束），消息入队没人消费会被丢弃——
+        # 明确拒绝，让前端提示稍后再试（避免用户消息静默丢失）。
+        from app.graph.builder import _dag_has_unfinished_work
+        if _dag_has_unfinished_work(thread_id):
+            _push_supplement(thread_id, message)
+            return _supplement_sse_response(thread_id, message)
+        return JSONResponse({"error": "回复仍在进行中，请先等本轮结束或点「⏹ 停止」"}, status_code=409)
 
     # resume 即审批决策：把 allow/mode 回填到最近一条审批提问记录（重启后可完整回放审批卡）
     if is_resume:
@@ -427,6 +492,14 @@ async def chat_endpoint(payload: dict, request: Request = None):
             await queue.put({"step": "error", "message": str(e)})
         finally:
             await queue.put({"step": "__close__"})
+            # 本次 run 是这一 thread 的唯一 run（chat_endpoint 里 try_lock_run 占的锁）
+            # 到 graph 收敛/异常/被中断收尾时归还，解锁后该 thread 才能正常启动新 run。
+            if _run_owned:
+                from app.graph.run_registry import release_run
+                try:
+                    release_run(thread_id)
+                except Exception:
+                    pass
             # 移除本次 SSE 连接的 listener queue：否则每次刷新页面都会在
             # _store._event_listeners 累计一个无界 Queue，add_event 每次都往里 put
             # （最多 200KB/条的 LLM 全量输入输出），进程内存会涨到 GB 级

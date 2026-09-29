@@ -65,6 +65,7 @@ except Exception:
 env = dict(os.environ)
 if tok:
     env["AGENT_INTERNAL_TOKEN"] = tok
+env["AGENT_MEDIA_SOURCE"] = "short-drama-director"
 
 def gen_image(seg, frame, prompt, refs):
     """AI 出图一张关键帧，存在 outdir/<frame>.png。"""

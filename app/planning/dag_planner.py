@@ -29,15 +29,22 @@ _SYS = build_dag_planner_system_prompt()
 
 
 def _extract_goal(state: State) -> str:
+    """提取规划目标。
+
+    只认两个来源（权威优先）：
+      1. state.pending_plan —— 用户显式 request_planning 工具写进来的唯一权威目标
+      2. 最后一条 human 消息 —— 无 pending_plan 时的兜底（此时目标=用户当轮说了什么）
+
+    注意：**不再**从历史 ToolMessage「已接收规划请求，目标：…」嗅探提取目标。
+    历史残留在 tool 消息里的旧规划请求（可能是几天前、另一次任务的目标）一旦被取出，
+    会覆盖当前任务、并让 planner 删掉正在执行的旧 plan 重建——2026-09-29 线上事故：
+    用户插话「把主角设定改成失忆开局」被正确入队后，route 误入 planner，
+    嗅探出旧的“500万字小说”目标，导致旧《忘川纪元》计划被删、新计划错建。
+    目标只能来自当轮（pending_plan / 最新 human），绝不自历史气泡回捞。
+    """
     goal = state.get("pending_plan")
     if goal:
         return str(goal).strip()
-    for m in reversed(state.get("messages", [])[-5:]):
-        if hasattr(m, "type") and m.type == "tool" and "已接收规划请求" in (m.content or ""):
-            try:
-                return m.content.split("目标：", 1)[1].strip()
-            except Exception:
-                pass
     for m in reversed(state.get("messages", [])):
         if hasattr(m, "type") and m.type == "human":
             return str(m.content).strip()

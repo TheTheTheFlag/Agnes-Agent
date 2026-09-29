@@ -330,10 +330,14 @@ function drvRender() {
 
 async function renderReviewTab(el) {
   el.innerHTML = `
-    <div class="st drv">
-      <div class="st-head">
-        <div class="st-head-title">🎬 短剧审核台</div>
-        <div class="st-head-hint">资产审核：改提示词重新生成角色/场景/道具图（--ref 锁形象）。分镜审核：逐集列出分镜提示词与成片，可直接重渲或改词重渲；确认后合并成完整视频。</div>
+    <div class="st drv woo woo-review">
+      <div class="woo-headrow">
+        ${studioShell.typeButton("drvType", "review")}
+        <div style="flex:1"></div>
+      </div>
+      <div class="woo-hero">
+        <h1>短剧审核台</h1>
+        <p>资产审核 · 分镜审核 · 重渲 / 改词重渲 · 合并成片 · 全程保留模型自带配音</p>
       </div>
       <div class="st-cols">
         <section class="st-left">
@@ -361,6 +365,7 @@ async function renderReviewTab(el) {
     </div>`;
 
   DRV.mode = "assets";
+  studioShell.bindTypeButton("drvType", "review");
   drvLoadProjects().then(() => {
     drvSetupModes(el);
     drvSetupEps(el).then(() => drvRender());

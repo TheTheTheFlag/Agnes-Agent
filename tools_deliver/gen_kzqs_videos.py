@@ -165,6 +165,7 @@ def main():
         env = dict(os.environ)
         if tok:
             env["AGENT_INTERNAL_TOKEN"] = tok
+        env["AGENT_MEDIA_SOURCE"] = "short-drama-director"
         try:
             pr = subprocess.run(cmd, capture_output=True, text=True, timeout=7200, env=env)
         except subprocess.TimeoutExpired:
@@ -181,9 +182,8 @@ def main():
             try:
                 shutil.copy(src, dst)
                 if os.path.exists(dst):
-                    if os.environ.get("KEEP_AUDIO") == "1":
-                        log(f"{seg}: OK ({int(time.time()-t0)}s, KEEP_AUDIO=1 音轨保留) -> {dst}")
-                    else:
+                    # 默认保留模型自带配音音轨（交付物）；NO_AUDIO=1 才去音轨
+                    if os.environ.get("NO_AUDIO") == "1":
                         tmp = dst + ".muted.mp4"
                         try:
                             mr = subprocess.run(
@@ -191,11 +191,13 @@ def main():
                                 capture_output=True, text=True, timeout=600)
                             if mr.returncode == 0 and os.path.exists(tmp):
                                 os.replace(tmp, dst)
-                                log(f"{seg}: OK ({int(time.time()-t0)}s, 已去音轨) -> {dst}")
+                                log(f"{seg}: OK ({int(time.time()-t0)}s, NO_AUDIO=1 已去音轨) -> {dst}")
                             else:
                                 log(f"{seg}: OK ({int(time.time()-t0)}s, 音轨保留) -> {dst}")
                         except Exception as me:
                             log(f"{seg}: OK 但去音轨失败 {me} -> {dst}")
+                    else:
+                        log(f"{seg}: OK ({int(time.time()-t0)}s, 自带音轨保留) -> {dst}")
                 else:
                     log(f"{seg}: OK ({int(time.time()-t0)}s) -> {dst}")
                 done += 1

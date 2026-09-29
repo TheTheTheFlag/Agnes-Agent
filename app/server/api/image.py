@@ -362,7 +362,7 @@ def _call_generate(key: str, payload: dict) -> dict:
 
 
 def _create_pending(mode: str, model: str, prompt: str, size: str, ratio: str,
-                    n_refs: int, username: str, dedup_key: str = "") -> dict:
+                    n_refs: int, username: str, dedup_key: str = "", source: str = "") -> dict:
     """创建「生成中」占位条目并落盘 manifest，立即返回给前端展示。"""
     item = {
         "id": uuid.uuid4().hex[:12],
@@ -372,6 +372,7 @@ def _create_pending(mode: str, model: str, prompt: str, size: str, ratio: str,
         "size": size,
         "ratio": ratio,
         "n_refs": n_refs,
+        "source": source,
         "file": "",
         "thumb": "",
         "status": "queued",
@@ -585,7 +586,8 @@ def generate(payload: dict, request: Request):
         if count > 1:
             payload_dup["prompt"] = prompt.replace("#i", "").replace("{i}", "") or prompt
         item = _create_pending(mode, model, payload_dup["prompt"], size, ratio,
-                               len(data_uris), username, dedup_key=dedup_key)
+                               len(data_uris), username, dedup_key=dedup_key,
+                               source=str(p.get("source") or ""))
         jobs.append({"item": item, "payload": payload_dup})
         items.append(item)
     _start_worker(username, jobs)
@@ -610,8 +612,9 @@ async def task(item_id: str, request: Request = None):
 
 
 @router.get("/history")
-async def history(limit: int = 60, offset: int = 0, request: Request = None):
-    """返回当前用户的作品列表"""
+async def history(limit: int = 60, offset: int = 0, exclude_source: str = "", request: Request = None):
+    """返回当前用户的作品列表。exclude_source=逗号分隔的 source 列表（如短片流程的 short-drama-director），
+    被排除的条目仍在作品库内（短剧审核页依赖其 /task /file 端点），只是不在创作台作品库展示。"""
     username = getattr(getattr(request, "state", None), "username", None) or current_user()
     # 打开作品库前先把 agnes-media 技能产物同步进来（幂等；输出目录通常为空，开销可忽略）
     try:
@@ -620,8 +623,11 @@ async def history(limit: int = 60, offset: int = 0, request: Request = None):
         pass
     limit = max(1, limit) if _MAX_GALLERY is None else max(1, min(limit, _MAX_GALLERY))
     offset = max(0, offset)
+    excluded = {x for x in (exclude_source or "").split(",") if x}
     with _user_items_lock(username):
         items = _get_user_items(username)
+    if excluded:
+        items = [it for it in items if it.get("source") not in excluded]
     return {"ok": True, "total": len(items), "items": items[offset: offset + limit]}
 
 

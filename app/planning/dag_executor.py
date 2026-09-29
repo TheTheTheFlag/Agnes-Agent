@@ -86,7 +86,8 @@ _missing_expected = core.missing_expected
 
 def _run_node(thread_id: str, task_plan_id: int, node: Dict, goal: str,
               parent_artifacts: List[str], missing_soft: List[str],
-              llm_builder, tools_list, dag: DAGStorage, on_event):
+              llm_builder, tools_list, dag: DAGStorage, on_event,
+              user_input: str = ""):
     """执行单个节点（线程池 worker）。返回 (node_id, status, result, artifacts)。"""
     node_id = node["id"]
     description = node["description"]
@@ -281,7 +282,10 @@ def _run_node(thread_id: str, task_plan_id: int, node: Dict, goal: str,
     try:
         r = loop.run(messages=[
             SystemMessage(content=system_prompt),
-            HumanMessage(content=f"执行子任务：{description}"),
+            HumanMessage(content=f"执行子任务：{description}"
+                                 + (f"\n\n【用户补充】进行中计划期间用户发来：{user_input}\n"
+                                    f"请结合此补充继续推进本节点（无需重复复述它）。"
+                                    if user_input else "")),
         ], tools=node_tools, state={}, on_tool_before=_on_tool_before,
             on_tool_after=_on_tool_after, interrupt_handler=_interrupt_handler)
         final_result = r["final_answer"]
@@ -341,6 +345,23 @@ def create_executor(llm_builder, tools_list):
             record_node_end(thread_id, "executor", "无进行中计划")
             return {"thread_id": thread_id}
 
+        # 消费 DAG 执行期用户插话队列（chatbot 分流入队，见 builder 模块说明；
+        # 以及 run_registry 的跨-request 补充队列，见 dag_executor 模块顶部说明）。
+        # 本批 ready 节点都会看到该补充；返回 state 时不携带 = 已消费。
+        user_input = (state.get("pending_user_input") or "").strip()
+        # 执行期间前端又发的新消息（同 thread 已有 run 时经 /api/chat 入队到这里）：
+        # 每批 executor 进来 drain 一次，合并到 user_input 注入本批节点。
+        from app.graph.run_registry import drain_supplements
+        _extra = drain_supplements(thread_id)
+        if _extra:
+            _merged = []
+            if user_input:
+                _merged.append(user_input)
+            _merged.extend(_extra)
+            user_input = "\n".join(_merged).strip()
+        if user_input:
+            add_log_entry("info", f"[DAG] 注入用户补充到本批节点: {user_input[:80]}")
+
         # 任务目标入长期记忆语义索引（供跨层语义检索；幂等去重）
         try:
             from app.memory import memory_engine
@@ -394,10 +415,14 @@ def create_executor(llm_builder, tools_list):
             empty_streak = int(state.get("_empty_streak", 0)) + 1
             record_node_end(thread_id, "executor",
                             f"无可执行节点 (连续 {empty_streak}/3 次)")
+            ret = {"thread_id": thread_id, "_empty_streak": empty_streak}
+            if user_input:
+                # 本批无就绪节点，消息还没被消费：保留到下批（不丢）
+                ret["pending_user_input"] = user_input
             if empty_streak >= 3:
                 add_log_entry("info", f"[DAG] 连续 3 次无可执行节点，结束执行进 summarizer")
-                return {"thread_id": thread_id, "_empty_streak": empty_streak}
-            return {"thread_id": thread_id, "_empty_streak": empty_streak}
+                return ret
+            return ret
         # 本批有 ready，把 empty_streak 清零
         state_for_return = {"thread_id": thread_id, "_empty_streak": 0}
 
@@ -414,7 +439,8 @@ def create_executor(llm_builder, tools_list):
                                     _parent_artifacts(node_map, edges, nid),
                                     _missing_soft(node_map, edges, nid),
                                     llm_builder, tools_list, dag,
-                                    _emit_dag_event(dag, plan["id"]))] = nid
+                                    _emit_dag_event(dag, plan["id"]),
+                                    user_input)] = nid
             for fut in as_completed(futures):
                 nid = futures[fut]
                 try:

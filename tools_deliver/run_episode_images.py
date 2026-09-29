@@ -111,6 +111,7 @@ def main():
         env = dict(os.environ)
         if TOKEN:
             env["AGENT_INTERNAL_TOKEN"] = TOKEN
+        env["AGENT_MEDIA_SOURCE"] = "short-drama-director"
         try:
             pr = subprocess.run(cmd, capture_output=True, text=True, timeout=1800, cwd=AGENT_ROOT, env=env)
         except subprocess.TimeoutExpired:
