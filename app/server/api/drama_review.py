@@ -184,21 +184,26 @@ async def list_projects(request: Request):
 _TYPE_ALIAS = {"characters": "character", "character": "character",
                "scenes": "scene", "scene": "scene",
                "interior": "scene", "exterior": "scene", "location": "scene",
-               "props": "prop", "prop": "prop", "item": "prop"}
+               "props": "prop", "prop": "prop", "item": "prop",
+               "monsters": "monster", "monster": "monster"}
+
+_VALID_TYPES = ("character", "scene", "prop", "monster")
 
 
 def _normalize_asset_type(t, cat=None):
     """type 越界时回落分类键（单数化），最终缺省 prop。"""
     t = _TYPE_ALIAS.get(str(t or "").strip(), str(t or "").strip())
-    if t in ("character", "scene", "prop"):
+    if t in _VALID_TYPES:
         return t
     return _TYPE_ALIAS.get(str(cat or "").strip(), "prop")
 
 
 def _asset_items(data):
-    """→ (pairs: [(cat|None, item)], shape)，shape ∈ flat|wrapped|categorized|unknown。
+    """→ (pairs: [(cat|None, item)], shape)，shape ∈ flat|wrapped|categorized|nested|unknown。
 
-    item 为原结构内对象的引用，就地改即写回原形状。
+    item 为原结构内对象的引用，就地改即写回原形状；
+    nested（顶层为分类字典、值为字典/字符串的 dict-of-dicts，如「异能纪元」）由特征图
+    生成流程产生，只保证可读展示，回写前由 assets_regenerate 统一扁平成新契约。
     """
     if isinstance(data, list):
         return [(None, x) for x in data if isinstance(x, dict)], "flat"
@@ -215,7 +220,65 @@ def _asset_items(data):
                 if isinstance(lst, list):
                     out += [(cat, x) for x in lst if isinstance(x, dict)]
             return out, "categorized"
+        # dict-of-dicts：顶层分类键（characters/scenes/props/monsters…）的值为字典。
+        #   characters: {名字:{views:[…], files:[paths]}} → 每视角一个条目；
+        #   scenes/props/monsters: {id: relpath} → 每 id 一个条目。
+        out = []
+        for key, dv in data.items():
+            ctype = _TYPE_ALIAS.get(str(key).strip())
+            if ctype not in _VALID_TYPES or not isinstance(dv, dict):
+                continue
+            if key in ("characters", "character"):
+                for name, val in dv.items():
+                    if not isinstance(val, dict):
+                        continue
+                    for f in val.get("files") or []:
+                        if not isinstance(f, str) or not f.strip():
+                            continue
+                        rel = f.strip().replace("\\", "/").lstrip("/")
+                        out.append((key, {"id": os.path.splitext(os.path.basename(rel))[0],
+                                          "name": name, "type": ctype, "ratio": "16:9",
+                                          "status": "ready", "views": [{"file": rel}]}))
+            else:
+                for aid, f in dv.items():
+                    rel = f if isinstance(f, str) else (f.get("path") or f.get("file"))
+                    if not isinstance(rel, str) or not rel.strip():
+                        continue
+                    rel = rel.strip().replace("\\", "/").lstrip("/")
+                    out.append((key, {"id": aid, "name": aid, "type": ctype, "ratio": "16:9",
+                                      "status": "ready", "views": [{"file": rel}]}))
+        return out, "nested" if out else "unknown"
     return [], "unknown"
+
+
+def _flatten_nested(data):
+    """把 dict-of-dicts 特征图 manifest 扁平成新契约（顶层数组）——首张资产被重新生成时原地自愈。"""
+    out = []
+    for key, dv in (data.items() if isinstance(data, dict) else []):
+        ctype = _TYPE_ALIAS.get(str(key).strip())
+        if ctype not in _VALID_TYPES or not isinstance(dv, dict):
+            continue
+        if key in ("characters", "character"):
+            for name, val in dv.items():
+                if not isinstance(val, dict):
+                    continue
+                for f in val.get("files") or []:
+                    rel = f if isinstance(f, str) else ""
+                    if not rel.strip():
+                        continue
+                    rel = rel.strip().replace("\\", "/").lstrip("/")
+                    out.append({"id": os.path.splitext(os.path.basename(rel))[0], "type": ctype,
+                                "name": name, "prompt": "", "ratio": "16:9", "status": "ready",
+                                "path": "assets/" + rel})
+        else:
+            for aid, f in dv.items():
+                rel = f if isinstance(f, str) else (f.get("path") or f.get("file"))
+                if not isinstance(rel, str) or not rel.strip():
+                    continue
+                rel = rel.strip().replace("\\", "/").lstrip("/")
+                out.append({"id": aid, "type": ctype, "name": aid, "prompt": "", "ratio": "16:9",
+                            "status": "ready", "path": "assets/" + rel})
+    return out
 
 
 def _asset_raw_ref(data, aid):
@@ -250,6 +313,8 @@ def _asset_abs_path(it, pdir):
             cands.append(v)
         else:
             cands.append(os.path.join(pdir, v))
+            # dict-of-dicts 特征图 manifest 的路径相对 assets/（如 "characters/…/xxx.png"）
+            cands.append(os.path.join(pdir, "assets", v))
             cands.append(os.path.join(_deliv_root(), v))
             cands.append(os.path.join(AGNES_ROOT, v))
     for c in dict.fromkeys(cands):
@@ -314,6 +379,10 @@ def assets_regenerate(payload: dict, request: Request):
     data = []
     if os.path.isfile(mp):
         data = json.load(open(mp, encoding="utf-8"))
+    _pairs, shape = _asset_items(data)
+    if shape == "nested":
+        # 特征图 dict-of-dicts manifest：先在内存扁平成新契约，回写即原地自愈为规范格式。
+        data = _flatten_nested(data)
     it = _asset_raw_ref(data, aid)
     if it is None:
         return JSONResponse({"error": f"资产 {aid} 不存在"}, status_code=404)

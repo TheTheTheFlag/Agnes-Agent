@@ -174,6 +174,7 @@ skills/short-drama-director/
 - **出图**：默认 `agnes-image-2.5-flash`；`--ratio`（B 锁画幅）、`--size 2K`、`--ref` 多图锁形象；
 - **出视频**：默认 `agnes-video-v2.0`；三模式 img2vid（单图）/ keyframes（2~3 图，关键帧动画）/ ti2vid（纯文本）；`--duration 3|5|10|18`；
 - **投喂正文**：一律 agnes 纯文本（无官方字符、无 H3 字段）；
+- **提示词语言铁律（2026-09-29）**：出图/出视频提示词一律中文（仅 2K/8K 等规格词、专有英文名除外），禁止英文质量后缀（masterpiece / best quality / cinematic lighting 等）与英文描述词；
 - **产物落点**：唯一作品库（`data/users/<user>/data/{image|video}_library`，stdout `FILE=`），**不产生 output 重复副本**（已规避 `_sync_skill_outputs` 二次登记）；
 - **长任务后台化（2026-09-28 铁律）**：批量出图/出视频脚本一律 `nohup python3 脚本.py > 脚本.log 2>&1 &` 立即返回，再用 `read_file` 轮询日志；**禁止前台 sleep 等待**。前台命令超时 = 整条进程组已被强制终止（`killed=True`），先读日志确认已完成部分，**只补缺段、禁止整批重跑**；
 - **防重复生成**：任何生成动作前先重读 `data/users/<user>/data/{image|video}_library/manifest.json`，目标段/seed 已有 `status=completed` 则跳过；重复 take 判定 = 同 seed + 同用途多条 completed；

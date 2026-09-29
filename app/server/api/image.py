@@ -532,6 +532,11 @@ def generate(payload: dict, request: Request):
     count = int(p.get("count") or 1)
     # 获取当前用户
     username = getattr(getattr(request, "state", None), "username", None) or current_user()
+    # 来源标识：内部通道（media.py / DAG 等技能产物）未显式传 source 时默认打短剧流程标，
+    # 使创作台作品库只展示页面生成内容（画廊按 exclude_source 过滤该标）。
+    src = str(p.get("source") or "")
+    if not src and request.headers.get("X-Agnes-Internal-Token"):
+        src = "short-drama-director"
 
     if mode not in IMAGE_MODES:
         return JSONResponse({"error": f"mode 必须是 {'/'.join(IMAGE_MODES)}"}, status_code=400)
@@ -587,7 +592,7 @@ def generate(payload: dict, request: Request):
             payload_dup["prompt"] = prompt.replace("#i", "").replace("{i}", "") or prompt
         item = _create_pending(mode, model, payload_dup["prompt"], size, ratio,
                                len(data_uris), username, dedup_key=dedup_key,
-                               source=str(p.get("source") or ""))
+                               source=src)
         jobs.append({"item": item, "payload": payload_dup})
         items.append(item)
     _start_worker(username, jobs)

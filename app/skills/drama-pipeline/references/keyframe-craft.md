@@ -18,13 +18,12 @@
 [CAMERA]    中全景，平视，机位在两人南侧约十二米，略低于胸口，朝北。
 [LIGHT]     主光自东南高位斜射，色温偏冷；阴影落在人物西北方；无逆光剪影。
 [STYLE]     次世代国漫 3D CG 画风，顶尖国产 3D 建模，分层布料与物理衣摆，细腻发丝根根烘焙，
-            电影级渲染光影，玄幻质感与高级感，masterpiece, best quality, 8K resolution
+            电影级渲染光影，玄幻质感与高级感，杰作级，最佳画质，8K分辨率
 [EXCLUDE]   禁止任何角色重复出现、禁止背景路人、禁止同角色多视角并列、禁止分屏拼接、
             禁止镜像倒影分身、禁止文字水印。
-            exactly 2 characters in one single unified shot, one instance of each,
-            no duplicated characters, no repeated faces, no extra people, no crowd,
-            no background figures, no split screen, no collage, no multiple views,
-            no mirror or reflection duplicates, no text, no watermark.
+            画面内恰好 2 名角色共处同一镜头、每名角色仅出现一次；
+            禁止角色重复出现、禁止背景路人、禁止同角色多视角并列、禁止分屏拼接、
+            禁止镜像倒影分身、禁止文字水印。
 ```
 
 **为什么分 9 段而不是一段散文**（`reviewed_invariant`）：

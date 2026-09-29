@@ -24,8 +24,7 @@ from app.memory import MemoryManager
 from app.planning import dag_core as core
 from app.planning.dag_storage import DAGStorage
 from app.server import add_event, add_log_entry
-
-_SYS = build_dag_planner_system_prompt()
+from app.userctx import deliverables_rel
 
 
 def _extract_goal(state: State) -> str:
@@ -55,7 +54,8 @@ def _ask_graph(llm, goal: str, thread_id: str = "default") -> Dict:
     import time as _t
     from app.server import add_event as _a_event
     from app.planning.react_loop import _llm_messages_to_text as _llm2txt
-    _msgs = [SystemMessage(content=_SYS), HumanMessage(content=f"目标：{goal}")]
+    _sys = build_dag_planner_system_prompt(deliverables_rel())
+    _msgs = [SystemMessage(content=_sys), HumanMessage(content=f"目标：{goal}")]
     _t0 = _t.time()
     resp = llm.invoke(_msgs)
     try:

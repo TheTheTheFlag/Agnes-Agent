@@ -33,6 +33,7 @@ from app.planning.dag_storage import DAGStorage
 from app.planning.react_loop import ReActLoop
 from app.server import add_event, add_log_entry
 from app.graph._agent_prompt import build_dag_executor_system_prompt
+from app.userctx import deliverables_rel
 
 # 工具调用硬约束（沿用旧 executor）：探索 ≤2、写入 ≤8、路径必须 deliverables/
 _EXPLORE_TOOLS = ("ls", "glob_files", "read_file", "execute_command")
@@ -107,6 +108,8 @@ def _run_node(thread_id: str, task_plan_id: int, node: Dict, goal: str,
 
     # 契约前置：解析本节点"应产出哪些文件"，用于 system prompt 提示与 complete_node 校验
     expected_artifacts = _expected_artifacts(node)
+    # 每用户交付目录（相对 BASE_DIR 的 per-user 写法，与主对话提示词一致）
+    dd = deliverables_rel()
 
     system_prompt = build_dag_executor_system_prompt(
         node_id=node_id,
@@ -115,6 +118,7 @@ def _run_node(thread_id: str, task_plan_id: int, node: Dict, goal: str,
         tool_names=", ".join(t.name for t in tools_list),
         artifacts_context=artifacts_context,
         acceptance_criteria=(node.get("acceptance_criteria") or ""),
+        deliverables_dir=dd,
     )
 
     _outcome = {"status": None, "reason": "", "files": []}
@@ -127,7 +131,7 @@ def _run_node(thread_id: str, task_plan_id: int, node: Dict, goal: str,
     from langchain_core.tools import StructuredTool
 
     def complete_node_plain(description: str, files: List[str]) -> str:
-        """声明子任务完成。files 列出本节点产出的实际文件路径（写入 deliverables/）。"""
+        """声明子任务完成。files 列出本节点产出的实际文件路径（写入 dd/）。"""
         existed, missing = [], []
         for f in files or []:
             p = str(f).replace("\\", "/")
@@ -149,7 +153,7 @@ def _run_node(thread_id: str, task_plan_id: int, node: Dict, goal: str,
     complete_node_tool = StructuredTool.from_function(
         func=complete_node_plain,
         name="complete_node",
-        description="声明子任务完成并列出产出文件路径（写入 deliverables/）。框架会校验文件存在后把节点置 success。",
+        description=f"声明子任务完成并列出产出文件路径（写入 {dd}/）。框架会校验文件存在后把节点置 success。",
     )
     fail_node_tool = StructuredTool.from_function(
         func=fail_node_plain,
@@ -190,8 +194,8 @@ def _run_node(thread_id: str, task_plan_id: int, node: Dict, goal: str,
                 return False, (
                     "[未落盘] complete_node 被拒绝：本节点还没有任何真实产物。"
                     f"你声明的 files={declared or '（空）'} 在磁盘上都不存在。"
-                    "请先用 write_file 把完整内容写入 deliverables/（路径必须以 'deliverables/' 开头，"
-                    "例如 'deliverables/tetris/index.html'），确认文件真实存在后再调用 complete_node；"
+                    f"请先用 write_file 把完整内容写入 {dd}/（路径必须以 '{dd}' 开头，"
+                    f"例如 '{dd}/tetris/index.html'），确认文件真实存在后再调用 complete_node；"
                     "若确实无法产出，请改调 fail_node 说明卡在哪里。"
                 )
             # 硬约束 2（契约前置）：验收标准里要求的产出文件必须被覆盖。
@@ -224,14 +228,14 @@ def _run_node(thread_id: str, task_plan_id: int, node: Dict, goal: str,
             if not path:
                 return False, (
                     f"[参数错误] 工具 {name} 缺少必需的 'path' 参数。"
-                    f"请在工具调用中提供完整路径，例如：{{\"path\": \"deliverables/xxx.html\", \"content\": \"...\"}}"
+                    f"请在工具调用中提供完整路径，例如：{{\"path\": \"{dd}/xxx.html\", \"content\": \"...\"}}"
                 )
-            if not path.startswith("deliverables/"):
+            if not (path.startswith("deliverables/") or path.startswith(f"{dd}/")):
                 return False, (
-                    f"[路径错误] 写文件路径必须以 'deliverables/' 开头（产出统一归档），"
+                    f"[路径错误] 写文件路径必须以 '{dd}' 开头（产出统一归档），"
                     f"当前路径 '{path}' 不符合。"
-                    f"请把文件路径改成 'deliverables/xxx' 形式（例如 'deliverables/snake/index.html'、"
-                    f"'deliverables/snake/style.css'、'deliverables/snake/app.js'）。"
+                    f"请把文件路径改成 '{dd}/xxx' 形式（例如 '{dd}/snake/index.html'、"
+                    f"'{dd}/snake/style.css'、'{dd}/snake/app.js'）。"
                 )
         return True, ""
 
@@ -339,6 +343,7 @@ def create_executor(llm_builder, tools_list):
         from app.trace import record_node_start, record_node_end
         record_node_start(thread_id, "executor")
         dag = DAGStorage(DB_PATH)
+        dd = deliverables_rel()
 
         plan = dag.get_plan_by_thread(thread_id)
         if not plan:
@@ -383,7 +388,7 @@ def create_executor(llm_builder, tools_list):
         node_map, edges = _reinstall_state(nodes, edges)
 
         if replan_requested:
-            ok = _do_local_replan(plan, failed_ids, dag, node_map, edges, llm_builder, thread_id)
+            ok = _do_local_replan(plan, failed_ids, dag, node_map, edges, llm_builder, thread_id, dd=dd)
             if not ok:
                 # 重规划没能产出替代节点（LLM 报错/返回空）→ 无法继续推进，收敛结束。
                 # 用 _empty_streak=3 让 route_after_executor 直接走 summarizer，避免无限空转。
@@ -516,7 +521,7 @@ def _missing_soft(node_map, edges, nid) -> List[str]:
 
 
 def _do_local_replan(plan: Dict, failed_ids: List[str], dag: DAGStorage,
-                     node_map, edges, llm_builder, thread_id: str) -> bool:
+                     node_map, edges, llm_builder, thread_id: str, dd: str = "") -> bool:
     """④ 局部重规划：锁定已完成节点，只让 LLM 重出"失败节点"的替代子图。
 
     收敛后的语义（避免一个失败波及全图）：
@@ -580,7 +585,7 @@ def _do_local_replan(plan: Dict, failed_ids: List[str], dag: DAGStorage,
             "【硬性输出要求】\n"
             "1. 每个失败节点都必须被替代：在对应新节点上用 \"replaces\" 标注它替代哪个旧节点 id，"
             "并用 \"acceptance_criteria\" 写明怎样算完成 + 要产出的具体文件路径"
-            "（如 deliverables/tetris/index.html）\n"
+            f"（如 {dd}/tetris/index.html）\n"
             "2. **接口冻结**：原失败节点验收标准里列出的产出文件路径，是下游节点依赖的接口——"
             "替代节点必须产出**完全相同的路径**（不改名、不少产、不换目录）。"
             "你只能改变'怎么做'，不能改变'产出什么'\n"

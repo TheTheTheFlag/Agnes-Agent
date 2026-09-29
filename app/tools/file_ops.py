@@ -68,6 +68,32 @@ def _root_for(path: str) -> str:
     return _root()
 
 
+def _user_workspace_abs(path: str) -> Optional[str]:
+    """若相对路径以 data/users/<当前用户>/ 开头，返回其按 BASE_DIR 解析的绝对路径。
+
+    主对话 / DAG 提示词都要求交付物写成 per-user 形式（data/users/<用户名>/deliverables/...）。
+    若按普通用户工作区 join，会在 data/users/<用户>/ 下再嵌套一层 data/users/<用户>/…，
+    这里改以 BASE_DIR 为基准，让管理员与普通用户行为一致；非本用户前缀（如
+    data/users/Others/...）返回 None，沿用原有解析、并照常被越界检查拦下。
+    """
+    try:
+        from app.userctx import current_user
+        marker = f"data/users/{current_user()}/"
+    except Exception:
+        return None
+    rel = path.replace("\\", "/").lstrip("./")
+    if rel.lower().startswith(marker.lower()):
+        return os.path.abspath(os.path.join(BASE_DIR, rel))
+    return None
+
+
+def _raise_if_other_user_path(path: str, uabs: Optional[str]) -> None:
+    """普通用户引用 data/users/<其他用户>/... 时显式拒绝（而非悄悄解析进自己的工作区）。"""
+    rel = path.replace("\\", "/").lstrip("./")
+    if uabs is None and not os.path.isabs(path) and rel.lower().startswith("data/users/"):
+        raise ValueError(f"路径越界（不能访问其他用户的工作区）: {path}")
+
+
 def _resolve_path(path: str) -> str:
     """把相对/绝对路径解析为可操作的绝对路径。
 
@@ -75,9 +101,14 @@ def _resolve_path(path: str) -> str:
     （用户承载目录 deliverables/ uploads/ 等按用户工作区解析，其余以项目根解析）。
     """
     root = _root_for(path)
-    p = os.path.abspath(os.path.join(root, path or ""))
+    uabs = _user_workspace_abs(path)
+    if uabs is not None:
+        p = uabs
+    else:
+        p = os.path.abspath(os.path.join(root, path or ""))
     if _is_admin_user():
         return p
+    _raise_if_other_user_path(path, uabs)
     if p != root and not p.startswith(root + os.sep):
         raise ValueError(f"路径越界（仅允许用户工作区内）: {path}")
     return p
@@ -88,9 +119,13 @@ def _resolve_read_path(path: str) -> str:
     （app/skills/）只读放行**——短剧创作等系统级工作台要读技能 SKILL.md 的
     references/ 与脚本；写操作仍由写路径（_resolve_path）严格限定在工作区。
     """
+    uabs = _user_workspace_abs(path)
+    if uabs is not None:
+        return uabs
     root = _root_for(path)
     if _is_admin_user():
         return os.path.abspath(os.path.join(root, path or ""))
+    _raise_if_other_user_path(path, uabs)
     p = os.path.abspath(os.path.join(root, path or ""))
     # 优先用户工作区：存在于工作区内的路径照旧
     if (p == root or p.startswith(root + os.sep)) and os.path.exists(p):

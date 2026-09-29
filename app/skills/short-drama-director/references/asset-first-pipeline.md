@@ -91,7 +91,7 @@ P5 质检（P0/P1/P2 + 资产一致性：画幅/脸型/服装与资产图一致�
 - 必填：`id / type / name / prompt / ratio / status / path`；可选：`task_id / slug / md5 / controls / not_controls / views`；
 - `prompt` 必须是**实际提交给出图通道的完整提示词**（逐字全文），不得写摘要或省略号；
 - `path` 用**项目根相对路径**；`status ∈ {ready, draft, failed}`，仅 `ready` 可被下游引用；
-- `type ∈ {character, scene, prop}`——**分类信息放 `type` 字段，禁止嵌套分类字典**
+- `type ∈ {character, scene, prop, monster}`——**分类信息放 `type` 字段，禁止嵌套分类字典**
   （`{characters:[…],scenes:[…],props:[…]}` 不符合消费方契约：审核台 `GET /api/drama-review/assets`
   期望顶层数组，实测字典结构直接 HTTP 500）；
 - **失败资产也要落账**（`status:"failed"` + 失败原因），不得静默缺项——缺项会让下游「漏了谁」无法对账；

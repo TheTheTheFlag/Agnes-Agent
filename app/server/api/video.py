@@ -699,6 +699,11 @@ def generate(payload: dict, request: Request):
 
     _prune_refs()
     username = getattr(getattr(request, "state", None), "username", None) or current_user()
+    # 来源标识：内部通道（media.py / DAG 等技能产物）未显式传 source 时默认打短剧流程标，
+    # 使创作台作品库只展示页面生成内容（画廊按 exclude_source 过滤该标）。
+    src = str(p.get("source") or "")
+    if not src and request.headers.get("X-Agnes-Internal-Token"):
+        src = "short-drama-director"
     dedup_key = _dedup_key(upstream_payload)
     if not p.get("allow_duplicate"):
         dups = _find_dedup(username, dedup_key)
@@ -736,7 +741,7 @@ def generate(payload: dict, request: Request):
         return JSONResponse({"error": create_msg}, status_code=502)
 
     item = _persist_new(model, mode, prompt, upstream_payload, key_idx, created, username,
-                        bparams=p, dedup_key=dedup_key, source=str(p.get("source") or ""))
+                        bparams=p, dedup_key=dedup_key, source=src)
     return {"ok": True, "count": 1, "task_id": item.get("task_id") or item.get("id"), "items": [item]}
 
 

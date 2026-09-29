@@ -220,7 +220,7 @@ if os.path.exists(KFP2):
 #    对齐 short-drama-director/references/asset-first-pipeline.md §2c·补（消费方契约）。
 AM = os.path.join(R, 'assets', 'manifest.json')
 REQ_FIELDS = ('id', 'type', 'name', 'prompt', 'ratio', 'status', 'path')
-ASSET_TYPES = ('character', 'scene', 'prop')
+ASSET_TYPES = ('character', 'scene', 'prop', 'monster')
 ASSET_STATUS = ('ready', 'draft', 'failed')
 if not os.path.exists(AM):
     print("  资产扫描: 未执行（缺 %s）" % AM)
