@@ -122,6 +122,55 @@ def _dag_has_unfinished_work(thread_id: str) -> bool:
     except Exception:
         return False
 
+
+def _dag_progress_summary(thread_id: str, max_show: int = 8) -> str:
+    """该 thread 当前 DAG 的只读进度摘要（纯 DB 查询，不调 LLM、不启动 run）。
+
+    用于执行期查询类插话（进度/状态/多少/多久…）的直接只读回答：
+    与 _dag_has_unfinished_work 相同的"扫全部非 deleted 计划"口径，取最近一条
+    仍在 planning/executing 的计划，统计未终结节点并拼成人类可读的一句话总结。
+    查询失败/无进行中计划时返回 ""（调用方据此回退到"入队"或"等待本轮结束"）。
+    """
+    try:
+        from app.planning.dag_storage import DAGStorage
+        dag = DAGStorage(DB_PATH)
+        with sqlite3.connect(DB_PATH) as conn:
+            plans = conn.execute(
+                "SELECT id, goal, status FROM dag_plans "
+                "WHERE thread_id = ? AND status != 'deleted' "
+                "ORDER BY id DESC LIMIT 5",
+                (thread_id,),
+            ).fetchall()
+        for plan_id, goal, status in plans:
+            if status not in ("planning", "executing"):
+                continue
+            nodes = dag.get_nodes(plan_id)
+            if not nodes:
+                continue
+            terminal = ("success", "skipped", "failed")
+            done = [n for n in nodes if n["status"] == "success"]
+            skipped = [n for n in nodes if n["status"] == "skipped"]
+            failed = [n for n in nodes if n["status"] == "failed"]
+            running = [n for n in nodes if n["status"] == "running"]
+            pending = [n for n in nodes if n["status"] not in terminal and n["status"] != "running"]
+            total = len(nodes)
+            finished = len(done) + len(skipped) + len(failed)
+            goal_txt = str(goal or "")[:40]
+            lines = [f"【DAG 执行进度】计划「{goal_txt}」执行中（{status}）"]
+            lines.append(f"节点：共 {total}，已完成 {finished}，失败 {len(failed)}，跳过 {len(skipped)}。")
+            if running:
+                lines.append("正在执行：" + "；".join(n["description"][:40] for n in running[:max_show]))
+            if pending:
+                head = pending[:max_show]
+                more = f"…等共 {len(pending)} 项待办" if len(pending) > len(head) else ""
+                lines.append("待执行：" + "；".join(n["description"][:40] for n in head) + more)
+            if failed:
+                lines.append("失败节点：" + "；".join(n["description"][:40] for n in failed[:3]))
+            return "\n".join(lines)
+        return ""
+    except Exception:
+        return ""
+
 # ============================================================
 # Chatbot 节点（统一入口）
 # 取代旧版 L1/L2/L3 硬切分。模型在每一轮自主决定：

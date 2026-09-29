@@ -856,6 +856,49 @@ input, textarea { font-family: inherit; }
 .approval-actions button.btn-approve:hover { filter: brightness(1.1); }
 .approval-actions button.btn-deny:hover { color: var(--danger); border-color: var(--danger); }
 
+/* 人工决策选项卡（ask_user：预置选项 + 自定义输入） */
+.ask-options { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+.ask-options .ask-option {
+  padding: 7px 12px;
+  border-radius: 10px;
+  font-size: 12.5px;
+  text-align: left;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  color: var(--text);
+  cursor: pointer;
+  transition: all 0.15s;
+  line-height: 1.5;
+}
+.ask-options .ask-option:hover { border-color: var(--accent); color: var(--accent); background: var(--bg-input); }
+.ask-options .ask-option:disabled { opacity: 0.5; cursor: default; }
+.ask-custom-row { display: flex; gap: 8px; align-items: stretch; }
+.ask-custom-input {
+  flex: 1;
+  padding: 6px 10px;
+  border-radius: 10px;
+  font-size: 12.5px;
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--text);
+  outline: none;
+  min-width: 0;
+}
+.ask-custom-input:focus { border-color: var(--accent); }
+.ask-custom-send {
+  padding: 6px 14px;
+  border-radius: 10px;
+  font-size: 12.5px;
+  font-weight: 500;
+  border: 1px solid var(--border);
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ask-custom-send:disabled { opacity: 0.5; cursor: default; }
+.ask-hint { font-size: 11px; color: var(--text-soft); margin-top: 4px; opacity: 0.85; }
+
 /* 错误气泡 */
 .msg.error .msg-body {
   background: var(--danger-bg);

@@ -39,6 +39,8 @@ from app.userctx import deliverables_rel
 _EXPLORE_TOOLS = ("ls", "glob_files", "read_file", "execute_command")
 _WRITE_TOOLS = ("write_file", "edit_file", "delete_file")
 _APPROVAL_TOOLS = ("execute_command", "write_file", "edit_file", "delete_file")
+# 人工决策工具：executor 需要用户作判断（选项/自定义输入）时调用，interrupt 挂起等用户答复
+_ASK_TOOLS = ("ask_user",)
 
 
 def _extract_artifacts(text: str) -> List[str]:
@@ -115,7 +117,7 @@ def _run_node(thread_id: str, task_plan_id: int, node: Dict, goal: str,
         node_id=node_id,
         description=description,
         goal=goal,
-        tool_names=", ".join(t.name for t in tools_list),
+        tool_names=", ".join(t.name for t in tools_list) + ", complete_node, fail_node, ask_user",
         artifacts_context=artifacts_context,
         acceptance_criteria=(node.get("acceptance_criteria") or ""),
         deliverables_dir=dd,
@@ -160,6 +162,27 @@ def _run_node(thread_id: str, task_plan_id: int, node: Dict, goal: str,
         name="fail_node",
         description="声明子任务失败并给出原因（API 错误 / 工具受限 / 资料缺失等），框架会跳过强依赖该节点的下游并触发局部重规划。",
     )
+
+    # 人工决策工具 ask_user：当执行本节点需要用户拍板（如多个可行方向、需要授权、需要
+    # 对默认方案作微调）时调用。会通过 langgraph interrupt 挂起执行，向前端弹"选项卡"
+    # （预置选项 + 允许用户自定义输入），用户答复后 interrupt 返回答案，本工具原样返回。
+    _ask_ans: Dict[str, str] = {}
+    def ask_user_plain(question: str, options: Optional[List[str]] = None, allow_custom: bool = True) -> str:
+        """需要用户作决定时向用户提问并等待答复。question 为问题，options 为预置选项
+        （字符串列表），allow_custom 为 True 时也允许用户自由输入。返回用户的选择。"""
+        return _ask_ans.get("answer") or _ask_ans.get("answer", "") or "(用户未提供答案)"
+
+    ask_user_tool = StructuredTool.from_function(
+        func=ask_user_plain,
+        name="ask_user",
+        description=(
+            f"需要用户作判断/授权时调用，会弹出选项卡并挂起等待用户答复。"
+            f"question：要向用户提出的问题；options：预置选项列表（每个选项一句话）；"
+            f"allow_custom=True 表示除预置选项外也允许用户自定义输入。"
+            f"仅当任务推进确实需要用户决策时才调用，不要因模型不确定而滥用。"
+        ),
+    )
+
     # 替换闭包内 @tool 装饰过的同名引用为新工具（向后兼容旧代码中 complete_node / fail_node 的引用）
     complete_node = complete_node_tool
     fail_node = fail_node_tool
@@ -247,6 +270,19 @@ def _run_node(thread_id: str, task_plan_id: int, node: Dict, goal: str,
         on_event(None, None)  # no-op keep signature
 
     def _interrupt_handler(name, params):
+        if name in _ASK_TOOLS:
+            # 用户决策选项卡：无论审批模式如何，都要挂起等用户答复。
+            # interrupt() 会抛出 GraphInterrupt 上抛给 langgraph 状态机挂起；
+            # 必须原样冒泡（不能吞成异常返回），否则挂起失效、工具拿不到答案。
+            resp = interrupt({
+                "kind": "ask",
+                "question": params.get("question") or "请用户决定",
+                "options": params.get("options") or [],
+                "allow_custom": bool(params.get("allow_custom", True)),
+                "mode": "ask",
+            })
+            _ask_ans["answer"] = str(resp.get("answer") or "")[:4000] if isinstance(resp, dict) else ""
+            return True, None
         if name in _APPROVAL_TOOLS:
             try:
                 from app.server import config as _srv_cfg
@@ -269,7 +305,7 @@ def _run_node(thread_id: str, task_plan_id: int, node: Dict, goal: str,
                 return allow, None
         return True, None
 
-    node_tools = list(tools_list) + [complete_node, fail_node]
+    node_tools = list(tools_list) + [complete_node, fail_node, ask_user_tool]
     # max_iterations=12：executor 单子任务需要"探索+写入+校验+complete_node"多轮，
     # 历史 5 太紧，模型会卡在最后一两次没机会收尾；reactive_loop 内还有
     # _NO_PROGRESS_LIMIT 强制收尾兜底（连续 3 轮无 tool_calls 直接 break），

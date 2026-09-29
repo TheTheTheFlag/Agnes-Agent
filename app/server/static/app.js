@@ -769,24 +769,57 @@ function createToolCard(name) {
   return wrap;
 }
 
-/* ==================== 审批卡片 ==================== */
+/* ==================== 审批卡片 / 人工决策选项卡 ==================== */
 function renderApprovalCard(data) {
   const host = State.currentAssistantEl || addAssistantBubble("");
   const card = document.createElement("div");
   card.className = "approval-card";
+  const isAsk = data.kind === "ask";
+  const options = (data.options || []).filter((o) => String(o || "").trim());
+  card.dataset.kind = isAsk ? "ask" : "approval";
   card.innerHTML = `
     <div class="approval-title">
       <svg class="approval-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="7.5" width="9" height="6" rx="1.5"/><path d="M5.5 7.5V5a2.5 2.5 0 0 1 5 0v2.5"/></svg>
-      <span>需要你的确认</span>
+      <span>${isAsk ? "需要你来决定" : "需要你的确认"}</span>
     </div>
-    <div class="approval-question">${escapeHtml(data.question || "是否允许执行该操作？")}</div>
-    ${data.command ? `<div class="approval-cmd">${escapeHtml(data.command)}</div>` : ""}
-    <div class="approval-actions">
-      <button class="btn-approve">允许执行</button>
-      <button class="btn-deny">拒绝</button>
-    </div>`;
-  $(".btn-approve", card).addEventListener("click", () => respondApproval(true, data.mode));
-  $(".btn-deny", card).addEventListener("click", () => respondApproval(false, data.mode));
+    <div class="approval-question">${escapeHtml(data.question || (isAsk ? "请选择：" : "是否允许执行该操作？"))}</div>
+    ${data.command && !isAsk ? `<div class="approval-cmd">${escapeHtml(data.command)}</div>` : ""}
+    ${isAsk ? `
+      <div class="ask-options">
+        ${options.length ? options.map((o, i) =>
+          `<button class="ask-option" data-value="${escapeHtml(o)}">${escapeHtml(o)}</button>`
+        ).join("") : ""}
+        ${data.allow_custom !== false ? `
+          <div class="ask-custom-row">
+            <input class="ask-custom-input" placeholder="或输入自定义答案…" maxlength="500" />
+            <button class="ask-custom-send">确定</button>
+          </div>
+        ` : ""}
+      </div>
+      <div class="ask-hint">选择后将挂起执行，直到你给出答案再继续</div>
+    ` : `
+      <div class="approval-actions">
+        <button class="btn-approve">允许执行</button>
+        <button class="btn-deny">拒绝</button>
+      </div>
+    `}`;
+  if (isAsk) {
+    $$(".ask-option", card).forEach((b) => b.addEventListener("click", () => respondAsk(b.dataset.value, data)));
+    const input = $(".ask-custom-input", card);
+    const send = $(".ask-custom-send", card);
+    const doSend = () => {
+      const v = (input && input.value || "").trim();
+      if (v) respondAsk(v, data);
+    };
+    if (send) send.addEventListener("click", doSend);
+    if (input) {
+      input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); doSend(); } });
+      setTimeout(() => { try { input.focus(); } catch (e) {} }, 60);
+    }
+  } else {
+    $(".btn-approve", card).addEventListener("click", () => respondApproval(true, data));
+    $(".btn-deny", card).addEventListener("click", () => respondApproval(false, data));
+  }
   // 移除气泡里的加载中动画（审批卡取代了它）
   const msgText = $(".msg-text", host);
   if (msgText) $(".typing-dots", msgText)?.remove();
@@ -795,14 +828,25 @@ function renderApprovalCard(data) {
   scrollToBottom();
 }
 
-function respondApproval(allow, mode) {
+function _lockApprovalCard() {
   const card = State.approvalCard;
   if (card) {
-    const btns = $$("button", card);
-    btns.forEach((b) => (b.disabled = true));
+    $$("button", card).forEach((b) => (b.disabled = true));
+    const inp = $(".ask-custom-input", card);
+    if (inp) inp.disabled = true;
   }
+}
+
+function respondApproval(allow, data) {
+  _lockApprovalCard();
   State.approvalCard = null;
-  sendMessage("", { resume: true, allow, mode });
+  sendMessage("", { resume: true, allow, mode: (data && data.mode) || "per_ask" });
+}
+
+function respondAsk(answer, data) {
+  _lockApprovalCard();
+  State.approvalCard = null;
+  sendMessage("", { resume: true, allow: true, answer: answer, mode: "ask" });
 }
 
 /* ==================== 任务待办面板 ==================== */
@@ -1692,7 +1736,13 @@ async function sendMessage(text, opts) {
   State.chatAbort = new AbortController();
 
   const body = isResume
-    ? { resume: true, allow: !!opts.allow, mode: opts.mode || "per_ask", thread_id: State.threadId }
+    ? {
+        resume: true,
+        allow: !!opts.allow,
+        mode: opts.mode || "per_ask",
+        answer: opts.answer || "",
+        thread_id: State.threadId,
+      }
     : { message: text, thread_id: State.threadId, selected_kbs: kbSelectionForSend() };
 
   try {
