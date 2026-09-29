@@ -1,9 +1,0 @@
-【自动化任务 T2-merge｜合并 60 集剧本为 美人图-script.json】
-
-工作目录：data/users/Mirror/deliverables/短剧/美人图/
-1) 读取 script-b01.json ~ script-b20.json（每份 3 集），按集号顺序合并为一份 美人图-script.json：
-   - 顶层 params/source/lang/style 取第一份为准，episodes 数组按集号升序拼接（去重、不得缺集）
-   - 合并后总集数必须为 60
-2) 校验：cd . && node /home/mirror/Agnes-Agent/app/skills/novel-script/scripts/novel-script.mjs validate 美人图-script.json --outline outline.json --art art.json；必须全绿。
-3) 汇报：总集数、总场次、总台词句数、总估时 vs 总目标（60×120s）、validate 结果。
-不渲染报告，只合并+校验。

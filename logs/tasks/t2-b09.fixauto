@@ -1,6 +1,0 @@
-  WARN E25: 仅 88.9s，疑似空壳，跳过补拍（交给模型重做）
-  WARN E26: 仅 86.1s，疑似空壳，跳过补拍（交给模型重做）
-FIX_DONE {'source': 0, 'beats': 0, 'light': 1, 'line': 0, 'add': 2, 'del': 0}
-  E25: beats 32, est 88.9s, claimed []
-  E26: beats 31, est 86.1s, claimed ['舆论战']
-  E27: beats 41, est 115.5s, claimed ['仓库对峙']

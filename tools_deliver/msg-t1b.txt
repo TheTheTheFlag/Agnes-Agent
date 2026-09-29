@@ -1,8 +1,0 @@
-开始执行。请直接动手做，不要只做文字确认，也不要再征求确认，本轮一口气把完整任务做完：
-
-1) 立即对 art.json 跑校验：node app/skills/novel-art/scripts/novel-art.mjs validate art.json --cast cast.json（在交付目录 data/users/Mirror/deliverables/短剧/美人图/ 下执行），有门禁失败就逐条修复并重跑直到全绿。
-2) 按 agnes-media 技能出图：python app/skills_builtin/agnes-media/media.py image；9 个场景空景（16:9、2K、提示词含 empty scene, no people + 质量尾锚）+ 4 件道具白底无手图（加 pure white background, no hands）；stdout 出现 FILE= 后 cp 为 images/<slug>-sheet.png；提示词按质量基线增强到作品级，变体场景 --ref 母场景。
-3) 全部出完后：cp art.json 美人图-art.json；node app/skills/novel-art/scripts/novel-art.mjs render 美人图-art.json --md > 美人图-art.md；同命令 --html > art-report.html。
-4) 完成后逐项汇报：validate 各门结果、出图清单（路径+尺寸）、美人图-art.json / 美人图-art.md / art-report.html 三个产物的 ls -l 字节数。未完成项必须明说。
-
-现在就开始，先跑 validate。

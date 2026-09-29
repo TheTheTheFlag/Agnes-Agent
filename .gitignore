@@ -51,3 +51,15 @@ uploads/
 data/users/
 # 交付物（运行时产物）
 deliverables/
+
+# ============ 服务器 auto-snapshot 曾把运行时产物误入库，统一剔除 ============
+# 内部访问令牌（跨服务调用用，属凭证，绝不公开）
+data/internal_token
+# 服务/管道运行日志与状态文件
+logs/
+tools_deliver/
+err.txt
+.gates.jsonl
+*.bak*
+# 历史技能交付补丁备份（已被 short-drama-director / drama-pipeline 取代）
+app/skills/.deliverdir-patch*/
