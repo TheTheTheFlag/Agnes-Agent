@@ -14,6 +14,7 @@ import json
 import mimetypes
 import os
 import re
+import shutil
 import threading
 import time
 import uuid
@@ -23,6 +24,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, JSONResponse
 
 from app.config import BASE_DIR, user_subdir
+from app.server.store import add_log_entry
 from app.userctx import current_user, set_current_user
 
 router = APIRouter(prefix="/api/image", tags=["image"])
@@ -57,6 +59,17 @@ _RETRY_CAP_SLEEP = 120           # 普通失败退避上限
 
 # 提交去重：同一入参（含参考图内容哈希）在窗口内的在途任务只保留一个（防重复扣费）
 _DEDUP_WINDOW = 300              # 秒；窗口内同内容且在途（queued/running）视为重复提交
+
+# ---- 僵尸任务治理（2026-10-02 修复）----
+# 症状：作品库长期显示「生成中 · 尝试 N 次 / 失败自动重试中…」，但实际已不再重试。
+# 根因：图片任务跑在 daemon=True 线程里，而 uvicorn 以 reload=True 运行（service.py:155
+# 监控 app/**/*.py）。任何代码改动触发热重载时，旧 worker 退出 → 所有在途线程被系统回收，
+# 但 manifest 里 status 仍是 running/queued，前端无从分辨「真在跑」与「已死」。
+# 三处修复：① 启动时把上一进程遗留的 in-flight 项统一置 failed；② 运行期持续续期心跳，
+# 并给 worker 加最外层异常兜底，避免线程静默死亡留下僵尸；③ 前端按心跳陈旧度兜底显示。
+_HEARTBEAT_EVERY = 30             # 秒；worker 存活期间每 30s 续期一次 last_heartbeat
+_HEARTBEAT_TIMEOUT = 900          # 秒；心跳超过 15 分钟未续视为僵尸（须 > 单次上游超时 360s）
+_ORPHAN_REASON = "服务重启或热重载导致任务中断（后台线程已随进程退出，不再重试）。请重新提交。"
 
 
 def _dedup_key(payload: dict, mode: str, count: int) -> str:
@@ -134,6 +147,8 @@ def _mask_key(k: str, tail: int = 4) -> str:
 # 改为每用户独立的内存列表 + 可重入锁（避免嵌套调用死锁）
 _user_items: dict = {}   # {username: [...]}
 _user_locks: dict = {}   # {username: threading.RLock()}
+_manifest_bak_at: dict = {}   # {manifest 路径: 上次刷新 .bak 的时刻}
+_MANIFEST_BAK_TTL = 300       # .bak 最短刷新间隔（秒），避免高频保存时反复拷贝
 
 def _user_items_lock(username: str) -> threading.RLock:
     if username not in _user_locks:
@@ -145,6 +160,55 @@ def _get_user_items(username: str) -> list:
         _load_user_manifest(username)
     return _user_items[username]
 
+def _read_manifest_with_backup(path):
+    """读 manifest；主文件缺失/损坏时回退 .bak。返回 (items, note)。
+    note 非空表示发生了降级恢复，需告警。
+    path 可能是 user_subdir 的 _UserPath 代理，先取真实字符串（它只支持 __fspath__）。"""
+    path = os.fspath(path)
+    err = ""
+    for cand in (path, path + ".bak"):
+        if not os.path.isfile(cand):
+            continue
+        try:
+            with open(cand, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            if isinstance(raw, dict):
+                items = raw.get("items", [])
+            elif isinstance(raw, list):
+                items = raw
+            else:
+                items = []
+            if not isinstance(items, list):
+                items = []
+            note = "" if cand == path else f"manifest 主文件不可用，已从 {os.path.basename(cand)} 恢复"
+            return items, note
+        except Exception as e:
+            err = f"{os.path.basename(cand)}: {e}"
+    return [], err
+
+
+def _atomic_write_manifest(path, payload: dict):
+    """原子写 manifest：tmp + fsync + os.replace，杜绝写到一半被读到空/半截 JSON。
+    覆盖前留一份 .bak（按 TTL 节流，避免高频保存时反复拷贝）。
+    path 可能是 user_subdir 的 _UserPath 代理，先取真实字符串（它只支持 __fspath__）。"""
+    path = os.fspath(path)
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    bak = path + ".bak"
+    if os.path.isfile(path) and (not os.path.isfile(bak)
+                                 or time.time() - _manifest_bak_at.get(path, 0) > _MANIFEST_BAK_TTL):
+        try:
+            shutil.copy2(path, bak)
+            _manifest_bak_at[path] = time.time()
+        except Exception:
+            pass
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=1)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
 def _load_user_manifest(username: str):
     """按用户加载作品列表（模块级 _LIB 是路径代理，会自动按当前用户解析）"""
     # 直接使用 set_current_user 切换上下文，不需要调用 current_user()
@@ -152,20 +216,17 @@ def _load_user_manifest(username: str):
     _old_token = app.userctx._cur_user.get(None)
     try:
         app.userctx.set_current_user(username)
-        items = []
-        try:
-            with open(_MANIFEST, "r", encoding="utf-8") as f:
-                raw = json.load(f)
-            items = raw.get("items", []) if isinstance(raw, dict) else []
-        except Exception:
-            pass
+        items, note = _read_manifest_with_backup(_MANIFEST)
+        if note:
+            add_log_entry("warning", f"[作品库] manifest 读取异常：{note}"
+                                     f"（items={len(items)}）")
         with _user_items_lock(username):
             _user_items[username] = items
     finally:
         app.userctx.set_current_user(_old_token)
 
 def _save_user_manifest(username: str):
-    """保存当前用户的作品列表到磁盘"""
+    """保存当前用户的作品列表到磁盘（原子写 + .bak 备份）"""
     import app.userctx
     _old_token = app.userctx._cur_user.get(None)
     try:
@@ -173,8 +234,7 @@ def _save_user_manifest(username: str):
         os.makedirs(_LIB, exist_ok=True)
         with _user_items_lock(username):
             items = _user_items.get(username, [])
-        with open(_MANIFEST, "w", encoding="utf-8") as f:
-            json.dump({"items": items}, f, ensure_ascii=False, indent=1)
+        _atomic_write_manifest(_MANIFEST, {"items": items})
     finally:
         app.userctx.set_current_user(_old_token)
 
@@ -459,6 +519,22 @@ def _worker_run(payload: dict, keys: list, username: str, item_id: str) -> None:
     t0 = time.time()
     sleep = _RETRY_START_SLEEP
     attempt = 0
+    _stop_hb = threading.Event()
+    threading.Thread(target=_heartbeat_loop, args=(username, item_id, _stop_hb),
+                     daemon=True, name=f"img-hb-{item_id}").start()
+    try:
+        _worker_retry_loop(payload, keys, username, item_id, t0, attempt, sleep)
+    except Exception as e:                      # 兜底：任何未预期异常都不允许线程静默死亡
+        _stop_hb.set()
+        _update_pending(username, item_id, status="failed", progress=0,
+                        error=f"任务异常中断：{type(e).__name__}: {e}"[:200],
+                        completed_at=time.strftime("%Y-%m-%d %H:%M:%S"))
+        return
+    _stop_hb.set()
+
+
+def _worker_retry_loop(payload: dict, keys: list, username: str, item_id: str,
+                       t0: float, attempt: int, sleep: int) -> None:
     while True:
         if _task_cancelled(username, item_id):
             return                             # 已取消：停止继续重试（在途上游请求无法中断）
@@ -490,8 +566,50 @@ def _worker_run(payload: dict, keys: list, username: str, item_id: str) -> None:
                             error=f"重试超过 {_RETRY_TOTAL_MAX // 3600}h 仍未成功，最后错误: {last_err[:200]}",
                             completed_at=time.strftime("%Y-%m-%d %H:%M:%S"))
             return
-        time.sleep(sleep)
+        # 退避期间分片睡眠：单片不超过心跳周期，否则 429 冷却 300s / 封顶 120s
+        # 期间心跳会停更，_sweep_zombies 会把仍在正常重试的任务误判为僵尸
+        _deadline = time.time() + sleep
+        while time.time() < _deadline:
+            if _task_cancelled(username, item_id):
+                return
+            time.sleep(min(_HEARTBEAT_EVERY, max(0.5, _deadline - time.time())))
         sleep = min(int(sleep * 1.6) + 3, _RETRY_CAP_SLEEP)   # 指数退避，封顶
+
+
+def _heartbeat_loop(username: str, item_id: str, stop: threading.Event) -> None:
+    """定期给在途任务续期 last_heartbeat，供前端判定死活（僵尸阈值 _HEARTBEAT_TIMEOUT）。"""
+    while not stop.wait(_HEARTBEAT_EVERY):
+        try:
+            _update_pending(username, item_id,
+                            last_heartbeat=time.strftime("%Y-%m-%d %H:%M:%S"))
+        except Exception:
+            return
+
+
+def _sweep_zombies(username: str) -> int:
+    """把心跳超时的在途项标记为 failed，返回处理条数。
+
+    与启动期清理不同：这里不能只依赖 status，因为进程未重启时线程也可能因未捕获异常死掉
+    （_worker_run 已加兜底，此处作为第二道保险，供 /task 轮询时惰性触发）。
+    """
+    now = time.time()
+    hits = []
+    with _user_items_lock(username):
+        for it in _get_user_items(username):
+            if it.get("status") not in ("queued", "running"):
+                continue
+            hb = str(it.get("last_heartbeat") or "")
+            try:
+                age = now - time.mktime(time.strptime(hb, "%Y-%m-%d %H:%M:%S"))
+            except Exception:
+                age = _HEARTBEAT_TIMEOUT + 1
+            if age > _HEARTBEAT_TIMEOUT:
+                hits.append(it.get("id"))
+    for iid in hits:
+        _update_pending(username, iid, status="failed", progress=0,
+                        error=_ORPHAN_REASON,
+                        completed_at=time.strftime("%Y-%m-%d %H:%M:%S"))
+    return len(hits)
 
 
 def _start_worker(username: str, jobs: list) -> None:
@@ -503,6 +621,53 @@ def _start_worker(username: str, jobs: list) -> None:
             daemon=True,
         ).start()
 
+
+
+def _recover_orphans_at_startup() -> None:
+    """进程启动时把所有用户 manifest 里残留的 in-flight 项置为 failed。
+
+    单 worker 架构（uvicorn 仅 spawn 一个子进程）下，启动瞬间不可能存在本进程的真实在途任务，
+    因此无需按心跳时间甄别，残留项一律判定为上一进程遗留。
+    """
+    users_root = os.path.join(BASE_DIR, "data", "users")
+    total = 0
+    try:
+        names = [d for d in os.listdir(users_root)
+                 if os.path.isdir(os.path.join(users_root, d))]
+    except Exception:
+        return
+    for uname in names:
+        try:
+            lib = os.path.join(users_root, uname, "data", "image_library")
+            mpath = os.path.join(lib, "manifest.json")
+            if not os.path.isfile(mpath):
+                continue
+            items, _note = _read_manifest_with_backup(mpath)
+            if not isinstance(items, list):
+                continue
+            n = 0
+            for it in items:
+                if isinstance(it, dict) and it.get("status") in ("queued", "running"):
+                    it["status"] = "failed"
+                    it["progress"] = 0
+                    it["error"] = _ORPHAN_REASON
+                    it["completed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                    n += 1
+            if n:
+                _atomic_write_manifest(mpath, {"items": items})
+                total += n
+                print(f"[作品库] 启动清理：用户 {uname} 有 {n} 个任务因进程重启中断，已标记失败")
+        except Exception as e:
+            print(f"[作品库] 启动清理失败（用户 {uname}）：{e}")
+    if total:
+        print(f"[作品库] 启动清理完成：共标记 {total} 个中断任务为 failed")
+
+
+try:
+    threading.Thread(target=_recover_orphans_at_startup, daemon=True,
+                     name="img-orphan-recover").start()
+except Exception:
+    pass
 
 
 @router.get("/status")
@@ -613,6 +778,9 @@ async def task(item_id: str, request: Request = None):
     # 仅作品库存在、无任务记录的历史作品（旧同步入库）→ 视为已完成，避免前端/外部轮询空转
     if not item.get("status"):
         item = dict(item, status="completed")
+    elif item.get("status") in ("queued", "running"):
+        _sweep_zombies(username)          # 惰性清理心跳超时的僵尸，避免永久假装重试中
+        item = next((x for x in _get_user_items(username) if x.get("id") == item_id), item)
     return {"ok": True, "item": item}
 
 
