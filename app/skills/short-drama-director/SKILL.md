@@ -20,6 +20,8 @@ description: "【漫剧老李AIGC 全流程Skill · V6.9.8 轻量版 · Agnes �
 > 内部创作台 127.0.0.1:8081）——**覆盖下方 A 锁**（模型不再三选一，统一 agnes 单通道：
 > 出图 `agnes-image-2.5-flash`、出视频 `agnes-video-v2.0`）**与 E 法则**（默认直接执行，不再只给提示词）。
 > **★ 权威文件：`references/agnes-media-adapter.md`（媒体通道）。**
+> **★ 短剧生产链**：SOP 见 `references/drama-pipeline-SOP.md`，reference 模式与画幅/音轨口径见 `references/render-contracts.md`（段视频走 `agnes-video-2.5-flash --mode reference`，参考图 1~5 张取自 `kf_plan.refs`，kf2 可选；**并发不设硬上限、一次全量提交**）。
+> 审核台批量端点与该契约同源：`POST /api/drama-review/keyframes/batch`、`POST /api/drama-review/segments/batch`（`workers=0` 即不限并发，不再硬压 4/2、不分波）。
 > **★ 画风锁定**：任务开始第一步必须先与用户确认/选择画风（`references/art-style-selection.md`）；画风未定不出任何图/视频，选定后本任务全部出图词并入该画风风格档。
 > 文档库中任何 Seedance / MiniMax H3 / 即梦 等字样仅作**通用创作方法论来源**，不构成执行契约。
 
@@ -110,7 +112,22 @@ skills/short-drama-director/
 │   ├── check_package.py                     # 包级静态规则与完整性校验脚本（打包/出厂时跑）
 │   ├── validate_prompt.py                   # 稿件级投喂提示词机检门禁（C1~C20：时长/版本语法/画幅/七段式/高危词/接续状态/画外声 OS·VO/拉伸凑时/对白语气/摆位必入画/首镜锚定·景别一致·姿态延续·视线指派/禁令失效三改法/禁止项栏目纪律/首镜单主体锚定与具象化；出稿时跑）
 │   ├── build_board_lite.py                  # 轻量离线分镜看板编译器（md → 单文件 HTML，双击即开）
-│   └── generate_emotion_curve.py            # 12 节拍全片情绪张力折线图自动绘制脚本
+│   ├── generate_emotion_curve.py            # 12 节拍全片情绪张力折线图自动绘制脚本
+│   │
+│   │  ── 以下由 drama-pipeline 并入（短剧生产链，权威执行手册见 references/drama-pipeline-SOP.md）──
+│   ├── init_project.py                     # 短剧项目脚手架初始化（目录/投喂稿/kf_plan 骨架）
+│   ├── gen_keyframes.py                    # 关键帧批量出图 + reference 集就绪自动渲（并发不限、一次全量提交，不分波）
+│   ├── fix_kf_plan.py                      # kf_plan.json 结构/路径/提示词修补
+│   ├── normalize_segments.py               # 投喂稿分段规范化（段号/时长/站位一致性）
+│   ├── write_metadata.py                   # 成片元数据回写（作品库与交付台账）
+│   ├── render_ep.sh                        # 单集渲染编排（帧齐 → 渲影 → 拼接）
+│   ├── concat_episodes.sh                  # 分集段视频拼接（concat，-c copy）
+│   ├── qa_deliver.sh                       # 交付门禁（分辨率/码率/响度/字幕带/时长）
+│   ├── qa_videos.sh                        # 段视频批量质检（分辨率/帧率/音轨）
+│   ├── qa_manifest.sh                      # 资产 manifest 完整性体检（file/thumb 落盘核对）
+│   ├── local_tts.py                        # 本地 TTS 兜底（模型自带音轨缺失时）
+│   ├── agn_health.sh                       # Agnes 通道健康自检
+│   └── install_remote.sh                   # 远端机一键部署
 └── references/                              # 底层专业规则库（★=权威总控文件）
     ├── ★ agnes-media-adapter.md            # Agnes 本地化媒体执行总控（★本部署媒体通道唯一权威：出图/出视频/时长档位/参考图）
 
@@ -156,6 +173,17 @@ skills/short-drama-director/
     ├── storyboard-board-lite.md             # 轻量离线分镜看板规范（md 唯一真相 → 单文件 HTML；P2.5 出图词与 P4 投喂词必同板）
     ├── spatial-reference-system-V3.md       # 空间参考系统 V3 原文（备查：默认不用，仅超复杂群像/多区调度时取法）
     ├── h3-adapter.md                        # MiniMax H3 格式支线（历史兼容，本部署不使用——A 锁已统一 agnes 单通道）
+    │
+    │  ── 以下由 drama-pipeline 并入 ──
+    ├── ★ drama-pipeline-SOP.md              # ★短剧生产链总 SOP（原 drama-pipeline/SKILL.md）：六阶段落地流程、审核台操作、故障处置
+    ├── ★ render-contracts.md                # ★渲染权威契约：§4 帧词与出图并发、§5 reference 模式段渲（1~5 张参考图/kf2 可选/不限并发）、画幅与音轨口径
+    ├── ★ keyframe-craft.md                  # 关键帧工艺（首尾帧设计/站位锚定/接缝式段缝）
+    ├── video-prompt-craft.md                # 视频提示词工艺（镜头/运动/时长匹配）
+    ├── media-index-spec.md                  # 作品库媒体索引规范（产物落库与打标口径）
+    ├── capability-profile.md                # 通道能力画像（可用模型/档位/限制）
+    ├── agnes-service-ops.md                 # Agnes 服务运维（部署/健康检查/日志）
+    ├── skill-optimization-loop.md           # 技能迭代闭环（复盘 → 改规则 → 回灌）
+    └── world-rules.md                       # 世界观设定规则集（题材约束落词）
     └── platform-safety-compliance-guide.md  # 平台安全合规转译词典（安全默认/强动作非血腥/成人级创作草案）
 ```
 

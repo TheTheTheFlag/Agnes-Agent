@@ -9,7 +9,7 @@
 
 渲染链路约定（2026-09-29 反转，配音 = 视频自带音轨）：
   段视频默认保留模型自带音轨（不 -an）；配音随视频生成自带，角色音色与中文发音锁写进视频词
-  （drama-pipeline `SKILL.md` §9 / `render-contracts.md` §8）。
+  （short-drama-director `references/drama-pipeline-SOP.md` §9 / `references/render-contracts.md` §8）。
   _render_env 设 `KEEP_AUDIO=1` 为冗余保险（新驱动默认即保留，兼容旧驱动）。
   段缝采用「尾帧接力」：段 N 渲染时首帧=ffmpeg 抽段 N-1 视频真实末帧（resize 2K 覆盖 kf1.png），
   段 N-1 实际渲染末帧 100% 成为段 N 首帧，段缝像素级一致。
@@ -26,6 +26,7 @@ import subprocess
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -679,6 +680,93 @@ def _kfplan_flat(pdir: str):
     return [s for ep in data for s in ep.get("segments", [])] if isinstance(data, list) else []
 
 
+# ==================== 批量任务防重（不再有并发硬上限） ====================
+#
+# 旧实现在这里按「契约 §4.8 出图≤4 / §5 渲影≤2」把前端传的并发硬钳到 4/2，并按
+# `kf1_from` 接力依赖分波。reference 模式下段与段之间没有数据依赖（段缝由上一段
+# 末帧自然承接），提交后由 media.py 轮询、后端失败自动重建重试，所以只要提交成功
+# 即可——上限与分波都失去依据，现已移除。前端传的 workers 仅作为提示，不再截断。
+
+_BATCH_BUSY = set()
+_BATCH_BUSY_LOCK = threading.Lock()
+
+
+def _workers_hint(v, jobs: int) -> int:
+    """并发提示值：前端没给或给 0 时按任务量取；**不再向上截断**。"""
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        n = 0
+    return n if n > 0 else max(1, jobs)
+
+
+def _batch_enter(name: str) -> bool:
+    """项目级互斥：同一项目同一时刻只允许一个批量任务。
+
+    限流挡不住「用户手快点两次按钮」，而重出帧/重渲会真实烧额度，
+    故对 name 加占位闸；单段端点不受影响（那是既有的逐条操作语义）。
+    """
+    with _BATCH_BUSY_LOCK:
+        if name in _BATCH_BUSY:
+            return False
+        _BATCH_BUSY.add(name)
+        return True
+
+
+def _batch_exit(name: str) -> None:
+    with _BATCH_BUSY_LOCK:
+        _BATCH_BUSY.discard(name)
+
+
+def _kf_generate(pdir: str, item: dict, frame: str, prompt_override: str = ""):
+    """出一张关键帧，返回 (ok, msg)。单帧端点与批量端点共用，避免两份实现行为漂移。"""
+    seg = str(item.get("seg") or "")
+    prompt = (prompt_override or str(item.get(f"{frame}_prompt") or "")).strip()
+    if not prompt:
+        return False, "无出图 prompt"
+    outdir = str(item.get("outdir") or "")
+    if not outdir or not os.path.isdir(outdir):
+        return False, f"outdir 不存在: {outdir or '(空)'}"
+    out_file = os.path.join(outdir, f"{frame}.png")
+    refs = [str(r) for r in (item.get("refs") or []) if r and os.path.isfile(str(r))]
+    if os.path.exists(out_file):
+        try:
+            os.remove(out_file)
+        except Exception:
+            pass
+    cmd = ["python3", MEDIA, "image", "--prompt", prompt,
+           "--size", "2K", "--ratio", "16:9", "--timeout", "900"]
+    for r in refs:
+        cmd += ["--ref", r]
+    try:
+        pr = _run_proc(cmd, 1800, _token_env())
+    except subprocess.TimeoutExpired:
+        return False, "出图超时(30min)"
+    out = (pr.stdout or "") + (pr.stderr or "")
+    fm = re.search(r"FILE=(\S+)", out)
+    if pr.returncode != 0 or not fm or not os.path.isfile(fm.group(1).strip()):
+        return False, f"rc={pr.returncode} {out[-300:].replace(chr(10), ' ')}"
+    src = fm.group(1).strip()
+    shutil.copy(src, out_file)
+    return True, f"{os.path.getsize(out_file) // 1024}KB refs={len(refs)}"
+
+
+def _seg_render_one(mpath: str, seg: str, timeout: int = 7200):
+    """渲一段，返回 (ok, msg)。批量与单段共用。"""
+    try:
+        pr = _run_proc(["python3", GENERATOR, mpath, seg], timeout, _render_env())
+    except subprocess.TimeoutExpired:
+        return False, f"渲染超时({timeout // 3600}h)"
+    if pr.returncode == 0:
+        return True, "OK"
+    tail = ((pr.stdout or "") + (pr.stderr or ""))[-300:].replace("\n", " ")
+    return False, f"rc={pr.returncode} {tail}"
+
+
+def _seg_video(pdir: str, seg: str) -> str:
+    return os.path.join(pdir, seg, f"{seg}.mp4")
+
+
 @router.post("/keyframes/regenerate")
 def keyframes_regenerate(payload: dict, request: Request):
     name = str((payload or {}).get("name") or "")
@@ -716,34 +804,185 @@ def keyframes_regenerate(payload: dict, request: Request):
         _touch(tid, "running", line=f"[{_now()}] {seg}/{frame} 关键帧重出…")
         if os.path.exists(out_file):
             _touch(tid, line=f"[{_now()}] 已删除旧帧 {os.path.basename(out_file)}")
-            try:
-                os.remove(out_file)
-            except Exception:
-                pass
-        cmd = ["python3", MEDIA, "image", "--prompt", prompt,
-               "--size", "2K", "--ratio", "16:9", "--timeout", "900"]
-        for r in refs:
-            cmd += ["--ref", r]
         _touch(tid, line=f"[{_now()}] media.py image 启动 refs={[os.path.basename(r) for r in refs]}")
-        try:
-            pr = _run_proc(cmd, 1800, _token_env())
-        except subprocess.TimeoutExpired:
-            _touch(tid, "failed", line=f"[{_now()}] 出图超时(30min)")
+        ok, msg = _kf_generate(pdir, item, frame, prompt_override)
+        if not ok:
+            _touch(tid, "failed", line=f"[{_now()}] {msg}")
             return
-        out = (pr.stdout or "") + (pr.stderr or "")
-        fm = re.search(r"FILE=(\S+)", out)
-        if pr.returncode != 0 or not fm or not os.path.isfile(fm.group(1).strip()):
-            _touch(tid, "failed", line=f"[{_now()}] rc={pr.returncode} {out[-400:]}")
-            return
-        src = fm.group(1).strip()
-        shutil.copy(src, out_file)
         # 尾帧接力后：kf2 改动不影响相邻段静态图（下游首帧=上游视频真实末帧），
         # 但本段及下游段已渲染视频必须级联重渲才生效。
-        _touch(tid, "done", line=f"[{_now()}] OK {os.path.basename(src)}"
+        _touch(tid, "done", line=f"[{_now()}] OK {msg}"
                                   "。提醒：本段 kf2 已更新，请对本段及下游段做级联重渲以生效。")
 
     threading.Thread(target=_run, daemon=True).start()
     return {"ok": True, "task_id": tid, "seg": seg, "frame": frame}
+
+
+# ==================== 批量：一次全量提交出帧 ====================
+@router.post("/keyframes/batch")
+def keyframes_batch(payload: dict, request: Request):
+    """批量重出关键帧：一次全量提交，并发不再设硬上限。
+
+    与逐段串行点击的区别在于把 N 次出图压进一个任务，失败不中断其余段。
+    segs 为空时按 ep（为空则全片）取全部段；frames 默认 kf1+kf2。
+    """
+    body = payload or {}
+    name = str(body.get("name") or "")
+    ep = str(body.get("ep") or "")
+    segs = [str(x).strip() for x in (body.get("segs") or []) if str(x).strip()]
+    frames = [f.strip() for f in (body.get("frames") or ["kf1", "kf2"])
+              if str(f).strip() in ("kf1", "kf2")]
+    if not name or not frames:
+        return JSONResponse({"error": "name/frames 必填(frames=kf1|kf2)"}, status_code=400)
+
+    pdir = _proj_dir(name)
+    flat = _kfplan_flat(pdir)
+    if not flat:
+        return JSONResponse({"error": "kf_plan.json 缺失或为空"}, status_code=404)
+    pool = flat
+    if ep:
+        pool = [s for s in pool if str(s.get("seg", "")).startswith(ep)]
+    if segs:
+        want = set(segs)
+        pool = [s for s in pool if str(s.get("seg")) in want]
+
+    jobs, skipped = [], []
+    for s in pool:
+        for fr in frames:
+            jobs.append((s, fr))
+    workers = _workers_hint(body.get("workers"), len(jobs))
+    if not jobs:
+        return {"ok": True, "jobs": 0, "workers": workers, "skipped": skipped,
+                "msg": "无可重出帧（筛选后为空）"}
+
+    tid = _new_task("keyframe-batch",
+                    {"name": name, "ep": ep or "全片", "jobs": len(jobs), "workers": workers})
+    _prune_tasks()
+    if not _batch_enter(name):
+        _touch(tid, "failed", line=f"[{_now()}] 「{name}」已有批量任务在跑，本次拒绝提交"
+                                    "（防重复烧额度）")
+        return JSONResponse({"error": "该项目已有批量任务在跑，请等它结束再提交"}, status_code=409)
+
+    def _run():
+        t0 = time.time()
+        ok_n = fail_n = 0
+        try:
+            _touch(tid, "running", line=f"[{_now()}] 批量出帧 {len(jobs)} 张，并发 {workers}"
+                                         f"（不设硬上限）")
+            for sk in skipped:
+                _touch(tid, line=f"[{_now()}] 跳过 {sk['seg']}/{sk['frame']}：{sk['reason']}")
+
+            def one(job):
+                s, fr = job
+                return job, _kf_generate(pdir, s, fr)
+
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                for (s, fr), (ok, msg) in ex.map(one, jobs):
+                    tag = f"{s.get('seg')}/{fr}"
+                    if ok:
+                        ok_n += 1
+                        _touch(tid, line=f"[{_now()}] {tag} OK {msg}")
+                    else:
+                        fail_n += 1
+                        _touch(tid, line=f"[{_now()}] !! {tag} 失败：{msg}")
+        finally:
+            _batch_exit(name)
+        _touch(tid, "failed" if fail_n else "done",
+               line=f"[{_now()}] 批量出帧结束：成功 {ok_n} / 失败 {fail_n} / "
+                    f"跳过 {len(skipped)}，耗时 {int(time.time() - t0)}s")
+        _touch(tid, line="提醒：换帧只更新静态图，已渲段视频需显式级联重渲才生效。")
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"ok": True, "task_id": tid, "jobs": len(jobs), "workers": workers,
+            "skipped": skipped}
+
+
+# ==================== 批量：一次全量提交渲影（reference 模式，不分波） ====================
+@router.post("/segments/batch")
+def segments_batch(payload: dict, request: Request):
+    """批量渲影：所选段一次全量提交，并发不再设硬上限、不按依赖分波。
+
+    与 /segments/cascade 的区别：cascade 是「某段起串行渲到片尾」（顺序敏感）；
+    本端点用于「一批段并行渲」（如一批返修段）。段视频走 reference 模式，参考图
+    取自 kf_plan 的 refs，各段互不依赖——提交后由 media.py 轮询、后端失败自动
+    重建重试，所以只要提交成功即可，无需等上游出片。
+
+    旧实现按 `kf1_from` 接力依赖分波、并发硬压 ≤2，reference 模式下已无依据。
+    """
+    body = payload or {}
+    name = str(body.get("name") or "")
+    segs = [str(x).strip() for x in (body.get("segs") or []) if str(x).strip()]
+    if not name or not segs:
+        return JSONResponse({"error": "name/segs 必填(segs 为要批量渲的段号列表)"}, status_code=400)
+    workers = _workers_hint(body.get("workers"), len(segs))
+
+    pdir = _proj_dir(name)
+    flat = _kfplan_flat(pdir)
+    if not flat:
+        return JSONResponse({"error": "kf_plan.json 缺失或为空"}, status_code=404)
+    kfmap = {str(s.get("seg")): s for s in flat}
+    missing = [s for s in segs if s not in kfmap]
+    if missing:
+        return JSONResponse({"error": f"kf_plan 中无：{missing[:8]}"}, status_code=404)
+
+    # 按集重建 manifest：GEN_ 渲染器只吃单集 manifest，跨集批量需分集写
+    by_ep = {}
+    for s in segs:
+        by_ep.setdefault(s[:3], []).append(s)
+    mpaths = {}
+    try:
+        os.makedirs(os.path.join(pdir, ".review"), exist_ok=True)
+        for ep, ep_segs in by_ep.items():
+            manifest = _rebuild_manifest(pdir, ep)
+            avail = {x["seg"] for x in manifest["segments"]}
+            miss = [s for s in ep_segs if s not in avail]
+            if miss:
+                return JSONResponse({"error": f"{ep} manifest 中无：{miss[:8]}"}, status_code=404)
+            mp = os.path.join(pdir, ".review", f"{ep}.batch-manifest.json")
+            with open(mp, "w", encoding="utf-8") as f:
+                json.dump(manifest, f, ensure_ascii=False, indent=2)
+            mpaths[ep] = mp
+    except Exception as e:
+        return JSONResponse({"error": f"重建 manifest 失败: {e}"}, status_code=500)
+
+    tid = _new_task("segment-batch",
+                    {"name": name, "segs": segs, "eps": sorted(by_ep),
+                     "jobs": len(segs), "workers": workers})
+    _prune_tasks()
+    if not _batch_enter(name):
+        _touch(tid, "failed", line=f"[{_now()}] 「{name}」已有批量任务在跑，本次拒绝提交")
+        return JSONResponse({"error": "该项目已有批量任务在跑，请等它结束再提交"}, status_code=409)
+
+    def _run():
+        t0 = time.time()
+        st = {}          # seg -> (ok, msg)
+        try:
+            _touch(tid, "running", line=f"[{_now()}] 批量渲影 {len(segs)} 段，并发 {workers}"
+                                         f"（不设硬上限，一次全量提交）")
+
+            def one(seg):
+                return seg, _seg_render_one(mpaths[seg[:3]], seg)
+
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                for seg, (ok, msg) in ex.map(one, segs):
+                    st[seg] = (ok, msg)
+                    if ok:
+                        _touch(tid, line=f"[{_now()}] {seg} OK")
+                    else:
+                        _touch(tid, line=f"[{_now()}] !! {seg} 失败：{msg}")
+        finally:
+            _batch_exit(name)
+
+        ok_n = sum(1 for v in st.values() if v[0])
+        bad = sorted(s for s, v in st.items() if not v[0])
+        _touch(tid, "failed" if bad else "done",
+               line=f"[{_now()}] 批量渲影结束：成功 {ok_n} / 失败 {len(bad)}，"
+                    f"耗时 {int(time.time() - t0)}s")
+        if bad:
+            _touch(tid, line="失败段：" + ", ".join(bad[:12]))
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"ok": True, "task_id": tid, "jobs": len(segs), "workers": workers}
 
 
 # ==================== 合并（确认后） ====================
