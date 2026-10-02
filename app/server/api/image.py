@@ -201,12 +201,24 @@ def _atomic_write_manifest(path, payload: dict):
             _manifest_bak_at[path] = time.time()
         except Exception:
             pass
-    tmp = f"{path}.tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=1)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
+    # 临时文件名必须唯一：固定名会被并发保存互相抢走——
+    # 线程A replace 移走 .tmp 后，线程B 再 replace 同一路径就 FileNotFoundError。
+    # 保存方来自 worker 线程、心跳线程与 HTTP 请求线程，_user_items_lock 只保护内存列表、
+    # 不覆盖落盘过程，因此这里用 pid+线程 id+uuid 保证互不干扰。
+    tmp = f"{path}.tmp.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex[:8]}"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=1)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        # replace 成功时 tmp 已不存在；失败时清理残留，避免目录堆积
+        try:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        except OSError:
+            pass
 
 
 def _load_user_manifest(username: str):
