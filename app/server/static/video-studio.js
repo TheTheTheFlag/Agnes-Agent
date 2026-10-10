@@ -4,7 +4,7 @@
    模型与模式：
      · agnes-video-2.5-flash：文生视频 / 首尾帧 / 图片参考（720P，seconds 控时长）
      · agnes-video-v2.0     ：文生视频 / 图生视频 / 关键帧动画（num_frames + frame_rate 控时长）
-   左侧创作台：模型 · 模式 · 参考图 · 提示词（运镜速选）· 参数（时长/画幅/分辨率/种子）
+   左侧创作台：模型 · 模式 · 参考图 · 提示词；底部参数条（画幅 / 时长 / 种子）
    右侧作品库：视频网格 + 播放灯箱；生成中的任务自动轮询 /api/video/task/{id}，
               完成后后端已自动把 mp4 落盘到服务器，卡片封面走 ffmpeg 抽帧。
    依赖 app.js 全局工具：$ / $$ / apiGet / apiPost / escapeHtml / truncate / fmtAgo / toast。
@@ -12,17 +12,6 @@
    ============================================================================ */
 
 const VIDEO_MODE_LBL = { txt2img: "文生图", img2img: "图生图", multi: "多图合成" };
-
-const VIDEO_STYLE_CHIPS = [
-  ["电影运镜", "，电影级运镜，平稳推进，浅景深，柔和自然光"],
-  ["慢动作", "，慢动作升格，细节清晰，高帧率质感"],
-  ["航拍", "，无人机航拍视角，缓慢环绕，宏大场景"],
-  ["人物特写", "，人物面部特写，微妙表情变化，背景虚化，柔和轮廓光"],
-  ["赛博朋克", "，赛博朋克夜景，霓虹倒映，湿润路面，冷青与品红主调"],
-  ["定格动画", "，定格动画质感，逐帧微动，手作场景"],
-  ["动漫风", "，日式动画风格，干净线条，明亮配色，流畅动作"],
-  ["自然纪录", "，自然纪录片风格，长焦压缩，唯美光线，真实生态"],
-];
 
 const VideoStudio = {
   model: "agnes-video-2.5-flash",
@@ -42,80 +31,78 @@ const VideoStudio = {
 /* ---------- 主渲染 ---------- */
 async function renderVideoTab(el) {
   el.innerHTML = `
-    <div class="st">
-      <div class="st-head">
-        <div class="st-head-title">🎬 视频创作工作台</div>
-        <div class="st-head-hint">Agnes Video 2.5 Flash / V2.0 · 文生视频 / 图生视频 / 首尾帧 / 关键帧动画 · 当前全部规格免费</div>
-      </div>
-      <div id="vsKeyBanner" class="st-banner hidden"></div>
-      <div class="st-cols">
-        <section class="st-left">
-          <div class="st-block">
-            <div class="st-block-hd"><span>模型</span></div>
-            <div class="d-row"><select class="d-input st-param" id="vsModel"></select>
-              <span class="st-model-note" id="vsModelNote"></span></div>
+    <div class="st woo">
+      ${studioShell.hero("你好，今天想要创作什么？", "")}
+      <div class="woo-panel">
+        <div class="woo-headrow">
+          ${studioShell.typeButton("vsType", "video")}
+          <div class="woo-model-wrap">
+            <select class="d-input st-param woo-model-select" id="vsModel"></select>
           </div>
+          <div class="st-mode-seg woo-mode" id="vsModeSeg"></div>
+        </div>
 
-          <div class="st-mode-seg" id="vsModeSeg"></div>
+        <div class="woo-input-wrap">
+          <textarea id="vsPrompt" class="woo-input" rows="5" placeholder="上传参考图、输入文字或 @主体，描述你想生成的视频。"></textarea>
+          <button type="button" id="vsAttach" class="woo-attach" title="添加参考图">＋</button>
+        </div>
+        <div class="woo-input-status" id="vsPromptHint"></div>
 
-          <div class="st-block" id="vsRefBlock" style="display:none">
-            <div class="st-block-hd"><span id="vsRefTitle">参考图</span><span class="st-ref-hint" id="vsRefHint"></span></div>
-            <div class="st-refs" id="vsRefs"><div class="d-empty">暂无参考图，请先选择上方"图片参考"或"首尾帧"模式</div></div>
-            <div class="d-row" style="margin-top:8px">
-              <button class="d-btn" id="vsAddRef">＋ 添加参考图</button>
-              <button class="d-btn" id="vsPickLib">🖼 从作品库选择</button>
-              <span class="d-empty" style="margin:0" id="vsRefNote"></span>
-            </div>
-            <input type="file" id="vsRefFile" accept="image/*" multiple style="display:none">
-          </div>
-
-          <div class="st-block">
-            <div class="st-block-hd"><span>提示词</span><span class="st-block-tip" id="vsPromptHint"></span></div>
-            <textarea class="st-prompt" id="vsPrompt" rows="4" placeholder=""></textarea>
-            <div class="st-chips">
-              <span class="st-chip-title">运镜速选</span>
-              ${VIDEO_STYLE_CHIPS.map(([k]) => `<button class="st-chip" data-style="${k}">${k}</button>`).join("")}
-              <button class="st-chip st-chip-clear" data-style="__clear">清空</button>
-            </div>
-          </div>
-
-          <div class="st-block">
-            <div class="st-block-hd"><span>参数</span></div>
-            <div id="vsParams"></div>
-          </div>
-
-          <div class="st-actions">
-            <button class="d-btn primary st-gen" id="vsGen">🎬 生成视频</button>
-            <span class="d-empty st-busy" id="vsBusy" style="display:none"></span>
-          </div>
-        </section>
-
-        <section class="st-right">
-          <div class="st-gallery-hd">
-            <span class="st-gallery-title">🗂 视频作品库</span>
-            <span class="d-empty" style="margin:0" id="vsCountLbl"></span>
-            <span class="d-empty" style="margin:0 8px;color:#c0392b;display:none" id="vsSelLbl"></span>
+        <div class="st-block woo-refblock" id="vsRefBlock" style="display:none;margin-top:10px">
+          <div class="woo-refhd">
+            <span id="vsRefTitle" style="font-size:12.5px;font-weight:700;color:var(--text,#e8e9ec)">参考图</span>
+            <span class="st-ref-hint" id="vsRefHint"></span>
             <div style="flex:1"></div>
-            <span id="vsSelBar" style="display:none">
-              <button class="d-btn sm" id="vsSelAll">全选</button>
-              <button class="d-btn sm danger" id="vsSelDel" disabled>删除选中</button>
-              <button class="d-btn sm" id="vsSelCancel">取消</button>
-            </span>
-            <button class="d-btn sm danger" id="vsBatchDel">🗑 批量删除</button>
-            <button class="d-btn sm" id="vsRefresh">⟳ 刷新</button>
+            <button class="d-btn sm" id="vsPickLib">🖼 从作品库选择</button>
           </div>
-          <div id="vsGrid" class="st-grid"><div class="d-empty">加载中…</div></div>
-          <div id="vsPagination" class="st-pagination" style="display:none"></div>
-        </section>
+          <div class="woo-refs" id="vsRefs"><div class="d-empty">暂无参考图，请先选择上方模式</div></div>
+          <div class="d-row" style="margin-top:8px">
+            <button class="d-btn" id="vsAddRef">＋ 添加参考图</button>
+            <span class="d-empty" style="margin:0" id="vsRefNote"></span>
+          </div>
+          <input type="file" id="vsRefFile" accept="image/*" multiple style="display:none">
+        </div>
+
+        <div class="woo-bar">
+          <button type="button" id="vsRatioBtn" class="woo-ratio-btn"><b>16:9</b><span class="woo-caret">▾</span></button>
+          <label class="woo-bar-lbl" for="vsSeconds">时长</label>
+          <select id="vsSeconds" class="d-input st-param woo-bar-sel"></select>
+          <select id="vsDur" class="d-input st-param woo-bar-sel" style="display:none"></select>
+          <label class="woo-bar-lbl" for="vsSeed">种子</label>
+          <input id="vsSeed" class="d-input st-param woo-bar-seed" placeholder="留空随机">
+          <select id="vsRatio" class="d-input st-param" style="display:none"></select>
+          <div style="flex:1"></div>
+          <button type="button" class="woo-submit" id="vsGen" title="生成视频">↑</button>
+          <span class="d-empty st-busy" id="vsBusy" style="display:none"></span>
+        </div>
+      </div>
+
+      <div id="vsKeyBanner" class="st-banner woo-banner hidden"></div>
+
+      <div class="woo-gallery">
+        <div class="st-gallery-hd">
+          <span class="st-gallery-title">🗂 视频作品库</span>
+          <span class="d-empty" style="margin:0" id="vsCountLbl"></span>
+          <span class="d-empty" style="margin:0 8px;color:#c0392b;display:none" id="vsSelLbl"></span>
+          <div style="flex:1"></div>
+          <span id="vsSelBar" style="display:none">
+            <button class="d-btn sm" id="vsSelAll">全选</button>
+            <button class="d-btn sm danger" id="vsSelDel" disabled>删除选中</button>
+            <button class="d-btn sm" id="vsSelCancel">取消</button>
+          </span>
+          <button class="d-btn sm danger" id="vsBatchDel">🗑 批量删除</button>
+          <button class="d-btn sm" id="vsRefresh">⟳ 刷新</button>
+        </div>
+        <div id="vsGrid" class="st-grid"><div class="d-empty">加载中…</div></div>
+        <div id="vsPagination" class="st-pagination" style="display:none"></div>
       </div>
     </div>`;
 
   VideoStudio.el = {
-    model: $("#vsModel", el), modelNote: $("#vsModelNote", el),
-    seg: $("#vsModeSeg", el), refBlock: $("#vsRefBlock", el), refs: $("#vsRefs", el),
+    model: $("#vsModel", el), seg: $("#vsModeSeg", el), refBlock: $("#vsRefBlock", el), refs: $("#vsRefs", el),
     refTitle: $("#vsRefTitle", el), refHint: $("#vsRefHint", el), refNote: $("#vsRefNote", el),
     prompt: $("#vsPrompt", el), promptHint: $("#vsPromptHint", el),
-    params: $("#vsParams", el), gen: $("#vsGen", el), busy: $("#vsBusy", el),
+    gen: $("#vsGen", el), busy: $("#vsBusy", el),
     grid: $("#vsGrid", el), countLbl: $("#vsCountLbl", el), banner: $("#vsKeyBanner", el),
     selLbl: $("#vsSelLbl", el), selBar: $("#vsSelBar", el), selDel: $("#vsSelDel", el),
     pagination: $("#vsPagination", el),
@@ -139,6 +126,10 @@ async function renderVideoTab(el) {
   paintVideoRefs();
   paintVideoPrompt();
 
+  $("#vsAttach", el).addEventListener("click", () => {
+    if (!refSpec()) { toast("当前模型 / 模式无需参考图", "info"); return; }
+    $("#vsRefFile", el).click();
+  });
   $("#vsAddRef", el).addEventListener("click", () => $("#vsRefFile", el).click());
   $("#vsPickLib", el).addEventListener("click", () => openVideoRefPicker());
   $("#vsRefFile", el).addEventListener("change", (e) => {
@@ -151,15 +142,6 @@ async function renderVideoTab(el) {
     }
     e.target.value = "";
   });
-  $$(".st-chip", el).forEach((c) => c.addEventListener("click", () => {
-    const v = VideoStudio.el.prompt.value;
-    if (c.dataset.style === "__clear") { VideoStudio.el.prompt.value = ""; }
-    else {
-      const style = VIDEO_STYLE_CHIPS.find(([k]) => k === c.dataset.style);
-      if (style) VideoStudio.el.prompt.value = (v && !/[，,]$/.test(v) ? v + "，" : v) + style[1].replace(/^，/, "");
-    }
-    VideoStudio.el.prompt.focus();
-  }));
   VideoStudio.el.model.addEventListener("change", () => {
     VideoStudio.model = VideoStudio.el.model.value;
     const modes = Object.keys(modelMeta(VideoStudio.model).modes || {});
@@ -169,6 +151,11 @@ async function renderVideoTab(el) {
   });
   $("#vsRefresh", el).addEventListener("click", () => loadVideoGallery());
   VideoStudio.el.gen.addEventListener("click", generateVideo);
+
+  // —— v2 参数条 ——
+  syncVideoBar();
+  $("#vsRatioBtn", el).addEventListener("click", openVideoRatio);
+  studioShell.bindTypeButton("vsType", "video");
 
   // —— 批量删除 ——
   $("#vsBatchDel", el).addEventListener("click", () => {
@@ -220,7 +207,6 @@ function paintVideoModels() {
   const models = (VideoStudio.status && VideoStudio.status.models) || [];
   VideoStudio.el.model.innerHTML = models.map((m) =>
     `<option value="${escapeHtml(m.id)}" ${m.id === VideoStudio.model ? "selected" : ""}>${escapeHtml(m.id)}</option>`).join("");
-  VideoStudio.el.modelNote.textContent = "「" + (modelMeta(VideoStudio.model).note || "") + "」";
 }
 
 function paintVideoModeSeg() {
@@ -290,40 +276,62 @@ function paintVideoRefs() {
 
 function paintVideoPrompt() {
   const m = modeMeta();
-  VideoStudio.el.prompt.placeholder = m.ex ? ("示例：" + m.ex) : "";
-  VideoStudio.el.promptHint.textContent = m.hint || "";
+  VideoStudio.el.prompt.placeholder = "上传参考图、输入文字或 @主体，描述你想生成的视频。";
+  VideoStudio.el.promptHint.innerHTML = escapeHtml(m.hint || "") + (m.ex ? ' <span class="d-empty" style="margin:0">例：' + escapeHtml(m.ex) + "</span>" : "");
+}
+
+/* ---------- v2 参数条（画幅） ---------- */
+function syncVideoBar() {
+  const s = document.getElementById("vsRatio");
+  const b = document.getElementById("vsRatioBtn");
+  if (b) b.innerHTML = "<b>" + (s && s.value ? s.value : "16:9") + "</b><span class=\"woo-caret\">▾</span>";
+}
+
+function openVideoRatio() {
+  const s = document.getElementById("vsRatio");
+  if (!s) return;
+  if (!s.options.length) { toast("当前模型暂无可选画幅", "info"); return; }
+  studioShell.ratioModal({
+    title: "视频画幅设置",
+    ratios: Array.from(s.options).map((o) => o.value),
+    cur: { ratio: s.value || "16:9", size: "2K", count: 1 },
+    onSubmit: (v) => {
+      s.value = v.ratio;
+      syncVideoBar();
+    },
+  });
 }
 
 function paintVideoParams() {
   const meta = modelMeta(VideoStudio.model);
   const isFlash = VideoStudio.model === "agnes-video-2.5-flash";
-  const keeps = {};
-  $$("[data-vsp]", VideoStudio.el.params).forEach((n) => { keeps[n.dataset.vsp] = n.value; });
-  const v = (k, d) => (keeps[k] !== undefined ? keeps[k] : d);
-  const node = (id, label, inner) => `<div class="d-row"><label>${label}</label>${inner}</div>`;
-
-  let html = "";
+  const secEl = document.getElementById("vsSeconds");
+  const durEl = document.getElementById("vsDur");
+  const ratioEl = document.getElementById("vsRatio");
   if (isFlash) {
-    html += node("vsSeconds", "时长", `<select class="d-input st-param" id="vsSeconds" data-vsp="vsSeconds">
-      ${(meta.seconds || ["4", "5", "6", "8", "10", "12"]).map((s) => `<option ${String(v("vsSeconds", "5")) === s ? "selected" : ""}>${s}</option>`).join("")}</select>
-      <span class="d-empty" style="margin:0">秒（4–12）</span>`);
-    html += node("vsRatio", "画幅", `<select class="d-input st-param" id="vsRatio" data-vsp="vsRatio">
-      ${(meta.aspect_ratios || ["16:9"]).map((r) => `<option ${v("vsRatio", "16:9") === r ? "selected" : ""}>${r}</option>`).join("")}</select>
-      <span class="d-empty" style="margin:0">720P · ${escapeHtml(meta.size || "720P")}</span>`);
+    if (secEl) {
+      secEl.style.display = "";
+      const kept = secEl.value || "5";
+      secEl.innerHTML = (meta.seconds || ["4", "5", "6", "8", "10", "12"]).map((s) =>
+        `<option ${String(kept) === s ? "selected" : ""}>${s}</option>`).join("");
+    }
+    if (durEl) durEl.style.display = "none";
   } else {
-    html += node("vsDur", "时长", `<select class="d-input st-param" id="vsDur" data-vsp="vsDur">
-      ${(meta.durations || []).map((d) => `<option value="${d.num_frames}" ${String(v("vsDur", "121")) === String(d.num_frames) ? "selected" : ""}>${d.label}（${d.num_frames} 帧）</option>`).join("")}</select>`);
-    html += node("vsFps", "帧率", `<select class="d-input st-param" id="vsFps" data-vsp="vsFps">
-      ${(meta.frame_rates || [24, 30]).map((f) => `<option ${String(v("vsFps", "24")) === String(f) ? "selected" : ""}>${f}</option>`).join("")}</select>
-      <span class="d-empty" style="margin:0">fps</span>`);
-    html += node("vsRes", "分辨率", `<select class="d-input st-param" id="vsRes" data-vsp="vsRes">
-      ${(meta.resolutions || ["480p", "720p", "1080p"]).map((r) => `<option ${v("vsRes", "720p") === r ? "selected" : ""}>${r}</option>`).join("")}</select>`);
-    html += node("vsRatio", "画幅", `<select class="d-input st-param" id="vsRatio" data-vsp="vsRatio">
-      ${(meta.ratios || ["16:9"]).map((r) => `<option ${v("vsRatio", "16:9") === r ? "selected" : ""}>${r}</option>`).join("")}</select>`);
-    html += node("vsNeg", "反向词", `<input class="d-input st-param" id="vsNeg" data-vsp="vsNeg" placeholder="可选：需要避免的内容" value="${escapeHtml(v("vsNeg", ""))}">`);
+    if (durEl) {
+      durEl.style.display = "";
+      const kept = durEl.value || "";
+      durEl.innerHTML = (meta.durations || []).map((d) =>
+        `<option value="${d.num_frames}" ${String(kept) === String(d.num_frames) ? "selected" : ""}>${d.label}（${d.num_frames} 帧）</option>`).join("");
+    }
+    if (secEl) secEl.style.display = "none";
   }
-  html += node("vsSeed", "种子", `<input class="d-input st-param" id="vsSeed" data-vsp="vsSeed" placeholder="可选：固定后结果可复现" value="${escapeHtml(v("vsSeed", ""))}">`);
-  VideoStudio.el.params.innerHTML = html;
+  if (ratioEl) {
+    const ratios = isFlash ? (meta.aspect_ratios || ["16:9"]) : (meta.ratios || ["16:9"]);
+    const kept = ratioEl.value || "16:9";
+    ratioEl.innerHTML = ratios.map((r) =>
+      `<option ${String(kept) === r ? "selected" : ""}>${r}</option>`).join("");
+  }
+  syncVideoBar();
 }
 
 /* ---------- 参考图上传 ---------- */
@@ -433,7 +441,7 @@ async function openVideoRefPicker() {
     try {
       const offset = (p - 1) * PAGE;
       console.log("[loadPage] 请求第", p, "页，offset:", offset);
-      const r = await apiGet("/api/image/history?limit=" + PAGE + "&offset=" + offset);
+      const r = await apiGet("/api/image/history?limit=" + PAGE + "&offset=" + offset + "&exclude_source=short-drama-director,drama");
       console.log("[loadPage] 响应 total:", r.total, "items.length:", (r.items || []).length);
       allItems = r.items || [];
       totalPages = Math.ceil((r.total || allItems.length) / PAGE);
@@ -524,7 +532,7 @@ async function generateVideo() {
   const spec = refSpec();
   if (spec && VideoStudio.refs.length < spec.min) { toast(`${spec.title}至少需要 ${spec.min} 张`, "error"); return; }
 
-  const val = (id, d) => { const n = $("#" + id, VideoStudio.el.params); return n ? n.value : d; };
+  const val = (id, d) => { const n = document.getElementById(id); return n ? n.value : d; };
   const isFlash = VideoStudio.model === "agnes-video-2.5-flash";
   const body = {
     model: VideoStudio.model,
@@ -532,16 +540,13 @@ async function generateVideo() {
     prompt,
     refs: VideoStudio.refs.map((r) => r.path),
     seed: val("vsSeed", ""),
-    aspect_ratio: val("vsRatio", "16:9"),
+    aspect_ratio: val("vsRatio", "16:9") || "16:9",
   };
   if (isFlash) {
     body.seconds = val("vsSeconds", "5");
   } else {
-    body.num_frames = Number(val("vsDur", 121));
-    body.frame_rate = Number(val("vsFps", 24));
-    body.resolution = val("vsRes", "720p");
-    body.width = 0; body.height = 0;
-    body.negative_prompt = val("vsNeg", "");
+    const nf = Number(val("vsDur", "121"));
+    if (nf) body.num_frames = nf;
   }
 
   console.log("[generateVideo] 开始提交，body:", body);
@@ -688,8 +693,8 @@ function pollVideoTask(id) {
 async function loadVideoGallery() {
   VideoStudio.page = 1;
   try {
-    // 后端上限 _MAX_GALLERY=200，一次取全量，前端分页显示
-    const r = await apiGet("/api/video/history?limit=200");
+    // 后端上限 _MAX_GALLERY=200，一次取全量；隐藏短剧流程产物，仅展示创作台页面生成内容
+    const r = await apiGet("/api/video/history?limit=200&exclude_source=short-drama-director,drama");
     VideoStudio.gallery = r.items || [];
   } catch (e) { /* 保留现有视图 */ }
   paintVideoGallery();

@@ -14,6 +14,7 @@ import json
 import mimetypes
 import os
 import re
+import shutil
 import threading
 import time
 import uuid
@@ -23,6 +24,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, JSONResponse
 
 from app.config import BASE_DIR, user_subdir
+from app.server.store import add_log_entry
 from app.userctx import current_user, set_current_user
 
 router = APIRouter(prefix="/api/image", tags=["image"])
@@ -134,6 +136,8 @@ def _mask_key(k: str, tail: int = 4) -> str:
 # 改为每用户独立的内存列表 + 可重入锁（避免嵌套调用死锁）
 _user_items: dict = {}   # {username: [...]}
 _user_locks: dict = {}   # {username: threading.RLock()}
+_manifest_bak_at: dict = {}   # {manifest 路径: 上次刷新 .bak 的时刻}
+_MANIFEST_BAK_TTL = 300       # .bak 最短刷新间隔（秒），避免高频保存时反复拷贝
 
 def _user_items_lock(username: str) -> threading.RLock:
     if username not in _user_locks:
@@ -145,6 +149,55 @@ def _get_user_items(username: str) -> list:
         _load_user_manifest(username)
     return _user_items[username]
 
+def _read_manifest_with_backup(path):
+    """读 manifest；主文件缺失/损坏时回退 .bak。返回 (items, note)。
+    note 非空表示发生了降级恢复，需告警。
+    path 可能是 user_subdir 的 _UserPath 代理，先取真实字符串（它只支持 __fspath__）。"""
+    path = os.fspath(path)
+    err = ""
+    for cand in (path, path + ".bak"):
+        if not os.path.isfile(cand):
+            continue
+        try:
+            with open(cand, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            if isinstance(raw, dict):
+                items = raw.get("items", [])
+            elif isinstance(raw, list):
+                items = raw
+            else:
+                items = []
+            if not isinstance(items, list):
+                items = []
+            note = "" if cand == path else f"manifest 主文件不可用，已从 {os.path.basename(cand)} 恢复"
+            return items, note
+        except Exception as e:
+            err = f"{os.path.basename(cand)}: {e}"
+    return [], err
+
+
+def _atomic_write_manifest(path, payload: dict):
+    """原子写 manifest：tmp + fsync + os.replace，杜绝写到一半被读到空/半截 JSON。
+    覆盖前留一份 .bak（按 TTL 节流，避免高频保存时反复拷贝）。
+    path 可能是 user_subdir 的 _UserPath 代理，先取真实字符串（它只支持 __fspath__）。"""
+    path = os.fspath(path)
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    bak = path + ".bak"
+    if os.path.isfile(path) and (not os.path.isfile(bak)
+                                 or time.time() - _manifest_bak_at.get(path, 0) > _MANIFEST_BAK_TTL):
+        try:
+            shutil.copy2(path, bak)
+            _manifest_bak_at[path] = time.time()
+        except Exception:
+            pass
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=1)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
 def _load_user_manifest(username: str):
     """按用户加载作品列表（模块级 _LIB 是路径代理，会自动按当前用户解析）"""
     # 直接使用 set_current_user 切换上下文，不需要调用 current_user()
@@ -152,20 +205,17 @@ def _load_user_manifest(username: str):
     _old_token = app.userctx._cur_user.get(None)
     try:
         app.userctx.set_current_user(username)
-        items = []
-        try:
-            with open(_MANIFEST, "r", encoding="utf-8") as f:
-                raw = json.load(f)
-            items = raw.get("items", []) if isinstance(raw, dict) else []
-        except Exception:
-            pass
+        items, note = _read_manifest_with_backup(_MANIFEST)
+        if note:
+            add_log_entry("warning", f"[作品库] manifest 读取异常：{note}"
+                                     f"（items={len(items)}）")
         with _user_items_lock(username):
             _user_items[username] = items
     finally:
         app.userctx.set_current_user(_old_token)
 
 def _save_user_manifest(username: str):
-    """保存当前用户的作品列表到磁盘"""
+    """保存当前用户的作品列表到磁盘（原子写 + .bak 备份）"""
     import app.userctx
     _old_token = app.userctx._cur_user.get(None)
     try:
@@ -173,8 +223,7 @@ def _save_user_manifest(username: str):
         os.makedirs(_LIB, exist_ok=True)
         with _user_items_lock(username):
             items = _user_items.get(username, [])
-        with open(_MANIFEST, "w", encoding="utf-8") as f:
-            json.dump({"items": items}, f, ensure_ascii=False, indent=1)
+        _atomic_write_manifest(_MANIFEST, {"items": items})
     finally:
         app.userctx.set_current_user(_old_token)
 
@@ -362,7 +411,7 @@ def _call_generate(key: str, payload: dict) -> dict:
 
 
 def _create_pending(mode: str, model: str, prompt: str, size: str, ratio: str,
-                    n_refs: int, username: str, dedup_key: str = "") -> dict:
+                    n_refs: int, username: str, dedup_key: str = "", source: str = "") -> dict:
     """创建「生成中」占位条目并落盘 manifest，立即返回给前端展示。"""
     item = {
         "id": uuid.uuid4().hex[:12],
@@ -372,6 +421,7 @@ def _create_pending(mode: str, model: str, prompt: str, size: str, ratio: str,
         "size": size,
         "ratio": ratio,
         "n_refs": n_refs,
+        "source": source,
         "file": "",
         "thumb": "",
         "status": "queued",
@@ -531,6 +581,11 @@ def generate(payload: dict, request: Request):
     count = int(p.get("count") or 1)
     # 获取当前用户
     username = getattr(getattr(request, "state", None), "username", None) or current_user()
+    # 来源标识：内部通道（media.py / DAG 等技能产物）未显式传 source 时默认打短剧流程标，
+    # 使创作台作品库只展示页面生成内容（画廊按 exclude_source 过滤该标）。
+    src = str(p.get("source") or "")
+    if not src and request.headers.get("X-Agnes-Internal-Token"):
+        src = "short-drama-director"
 
     if mode not in IMAGE_MODES:
         return JSONResponse({"error": f"mode 必须是 {'/'.join(IMAGE_MODES)}"}, status_code=400)
@@ -585,7 +640,8 @@ def generate(payload: dict, request: Request):
         if count > 1:
             payload_dup["prompt"] = prompt.replace("#i", "").replace("{i}", "") or prompt
         item = _create_pending(mode, model, payload_dup["prompt"], size, ratio,
-                               len(data_uris), username, dedup_key=dedup_key)
+                               len(data_uris), username, dedup_key=dedup_key,
+                               source=src)
         jobs.append({"item": item, "payload": payload_dup})
         items.append(item)
     _start_worker(username, jobs)
@@ -610,8 +666,9 @@ async def task(item_id: str, request: Request = None):
 
 
 @router.get("/history")
-async def history(limit: int = 60, offset: int = 0, request: Request = None):
-    """返回当前用户的作品列表"""
+async def history(limit: int = 60, offset: int = 0, exclude_source: str = "", request: Request = None):
+    """返回当前用户的作品列表。exclude_source=逗号分隔的 source 列表（如短片流程的 short-drama-director），
+    被排除的条目仍在作品库内（短剧审核页依赖其 /task /file 端点），只是不在创作台作品库展示。"""
     username = getattr(getattr(request, "state", None), "username", None) or current_user()
     # 打开作品库前先把 agnes-media 技能产物同步进来（幂等；输出目录通常为空，开销可忽略）
     try:
@@ -620,8 +677,11 @@ async def history(limit: int = 60, offset: int = 0, request: Request = None):
         pass
     limit = max(1, limit) if _MAX_GALLERY is None else max(1, min(limit, _MAX_GALLERY))
     offset = max(0, offset)
+    excluded = {x for x in (exclude_source or "").split(",") if x}
     with _user_items_lock(username):
         items = _get_user_items(username)
+    if excluded:
+        items = [it for it in items if it.get("source") not in excluded]
     return {"ok": True, "total": len(items), "items": items[offset: offset + limit]}
 
 

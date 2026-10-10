@@ -856,6 +856,49 @@ input, textarea { font-family: inherit; }
 .approval-actions button.btn-approve:hover { filter: brightness(1.1); }
 .approval-actions button.btn-deny:hover { color: var(--danger); border-color: var(--danger); }
 
+/* 人工决策选项卡（ask_user：预置选项 + 自定义输入） */
+.ask-options { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+.ask-options .ask-option {
+  padding: 7px 12px;
+  border-radius: 10px;
+  font-size: 12.5px;
+  text-align: left;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  color: var(--text);
+  cursor: pointer;
+  transition: all 0.15s;
+  line-height: 1.5;
+}
+.ask-options .ask-option:hover { border-color: var(--accent); color: var(--accent); background: var(--bg-input); }
+.ask-options .ask-option:disabled { opacity: 0.5; cursor: default; }
+.ask-custom-row { display: flex; gap: 8px; align-items: stretch; }
+.ask-custom-input {
+  flex: 1;
+  padding: 6px 10px;
+  border-radius: 10px;
+  font-size: 12.5px;
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--text);
+  outline: none;
+  min-width: 0;
+}
+.ask-custom-input:focus { border-color: var(--accent); }
+.ask-custom-send {
+  padding: 6px 14px;
+  border-radius: 10px;
+  font-size: 12.5px;
+  font-weight: 500;
+  border: 1px solid var(--border);
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ask-custom-send:disabled { opacity: 0.5; cursor: default; }
+.ask-hint { font-size: 11px; color: var(--text-soft); margin-top: 4px; opacity: 0.85; }
+
 /* 错误气泡 */
 .msg.error .msg-body {
   background: var(--danger-bg);
@@ -2856,3 +2899,168 @@ input, textarea { font-family: inherit; }
 .st-right #drmModuleBox { min-width: 0; }
 .st-right #drmModuleBox .drm-card { height: auto; }
 .st-right .drm-render { margin-top: 0; }
+
+/* ============================================================================
+ * 创作工作台 v2 共享组件（woo-*）：图片创作 / 视频创作 / 短剧审核
+ *   Contentful 式创作输入面板：居中欢迎区 + 输入卡 + 参数条 + 作品网格
+ * ============================================================================ */
+.woo { max-width: 1240px; width: 100%; margin: 0 auto; }
+
+.woo-hero { text-align: center; padding: 6px 0 18px; }
+.woo-hero h1 { margin: 0 0 6px; font-size: 26px; font-weight: 800; letter-spacing: .5px; color: var(--text, #e8e9ec); line-height: 1.3; }
+.woo-hero p { margin: 0; font-size: 12.5px; color: var(--text-faint, #6c7079); }
+
+.woo-panel {
+  position: relative;
+  background: var(--bg-elev, #1e2026);
+  border: 1px solid var(--border, #2c2f38);
+  border-radius: var(--radius-lg, 18px);
+  padding: 14px 16px 16px;
+  box-shadow: 0 10px 32px rgba(0, 0, 0, .10);
+}
+.woo-headrow { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+
+/* —— 创作类型切换（图片 / 视频 / 短剧审核） —— */
+.woo-type-wrap { position: relative; }
+.woo-type-btn {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 7px 13px; border: 1px solid var(--border, #2c2f38); border-radius: 999px;
+  background: transparent; color: var(--text, #e8e9ec); font-size: 13px; cursor: pointer;
+  transition: border-color .15s, color .15s;
+}
+.woo-type-btn:hover { border-color: var(--accent, #7c5cff); color: var(--accent, #7c5cff); }
+.woo-type-btn b { font-weight: 700; }
+.woo-caret { font-size: 9px; color: var(--text-faint, #6c7079); margin-left: 2px; }
+.woo-type-menu {
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 2002; min-width: 172px;
+  background: var(--bg-elev, #1e2026); border: 1px solid var(--border, #2c2f38);
+  border-radius: var(--radius, 12px); box-shadow: 0 12px 38px rgba(0, 0, 0, .30);
+  padding: 6px; display: flex; flex-direction: column; gap: 2px;
+}
+.woo-type-menu button {
+  text-align: left; padding: 9px 11px; border: 0; border-radius: 9px;
+  background: transparent; color: var(--text-soft, #a2a6b0); font-size: 13px; cursor: pointer;
+}
+.woo-type-menu button:hover { background: var(--bg-hover, rgba(255,255,255,.06)); color: var(--text, #e8e9ec); }
+.woo-type-menu button.active { background: color-mix(in srgb, var(--accent, #7c5cff) 14%, transparent); color: var(--accent, #7c5cff); font-weight: 600; }
+
+/* —— 模型 + 模式 —— */
+.woo-model-wrap { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.woo-model-select { max-width: 210px; flex: none; }
+.woo-mode { margin-left: auto; display: flex !important; }
+.woo-mode .st-mode-btn { padding: 7px 12px; display: inline-flex; flex-direction: row; gap: 6px; align-items: center; }
+.woo-mode .st-mode-btn b { font-size: 12.5px; }
+.woo-mode .st-mode-btn small { display: none; }
+
+/* —— 提示词输入区 —— */
+.woo-input-wrap { position: relative; }
+.woo-input {
+  width: 100%; min-height: 116px; resize: vertical;
+  font-size: 14px; line-height: 1.75;
+  border: 1px solid var(--border, #2c2f38); border-radius: var(--radius, 12px);
+  background: var(--bg-input, #23252c); color: var(--text, #e8e9ec);
+  padding: 12px 14px 12px 50px;
+  transition: border-color .15s, box-shadow .15s;
+}
+.woo-input::placeholder { color: var(--text-faint, #6c7079); }
+.woo-input:focus { outline: none; border-color: var(--accent, #7c5cff); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent, #7c5cff) 18%, transparent); }
+.woo-attach {
+  position: absolute; left: 10px; top: 10px; z-index: 2;
+  width: 30px; height: 30px; border-radius: 9px;
+  border: 1px dashed var(--border, #2c2f38); background: transparent;
+  color: var(--text-soft, #a2a6b0); font-size: 19px; line-height: 1; cursor: pointer;
+}
+.woo-attach:hover { border-color: var(--accent, #7c5cff); color: var(--accent, #7c5cff); }
+.woo-input-status { margin-top: 6px; font-size: 11.5px; color: var(--text-faint, #6c7079); }
+.woo-input-status strong { color: var(--text-soft, #a2a6b0); }
+
+/* —— 参考图 —— */
+.woo-refblock { margin-top: 10px; }
+.woo-refhd { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.woo-refs { display: flex; flex-wrap: wrap; gap: 10px; }
+.woo-refs .st-ref { width: 168px; flex-direction: column; align-items: stretch; gap: 6px; }
+.woo-refs .st-ref img { width: 100%; height: 108px; flex: none; object-fit: cover; }
+.woo-refs .st-ref-body { flex: none; }
+
+/* —— 参数条 —— */
+.woo-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+.woo-ratio-btn, .woo-count-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 7px 12px; border: 1px solid var(--border, #2c2f38); border-radius: 999px;
+  background: transparent; color: var(--text, #e8e9ec); font-size: 13px; cursor: pointer;
+}
+.woo-ratio-btn:hover, .woo-count-btn:hover { border-color: var(--accent, #7c5cff); color: var(--accent, #7c5cff); }
+.woo-res-seg { display: inline-flex; gap: 2px; border: 1px solid var(--border, #2c2f38); border-radius: 999px; padding: 2px; }
+.woo-res-seg button {
+  padding: 5px 14px; border: 0; border-radius: 999px;
+  background: transparent; color: var(--text-soft, #a2a6b0); font-size: 12.5px; cursor: pointer;
+}
+.woo-res-seg button.active { background: var(--accent, #7c5cff); color: #fff; }
+.woo-cost { font-size: 12px; color: var(--text-faint, #6c7079); margin-right: -4px; user-select: none; }
+.woo-submit {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 44px; height: 40px; padding: 0 12px;
+  border: 0; border-radius: 12px;
+  background: var(--accent, #7c5cff); color: #fff; font-size: 18px; cursor: pointer;
+  box-shadow: 0 5px 16px color-mix(in srgb, var(--accent, #7c5cff) 35%, transparent);
+  transition: filter .15s, transform .1s;
+}
+.woo-submit:hover { filter: brightness(1.08); }
+.woo-submit:active { transform: scale(.96); }
+.woo-submit:disabled { opacity: .45; cursor: not-allowed; box-shadow: none; }
+.woo-bar-lbl { font-size: 11.5px; color: var(--text-faint, #6c7079); user-select: none; }
+.woo-bar-sel { flex: 0 0 auto; width: 92px; }
+.woo-bar-seed { flex: 0 0 auto; width: 110px; }
+
+/* —— 更多参数（视频等） —— */
+.woo-extra { margin-top: 12px; border-top: 1px dashed var(--border-soft, #262931); padding-top: 10px; }
+.woo-extra summary { cursor: pointer; font-size: 12px; color: var(--text-faint, #6c7079); user-select: none; }
+.woo-extra summary:hover { color: var(--accent, #7c5cff); }
+.woo-extra > div { margin-top: 10px; }
+
+/* —— 作品库 —— */
+.woo-gallery { margin-top: 24px; }
+.woo-gallery .st-grid { grid-template-columns: repeat(auto-fill, minmax(188px, 1fr)); }
+.woo-banner { margin-top: 12px; }
+
+/* —— 比例/设置 弹窗 —— */
+.woo-pop { width: 580px; max-width: 94vw; }
+.woo-pop-bd { max-height: 60vh; }
+.woo-pop-sec { margin-bottom: 16px; }
+.woo-pop-label { font-size: 12px; font-weight: 600; color: var(--text-soft, #a2a6b0); margin-bottom: 8px; }
+.woo-pop-chips { display: flex; flex-wrap: wrap; gap: 7px; }
+.woo-pop-chip {
+  padding: 8px 15px; border-radius: 10px; border: 1px solid var(--border, #2c2f38);
+  background: transparent; color: var(--text-soft, #a2a6b0); font-size: 12.5px; cursor: pointer;
+  transition: all .15s;
+}
+.woo-pop-chip:hover { border-color: var(--accent, #7c5cff); color: var(--accent, #7c5cff); }
+.woo-pop-chip.active {
+  border-color: var(--accent, #7c5cff); color: var(--accent, #7c5cff); font-weight: 600;
+  background: color-mix(in srgb, var(--accent, #7c5cff) 12%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent, #7c5cff) 40%, transparent);
+}
+.woo-pop-chip:disabled { opacity: .38; cursor: not-allowed; }
+.woo-pop-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.woo-pop-inlabel { font-size: 12px; color: var(--text-faint, #6c7079); }
+.woo-pop-input {
+  width: 104px; padding: 7px 10px; border: 1px solid var(--border, #2c2f38); border-radius: 9px;
+  background: var(--bg-input, #23252c); color: var(--text, #e8e9ec); font-size: 13px;
+}
+.woo-pop-hint { font-size: 11px; color: var(--text-faint, #6c7079); }
+.woo-pop-note { margin-top: 12px; font-size: 11.5px; color: var(--text-faint, #6c7079); line-height: 1.6; }
+.woo-pop-foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+
+/* —— 短剧审核页适配 —— */
+.woo-review.drv { padding: 0; }
+.woo-review .st-cols { grid-template-columns: 268px 1fr; }
+.woo-review .st-left { gap: 10px; }
+.woo-review .drv-body { padding: 2px 2px 12px; }
+
+/* —— 移动端 —— */
+@media (max-width: 900px) {
+  .woo-mode { margin-left: 0; flex-wrap: wrap; }
+  .woo-mode .st-mode-btn { flex: 1 1 auto; }
+  .woo-hero h1 { font-size: 21px; }
+  .woo-pop { width: 94vw; }
+}

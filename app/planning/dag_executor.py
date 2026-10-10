@@ -19,6 +19,7 @@
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextvars import copy_context
 from threading import BoundedSemaphore
 from typing import Any, Dict, List, Optional
 
@@ -33,11 +34,14 @@ from app.planning.dag_storage import DAGStorage
 from app.planning.react_loop import ReActLoop
 from app.server import add_event, add_log_entry
 from app.graph._agent_prompt import build_dag_executor_system_prompt
+from app.userctx import deliverables_rel
 
 # 工具调用硬约束（沿用旧 executor）：探索 ≤2、写入 ≤8、路径必须 deliverables/
 _EXPLORE_TOOLS = ("ls", "glob_files", "read_file", "execute_command")
 _WRITE_TOOLS = ("write_file", "edit_file", "delete_file")
 _APPROVAL_TOOLS = ("execute_command", "write_file", "edit_file", "delete_file")
+# 人工决策工具：executor 需要用户作判断（选项/自定义输入）时调用，interrupt 挂起等用户答复
+_ASK_TOOLS = ("ask_user",)
 
 
 def _extract_artifacts(text: str) -> List[str]:
@@ -86,7 +90,8 @@ _missing_expected = core.missing_expected
 
 def _run_node(thread_id: str, task_plan_id: int, node: Dict, goal: str,
               parent_artifacts: List[str], missing_soft: List[str],
-              llm_builder, tools_list, dag: DAGStorage, on_event):
+              llm_builder, tools_list, dag: DAGStorage, on_event,
+              user_input: str = ""):
     """执行单个节点（线程池 worker）。返回 (node_id, status, result, artifacts)。"""
     node_id = node["id"]
     description = node["description"]
@@ -106,14 +111,17 @@ def _run_node(thread_id: str, task_plan_id: int, node: Dict, goal: str,
 
     # 契约前置：解析本节点"应产出哪些文件"，用于 system prompt 提示与 complete_node 校验
     expected_artifacts = _expected_artifacts(node)
+    # 每用户交付目录（相对 BASE_DIR 的 per-user 写法，与主对话提示词一致）
+    dd = deliverables_rel()
 
     system_prompt = build_dag_executor_system_prompt(
         node_id=node_id,
         description=description,
         goal=goal,
-        tool_names=", ".join(t.name for t in tools_list),
+        tool_names=", ".join(t.name for t in tools_list) + ", complete_node, fail_node, ask_user",
         artifacts_context=artifacts_context,
         acceptance_criteria=(node.get("acceptance_criteria") or ""),
+        deliverables_dir=dd,
     )
 
     _outcome = {"status": None, "reason": "", "files": []}
@@ -126,7 +134,7 @@ def _run_node(thread_id: str, task_plan_id: int, node: Dict, goal: str,
     from langchain_core.tools import StructuredTool
 
     def complete_node_plain(description: str, files: List[str]) -> str:
-        """声明子任务完成。files 列出本节点产出的实际文件路径（写入 deliverables/）。"""
+        """声明子任务完成。files 列出本节点产出的实际文件路径（写入 dd/）。"""
         existed, missing = [], []
         for f in files or []:
             p = str(f).replace("\\", "/")
@@ -148,13 +156,34 @@ def _run_node(thread_id: str, task_plan_id: int, node: Dict, goal: str,
     complete_node_tool = StructuredTool.from_function(
         func=complete_node_plain,
         name="complete_node",
-        description="声明子任务完成并列出产出文件路径（写入 deliverables/）。框架会校验文件存在后把节点置 success。",
+        description=f"声明子任务完成并列出产出文件路径（写入 {dd}/）。框架会校验文件存在后把节点置 success。",
     )
     fail_node_tool = StructuredTool.from_function(
         func=fail_node_plain,
         name="fail_node",
         description="声明子任务失败并给出原因（API 错误 / 工具受限 / 资料缺失等），框架会跳过强依赖该节点的下游并触发局部重规划。",
     )
+
+    # 人工决策工具 ask_user：当执行本节点需要用户拍板（如多个可行方向、需要授权、需要
+    # 对默认方案作微调）时调用。会通过 langgraph interrupt 挂起执行，向前端弹"选项卡"
+    # （预置选项 + 允许用户自定义输入），用户答复后 interrupt 返回答案，本工具原样返回。
+    _ask_ans: Dict[str, str] = {}
+    def ask_user_plain(question: str, options: Optional[List[str]] = None, allow_custom: bool = True) -> str:
+        """需要用户作决定时向用户提问并等待答复。question 为问题，options 为预置选项
+        （字符串列表），allow_custom 为 True 时也允许用户自由输入。返回用户的选择。"""
+        return _ask_ans.get("answer") or _ask_ans.get("answer", "") or "(用户未提供答案)"
+
+    ask_user_tool = StructuredTool.from_function(
+        func=ask_user_plain,
+        name="ask_user",
+        description=(
+            f"需要用户作判断/授权时调用，会弹出选项卡并挂起等待用户答复。"
+            f"question：要向用户提出的问题；options：预置选项列表（每个选项一句话）；"
+            f"allow_custom=True 表示除预置选项外也允许用户自定义输入。"
+            f"仅当任务推进确实需要用户决策时才调用，不要因模型不确定而滥用。"
+        ),
+    )
+
     # 替换闭包内 @tool 装饰过的同名引用为新工具（向后兼容旧代码中 complete_node / fail_node 的引用）
     complete_node = complete_node_tool
     fail_node = fail_node_tool
@@ -189,8 +218,8 @@ def _run_node(thread_id: str, task_plan_id: int, node: Dict, goal: str,
                 return False, (
                     "[未落盘] complete_node 被拒绝：本节点还没有任何真实产物。"
                     f"你声明的 files={declared or '（空）'} 在磁盘上都不存在。"
-                    "请先用 write_file 把完整内容写入 deliverables/（路径必须以 'deliverables/' 开头，"
-                    "例如 'deliverables/tetris/index.html'），确认文件真实存在后再调用 complete_node；"
+                    f"请先用 write_file 把完整内容写入 {dd}/（路径必须以 '{dd}' 开头，"
+                    f"例如 '{dd}/tetris/index.html'），确认文件真实存在后再调用 complete_node；"
                     "若确实无法产出，请改调 fail_node 说明卡在哪里。"
                 )
             # 硬约束 2（契约前置）：验收标准里要求的产出文件必须被覆盖。
@@ -223,14 +252,14 @@ def _run_node(thread_id: str, task_plan_id: int, node: Dict, goal: str,
             if not path:
                 return False, (
                     f"[参数错误] 工具 {name} 缺少必需的 'path' 参数。"
-                    f"请在工具调用中提供完整路径，例如：{{\"path\": \"deliverables/xxx.html\", \"content\": \"...\"}}"
+                    f"请在工具调用中提供完整路径，例如：{{\"path\": \"{dd}/xxx.html\", \"content\": \"...\"}}"
                 )
-            if not path.startswith("deliverables/"):
+            if not (path.startswith("deliverables/") or path.startswith(f"{dd}/")):
                 return False, (
-                    f"[路径错误] 写文件路径必须以 'deliverables/' 开头（产出统一归档），"
+                    f"[路径错误] 写文件路径必须以 '{dd}' 开头（产出统一归档），"
                     f"当前路径 '{path}' 不符合。"
-                    f"请把文件路径改成 'deliverables/xxx' 形式（例如 'deliverables/snake/index.html'、"
-                    f"'deliverables/snake/style.css'、'deliverables/snake/app.js'）。"
+                    f"请把文件路径改成 '{dd}/xxx' 形式（例如 '{dd}/snake/index.html'、"
+                    f"'{dd}/snake/style.css'、'{dd}/snake/app.js'）。"
                 )
         return True, ""
 
@@ -242,6 +271,32 @@ def _run_node(thread_id: str, task_plan_id: int, node: Dict, goal: str,
         on_event(None, None)  # no-op keep signature
 
     def _interrupt_handler(name, params):
+        if name in _ASK_TOOLS:
+            # 用户决策选项卡：无论审批模式如何，都要挂起等用户答复。
+            # 不能用 langgraph interrupt()——executor 节点跑在线程池 worker 里，
+            # interrupt() 依赖主线程的 runnable config，worker 内调用会抛
+            # RuntimeError: Called get_config outside of a runnable context（已实测）。
+            # 改走进程内注册表：登记 → 推 SSE 选项卡 → 阻塞等答复 → 返回答案。
+            from app.graph import ask_registry
+            ask_id = ask_registry.register_ask(
+                thread_id,
+                question=params.get("question") or "请用户决定",
+                options=params.get("options") or [],
+                allow_custom=bool(params.get("allow_custom", True)),
+            )
+            add_event("approval", {
+                "kind": "ask",
+                "ask_id": ask_id,
+                "question": params.get("question") or "请用户决定",
+                "options": [str(o) for o in (params.get("options") or []) if str(o or "").strip()],
+                "allow_custom": bool(params.get("allow_custom", True)),
+                "mode": "ask",
+            }, thread_id)
+            add_log_entry("info", f"[DAG] ask_user 挂起等待用户答复 ask_id={ask_id} node={node_id}")
+            ans = ask_registry.wait_answer(ask_id)
+            _ask_ans["answer"] = ans
+            add_log_entry("info", f"[DAG] ask_user 收到答复 ask_id={ask_id}: {ans[:80]}")
+            return True, None
         if name in _APPROVAL_TOOLS:
             try:
                 from app.server import config as _srv_cfg
@@ -264,7 +319,7 @@ def _run_node(thread_id: str, task_plan_id: int, node: Dict, goal: str,
                 return allow, None
         return True, None
 
-    node_tools = list(tools_list) + [complete_node, fail_node]
+    node_tools = list(tools_list) + [complete_node, fail_node, ask_user_tool]
     # max_iterations=12：executor 单子任务需要"探索+写入+校验+complete_node"多轮，
     # 历史 5 太紧，模型会卡在最后一两次没机会收尾；reactive_loop 内还有
     # _NO_PROGRESS_LIMIT 强制收尾兜底（连续 3 轮无 tool_calls 直接 break），
@@ -281,7 +336,10 @@ def _run_node(thread_id: str, task_plan_id: int, node: Dict, goal: str,
     try:
         r = loop.run(messages=[
             SystemMessage(content=system_prompt),
-            HumanMessage(content=f"执行子任务：{description}"),
+            HumanMessage(content=f"执行子任务：{description}"
+                                 + (f"\n\n【用户补充】进行中计划期间用户发来：{user_input}\n"
+                                    f"请结合此补充继续推进本节点（无需重复复述它）。"
+                                    if user_input else "")),
         ], tools=node_tools, state={}, on_tool_before=_on_tool_before,
             on_tool_after=_on_tool_after, interrupt_handler=_interrupt_handler)
         final_result = r["final_answer"]
@@ -335,11 +393,29 @@ def create_executor(llm_builder, tools_list):
         from app.trace import record_node_start, record_node_end
         record_node_start(thread_id, "executor")
         dag = DAGStorage(DB_PATH)
+        dd = deliverables_rel()
 
         plan = dag.get_plan_by_thread(thread_id)
         if not plan:
             record_node_end(thread_id, "executor", "无进行中计划")
             return {"thread_id": thread_id}
+
+        # 消费 DAG 执行期用户插话队列（chatbot 分流入队，见 builder 模块说明；
+        # 以及 run_registry 的跨-request 补充队列，见 dag_executor 模块顶部说明）。
+        # 本批 ready 节点都会看到该补充；返回 state 时不携带 = 已消费。
+        user_input = (state.get("pending_user_input") or "").strip()
+        # 执行期间前端又发的新消息（同 thread 已有 run 时经 /api/chat 入队到这里）：
+        # 每批 executor 进来 drain 一次，合并到 user_input 注入本批节点。
+        from app.graph.run_registry import drain_supplements
+        _extra = drain_supplements(thread_id)
+        if _extra:
+            _merged = []
+            if user_input:
+                _merged.append(user_input)
+            _merged.extend(_extra)
+            user_input = "\n".join(_merged).strip()
+        if user_input:
+            add_log_entry("info", f"[DAG] 注入用户补充到本批节点: {user_input[:80]}")
 
         # 任务目标入长期记忆语义索引（供跨层语义检索；幂等去重）
         try:
@@ -362,7 +438,7 @@ def create_executor(llm_builder, tools_list):
         node_map, edges = _reinstall_state(nodes, edges)
 
         if replan_requested:
-            ok = _do_local_replan(plan, failed_ids, dag, node_map, edges, llm_builder, thread_id)
+            ok = _do_local_replan(plan, failed_ids, dag, node_map, edges, llm_builder, thread_id, dd=dd)
             if not ok:
                 # 重规划没能产出替代节点（LLM 报错/返回空）→ 无法继续推进，收敛结束。
                 # 用 _empty_streak=3 让 route_after_executor 直接走 summarizer，避免无限空转。
@@ -394,10 +470,14 @@ def create_executor(llm_builder, tools_list):
             empty_streak = int(state.get("_empty_streak", 0)) + 1
             record_node_end(thread_id, "executor",
                             f"无可执行节点 (连续 {empty_streak}/3 次)")
+            ret = {"thread_id": thread_id, "_empty_streak": empty_streak}
+            if user_input:
+                # 本批无就绪节点，消息还没被消费：保留到下批（不丢）
+                ret["pending_user_input"] = user_input
             if empty_streak >= 3:
                 add_log_entry("info", f"[DAG] 连续 3 次无可执行节点，结束执行进 summarizer")
-                return {"thread_id": thread_id, "_empty_streak": empty_streak}
-            return {"thread_id": thread_id, "_empty_streak": empty_streak}
+                return ret
+            return ret
         # 本批有 ready，把 empty_streak 清零
         state_for_return = {"thread_id": thread_id, "_empty_streak": 0}
 
@@ -409,12 +489,18 @@ def create_executor(llm_builder, tools_list):
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = {}
             for nid in ready:
-                futures[pool.submit(_run_node, thread_id, plan["id"],
+                # 必须显式传播 ContextVar：新线程默认拿到空 Context，current_user()
+                # 会退回 DEFAULT_USER(Mirror)。而 DB_PATH/DELIVERABLES_DIR 都是
+                # _UserPath，每次访问按 current_user() 动态解析——不传播就会把
+                # Test 用户的节点产物、日志、ask 事件全写到 Mirror 名下（已实测）。
+                _ctx = copy_context()
+                futures[pool.submit(_ctx.run, _run_node, thread_id, plan["id"],
                                     dict(node_map[nid]), goal,
                                     _parent_artifacts(node_map, edges, nid),
                                     _missing_soft(node_map, edges, nid),
                                     llm_builder, tools_list, dag,
-                                    _emit_dag_event(dag, plan["id"]))] = nid
+                                    _emit_dag_event(dag, plan["id"]),
+                                    user_input)] = nid
             for fut in as_completed(futures):
                 nid = futures[fut]
                 try:
@@ -490,7 +576,7 @@ def _missing_soft(node_map, edges, nid) -> List[str]:
 
 
 def _do_local_replan(plan: Dict, failed_ids: List[str], dag: DAGStorage,
-                     node_map, edges, llm_builder, thread_id: str) -> bool:
+                     node_map, edges, llm_builder, thread_id: str, dd: str = "") -> bool:
     """④ 局部重规划：锁定已完成节点，只让 LLM 重出"失败节点"的替代子图。
 
     收敛后的语义（避免一个失败波及全图）：
@@ -554,7 +640,7 @@ def _do_local_replan(plan: Dict, failed_ids: List[str], dag: DAGStorage,
             "【硬性输出要求】\n"
             "1. 每个失败节点都必须被替代：在对应新节点上用 \"replaces\" 标注它替代哪个旧节点 id，"
             "并用 \"acceptance_criteria\" 写明怎样算完成 + 要产出的具体文件路径"
-            "（如 deliverables/tetris/index.html）\n"
+            f"（如 {dd}/tetris/index.html）\n"
             "2. **接口冻结**：原失败节点验收标准里列出的产出文件路径，是下游节点依赖的接口——"
             "替代节点必须产出**完全相同的路径**（不改名、不少产、不换目录）。"
             "你只能改变'怎么做'，不能改变'产出什么'\n"

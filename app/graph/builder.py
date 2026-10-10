@@ -61,6 +61,119 @@ def _is_admin_user(username: Optional[str]) -> bool:
         except Exception:
             return username == "Mirror"
 
+
+# ============================================================
+# DAG 执行期的用户插话分流
+# 解决线上问题：DAG 计划执行中，用户每发一条新消息都会变成独立 chatbot 回合，
+# chatbot 会"另起炉灶"自己动手做完子任务并输出"最终结果"，绕过 executor；
+# 且历史里残留的 `已接收规划请求` 会让每个回合末尾反复触发 planner（重复规划）。
+#
+# 落地（对齐业界 user-in-the-loop / 任务队列模式，不打断执行）：
+#   1) 有未完成的进行中计划时：
+#      - 查询类消息（进度/状态等短问句）→ chatbot 只读回答（不建新计划、不写产物）
+#      - 其余消息 → 写入 state.pending_user_input 入队，由 executor 下批节点以【用户补充】
+#        注入 prompt 后继续推进；chatbot 只回一句"已加入进行中任务"，绝不动手代做
+#   2) 防重复规划：只有该 thread 历史上从未规划过时，才允许从历史嗅探 `已接收规划请求`
+# ============================================================
+
+_QUERY_HINTS = (
+    "进度", "状态", "多少", "几了", "了吗", "怎么样", "怎样",
+    "哪", "多久", "什么程度", "完成", "进行到", "进度到",
+    "progress", "status", "done", "几啊", "到哪", "好了吗", "好了没",
+    # 「现在什么情况」「什么情况了」这类问状态的说法：短句里出现"情况"基本是问进度，
+    # 不加会被当成任务补充入队，用户问进度却收到"已加入进行中的任务"。
+    "情况",
+)
+
+
+def _looks_like_query(text: str) -> bool:
+    """短问句 → 查询类（可只读回答）；否则视为任务补充（入队交给 DAG）。"""
+    t = str(text or "").strip()
+    if not t:
+        return True
+    if len(t) > 16:
+        return False
+    return any(h in t for h in _QUERY_HINTS)
+
+
+def _dag_has_unfinished_work(thread_id: str) -> bool:
+    """该 thread 是否有未收敛的进行中计划（有 pending/ready/running/failed 节点）。
+
+    注意只看"最新一条计划"不够：局部重规划会新建覆盖计划（旧计划执行中可能被更新
+    计划顶成次要位，或新计划被删/完成而旧计划仍 executing）。所以扫一遍该 thread
+    所有非 deleted 的计划：任一 status 在 planning/executing 且有未终结/失败的节点
+    即视为有未收敛工作。
+    """
+    try:
+        from app.planning.dag_storage import DAGStorage
+        dag = DAGStorage(DB_PATH)
+        with sqlite3.connect(DB_PATH) as conn:
+            plans = conn.execute(
+                "SELECT id, status FROM dag_plans "
+                "WHERE thread_id = ? AND status != 'deleted' "
+                "ORDER BY id DESC LIMIT 20",
+                (thread_id,),
+            ).fetchall()
+        for plan_id, status in plans:
+            if status not in ("planning", "executing"):
+                continue
+            nodes = dag.get_nodes(plan_id)
+            if any(n["status"] not in ("success", "skipped", "failed") for n in nodes) or \
+               any(n["status"] == "failed" for n in nodes):
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def _dag_progress_summary(thread_id: str, max_show: int = 8) -> str:
+    """该 thread 当前 DAG 的只读进度摘要（纯 DB 查询，不调 LLM、不启动 run）。
+
+    用于执行期查询类插话（进度/状态/多少/多久…）的直接只读回答：
+    与 _dag_has_unfinished_work 相同的"扫全部非 deleted 计划"口径，取最近一条
+    仍在 planning/executing 的计划，统计未终结节点并拼成人类可读的一句话总结。
+    查询失败/无进行中计划时返回 ""（调用方据此回退到"入队"或"等待本轮结束"）。
+    """
+    try:
+        from app.planning.dag_storage import DAGStorage
+        dag = DAGStorage(DB_PATH)
+        with sqlite3.connect(DB_PATH) as conn:
+            plans = conn.execute(
+                "SELECT id, goal, status FROM dag_plans "
+                "WHERE thread_id = ? AND status != 'deleted' "
+                "ORDER BY id DESC LIMIT 5",
+                (thread_id,),
+            ).fetchall()
+        for plan_id, goal, status in plans:
+            if status not in ("planning", "executing"):
+                continue
+            nodes = dag.get_nodes(plan_id)
+            if not nodes:
+                continue
+            terminal = ("success", "skipped", "failed")
+            done = [n for n in nodes if n["status"] == "success"]
+            skipped = [n for n in nodes if n["status"] == "skipped"]
+            failed = [n for n in nodes if n["status"] == "failed"]
+            running = [n for n in nodes if n["status"] == "running"]
+            pending = [n for n in nodes if n["status"] not in terminal and n["status"] != "running"]
+            total = len(nodes)
+            finished = len(done) + len(skipped) + len(failed)
+            goal_txt = str(goal or "")[:40]
+            lines = [f"【DAG 执行进度】计划「{goal_txt}」执行中（{status}）"]
+            lines.append(f"节点：共 {total}，已完成 {finished}，失败 {len(failed)}，跳过 {len(skipped)}。")
+            if running:
+                lines.append("正在执行：" + "；".join(n["description"][:40] for n in running[:max_show]))
+            if pending:
+                head = pending[:max_show]
+                more = f"…等共 {len(pending)} 项待办" if len(pending) > len(head) else ""
+                lines.append("待执行：" + "；".join(n["description"][:40] for n in head) + more)
+            if failed:
+                lines.append("失败节点：" + "；".join(n["description"][:40] for n in failed[:3]))
+            return "\n".join(lines)
+        return ""
+    except Exception:
+        return ""
+
 # ============================================================
 # Chatbot 节点（统一入口）
 # 取代旧版 L1/L2/L3 硬切分。模型在每一轮自主决定：
@@ -111,6 +224,31 @@ def chatbot(state: State, config: RunnableConfig):
 
     # 记录用户消息到长期记忆
     mm.add_message(thread_id, "user", user_content)
+
+    # ===== DAG 执行期插话分流（见模块顶部说明）=====
+    # 计划正在执行（有未收敛节点）时，非查询消息一律入队交给 executor，
+    # 不允许 chatbot 在 ReActLoop 里动手代做子任务——否则会"绕过 DAG 另起炉灶"。
+    if _dag_has_unfinished_work(thread_id):
+        if _looks_like_query(user_content):
+            # 查询类：chatbot 正常只读回答（下方 ReActLoop），但绝不触发新规划（route 已防）
+            print(f"[Chatbot] DAG 执行中·查询消息（只读回答）: {user_content[:60]}", flush=True)
+            add_log_entry("info", "DAG 执行中收到查询类消息，chatbot 只读回答")
+        else:
+            # 任务补充：入队，不跑 ReActLoop，立即把控制权交给 executor
+            _pui = user_content.strip()[:2000]
+            _note = (
+                f"收到，已将你的消息加入进行中的任务，执行器会在处理下一节点时结合它继续推进"
+                f"（计划完成前我不会另起炉灶）：\n\n> {_pui}"
+            )
+            mm.add_message(thread_id, "assistant", _note)
+            add_log_entry("info", f"DAG 执行中收到补充消息并入队: {_pui[:80]}")
+            try:
+                from app.trace import record_node_end
+                record_node_end(thread_id, "chatbot", "[并入队：DAG 执行中不代做]")
+            except Exception:
+                pass
+            return {"messages": [AIMessage(content=_note)], "thread_id": thread_id,
+                    "pending_user_input": _pui}
 
     # 构造 system prompt
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -379,16 +517,16 @@ def chatbot(state: State, config: RunnableConfig):
     # 2) 消息流检测：找 ToolMessage("已接收规划请求，目标：...") 提取 goal（兜底）
     triggered_goal = react_pending_plan
     if not triggered_goal:
-        # 仅在 DAG 状态允许时检查历史消息中的规划请求
-        # 防止"用户说继续"时重复触发规划（此时 chat历史中有 request_planning 的 ToolMessage，但任务已在执行中）
+        # 防重复规划：只有该 thread「历史上从未规划过」时才允许从历史嗅探
+        # `已接收规划请求`（旧目标会重复触发，见 2026-09-29 线上：同一 500 万字目标
+        # 一天被规划 3 次）。一旦规划过，重规划只能由用户显式 request_planning 触发。
         try:
             from app.planning.dag_storage import DAGStorage
             _dag = DAGStorage(DB_PATH)
-            _existing_plan = _dag.get_plan_by_thread(thread_id)
-            _has_active_plan = _existing_plan and _existing_plan["status"] in ("planning", "executing")
+            _ever_planned = _dag.count_plans(thread_id) > 0
         except Exception:
-            _has_active_plan = False
-        if not _has_active_plan:
+            _ever_planned = True
+        if not _ever_planned:
             for m in reversed(state.get("messages", [])[-5:]):
                 if hasattr(m, 'type') and m.type == 'tool' and '已接收规划请求' in (m.content or ''):
                     try:
@@ -475,11 +613,14 @@ def route_after_chatbot(state: State) -> str:
     """
     chatbot 退出后判断下一步：
       - 如果有 pending_plan → 进入 planner
+      - 如果有 pending_user_input（DAG 执行期用户插话入队）→ 进入 executor 消费
       - 如果 DAG 存储里有未完成的任务计划 → 进入 executor 继续执行
       - 否则 END
     """
     if state.get("pending_plan"):
         return "planner"
+    if state.get("pending_user_input"):
+        return "executor"
     # DAG 唯一真相源：按 thread 查进行中计划，看是否有未完成节点
     try:
         from app.planning.dag_storage import DAGStorage

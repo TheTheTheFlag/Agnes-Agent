@@ -66,7 +66,7 @@ sudo systemctl restart agnes-agent.service ; sudo journalctl -u agnes-agent -n 3
 
 | `fetch --task-id` 返回 | 处置 |
 |---|---|
-| `completed` 且产物可定位 | **认领产物**（补 `-an` + 校验尺寸/时长）→ 判 OK，**不重投** |
+| `completed` 且产物可定位 | **认领产物**（默认保留自带音轨，只校验尺寸/时长）→ 判 OK，**不重投** |
 | `running` / `queued` / 状态未知 / fetch 自身超时 / `completed` 但产物未定位 | 判 **`FAIL(task_running)`** 并落台账（含 task_id）→ **停止等人工继续 fetch，禁止重投** |
 | `failed`（终态确认） | 才允许本段重投 |
 | 输出里取不到 `TASK_ID` | 无从续查，按可重投处置，但台账要记「未取到 TASK_ID」 |

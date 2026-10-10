@@ -289,6 +289,12 @@ def guess_ext(url: str, fallback: str = ".png") -> str:
     return ".jpg" if ext == "jpeg" else f".{ext}" if not ext.startswith(".") else ext
 
 
+def _media_source() -> str:
+    """来源标识：短剧流程（sd 工具链）调用时置 AGENT_MEDIA_SOURCE=short-drama-director，
+    后端会把任务打标并在创作台作品库中隐藏（审核页经 manifest/文件直接使用，不受影响）。"""
+    return (os.environ.get("AGENT_MEDIA_SOURCE") or "").strip()
+
+
 def download(url: str, save_path: Path, api_key: str = "") -> None:
     hdr = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     with requests.get(url, headers=hdr, stream=True, timeout=HTTP_TIMEOUT) as r:
@@ -325,6 +331,8 @@ def cmd_image(args) -> int:
         "refs": refs,
         "count": 1,
     }
+    if _media_source():
+        body["source"] = _media_source()
     if args.extra:
         try:
             body.update({k: v for k, v in json.loads(args.extra).items() if k not in body})
@@ -404,6 +412,8 @@ def build_page_body(args) -> dict:
 
     if args.negative_prompt:
         body["negative_prompt"] = args.negative_prompt
+    if _media_source():
+        body["source"] = _media_source()
     if args.steps:
         print("[media] 提示：--steps 在创作台后端不支持，已忽略（固定质量档）", file=sys.stderr)
     if args.extra:

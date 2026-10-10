@@ -1,6 +1,6 @@
 #!/bin/bash
 # agn_health.sh — agnes-media 创作台健康检查（进程/端口/日志 + 重启提示）
-# 用法：bash agn_health.sh [端口，默认 8081]   （在远端 192.168.31.58 执行）
+# 用法：bash agn_health.sh [端口，默认 8081]   （在远端 god.makeup 执行）
 set -u
 PORT=${1:-8081}
 echo "== 进程 =="

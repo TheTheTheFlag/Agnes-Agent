@@ -20,6 +20,10 @@ class State(TypedDict):
     # ===== 触发器：chatbot 调 request_planning 后注入，planner 节点消费后清空 =====
     pending_plan: Optional[str]
 
+    # ===== 进行中 DAG 的用户插话队列：执行期用户新消息不入新回合、不另起炉灶，=====
+    #      由 executor 每批节点注解（【用户补充】）消费。planner/chatbot 不消费。
+    pending_user_input: Optional[str]
+
     # ===== 验证反馈闭环（validator → executor 修复）：跨节点传递失败原因 + 修复计数 =====
     _validation_passed: Optional[bool]   # 上次验证结果（validator 设置）
     _validation_message: Optional[str]   # 验证失败原因（结构化文本，executor 修复时读取）

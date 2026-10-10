@@ -28,13 +28,18 @@ EXECUTION_DISCIPLINE = """\
 </execution_discipline>"""
 
 # 文件 / shell 工具的安全约束（executor 必读；写入路径违规会被工具层直接拒绝，模型要会改路径重试）。
-SAFETY_RULES = """\
+# deliverables_dir 由调用方按当前用户注入（相对 BASE_DIR 的 per-user 写法），
+# 缺省回落 `deliverables/`（旧行为）。
+def _safety_rules(deliverables_dir: str = "") -> str:
+    dd = (deliverables_dir or "").strip().rstrip("/")
+    ddp = dd + "/" if dd else "deliverables/"
+    return f"""\
 <safety>
-- 写文件（write_file / edit_file / delete_file）路径【必须】以 `deliverables/` 开头。工具层会拦截其他路径并把错误信息写进 ToolMessage，请收到错误后立刻改成 `deliverables/xxx` 重试，不要继续原样提交。
+- 写文件（write_file / edit_file / delete_file）路径【必须】以 `{dd}` 开头。工具层会拦截其他路径并把错误信息写进 ToolMessage，请收到错误后立刻改成 `{ddp}xxx` 重试，不要继续原样提交。
 - 严禁写入：app/server/static、data/、.env、.model_config、.git/、pyproject.toml、uv.lock、checkpoints.db、memory.db 等核心路径。
 - execute_command 危险关键字（rm -rf /、dd、mkfs、format、shutdown 等）会被安全策略直接拒绝；不要尝试绕过。
 - 修复任务中，诊断和修复必须连续完成，最多执行 2 次查看命令（ls/read/grep 类），重点是产出而非排查。
-- 所有交付物（代码、文档、资源）只能写入 `deliverables/xxx`；如需"部署/拷贝到面板"，应把产出放在 deliverables 内并提供使用说明。
+- 所有交付物（代码、文档、资源）只能写入 `{ddp}xxx`；如需"部署/拷贝到面板"，应把产出放在交付物目录内并提供使用说明。
 </safety>"""
 
 # 输出格式：planner / executor 都要遵守的"如何用结构化回答"。
@@ -73,13 +78,14 @@ DECISION_PRINCIPLES = """\
 </decision_principles>"""
 
 
-def build_dag_planner_system_prompt() -> str:
+def build_dag_planner_system_prompt(deliverables_dir: str = "") -> str:
     """DAG planner 的完整系统提示：通用纪律 + 记忆 + 决策 + 规划专项规则。"""
+    dd = (deliverables_dir or "").strip().rstrip("/") or "deliverables"
     return f"""你是 DAG 任务规划器。把用户目标拆成"有依赖关系"的执行图。
 
 {EXECUTION_DISCIPLINE}
 
-{SAFETY_RULES}
+{_safety_rules(deliverables_dir)}
 
 {MEMORY_GUIDE}
 
@@ -90,7 +96,7 @@ def build_dag_planner_system_prompt() -> str:
 - **最小化任务数**：用最少的节点完成目标，不要过度分解。简单目标（单文件/单功能）→ 1 个节点；中等目标 → 2-4 个节点；复杂目标 → 可拆分为多个计划。
 - **控制总节点数 ≤ 8**。
 - 输出格式必须是 JSON：{{"nodes": [...], "edges": [...]}}，不要多余文字。
-- 节点：{{"id": "字符串", "description": "完整指令（不是含糊目标）", "acceptance_criteria": "验收标准：怎样算完成 + 本节点要产出的文件路径（如 deliverables/tetris/index.html），逐条写明", "tool": "可选：建议工具名", "params": {{}} }}
+- 节点：{{"id": "字符串", "description": "完整指令（不是含糊目标）", "acceptance_criteria": "验收标准：怎样算完成 + 本节点要产出的文件路径（如 {dd}/tetris/index.html），逐条写明", "tool": "可选：建议工具名", "params": {{}} }}
 - 边：{{"from": "上游id", "to": "下游id", "soft": false}}；soft=true 表示"上游缺失不阻塞下游，但结果可能不完整"。
 - 严禁成环（1→2→3→1 这种）。如果发现成环，重出一次；再成环就让系统退回单节点计划即可。
 - 能并行的步骤分开成节点（无依赖 = 同层并行），不要塞进一个节点里"全做完"。
@@ -109,8 +115,11 @@ def build_dag_executor_system_prompt(
     tool_names: str,
     artifacts_context: str = "",
     acceptance_criteria: str = "",
+    deliverables_dir: str = "",
 ) -> str:
     """DAG executor 单节点的完整系统提示：通用纪律 + 记忆 + 决策 + 工具策略 + 安全 + 执行专项规则。"""
+    dd = (deliverables_dir or "").strip().rstrip("/")
+    ddp = dd + "/" if dd else "deliverables/"
     artifacts_block = artifacts_context or ""
     # 契约前置：把 planner 给出的验收标准（含应产出的文件路径）直接摆在模型面前，
     # 避免它只输出文字、或产出与契约不符的文件。
@@ -127,7 +136,7 @@ def build_dag_executor_system_prompt(
 {acceptance_block}
 {EXECUTION_DISCIPLINE}
 
-{SAFETY_RULES}
+{_safety_rules(deliverables_dir)}
 
 {MEMORY_GUIDE}
 
@@ -138,16 +147,16 @@ def build_dag_executor_system_prompt(
 也可调用 complete_node（声明完成 + 列出产出文件路径）/ fail_node（声明失败 + 写原因）。
 - 探索类（ls / glob_files / read_file / execute_command）：最多 2 次，之后必须直接产出。
 - 写入类（write_file / edit_file / delete_file）：每文件一次写完整；同一文件不要反复 edit_file 修补。
-  **重要**：write_file 和 edit_file 必须提供完整的 'path' 参数，格式为 deliverables/xxx。
-  示例: path="deliverables/game.html", content="..." 
+  **重要**：write_file 和 edit_file 必须提供完整的 'path' 参数，格式为 {dd}/xxx。
+  示例: path="{dd}/game.html", content="..." 
 - 验证类（execute_command 'node --check'）：只在产出可能有问题时调用，不要为凑工具调用而调。
 </tool_usage_policy>
 
-{SAFETY_RULES}
+{_safety_rules(deliverables_dir)}
 
 <executor_discipline>
 1. 探索 ≤ 2 次；写入 ≤ 8 次（写超过 8 次会被安全策略直接拒绝，请合并到更少的文件里）。
-2. 路径必须以 `deliverables/` 开头，否则被拒。
+2. 路径必须以 `{dd}` 开头，否则被拒。
 3. 完成后必须调用 `complete_node`（files 列出实际产出路径）——只用文字不算完成，框架不会置 success；
    **files 必须完整覆盖验收标准（acceptance_criteria）里列出的所有产出文件**，缺一个都会被拒并要求补齐。
    没有落盘任何文件时 complete_node 也会被直接拒绝。

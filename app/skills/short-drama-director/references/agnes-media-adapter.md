@@ -65,7 +65,7 @@ python3 /home/mirror/Agnes-Agent/app/skills_builtin/agnes-media/media.py video \
    `data/users/Mirror/data/video_library/manifest.json`（图片为 `image_library/manifest.json`），
    确认目标段/seed 是否已有 `status=completed` 的产物；有则跳过，防重复 take。
 4. **重复判定口径**：以 manifest 条目 `seed` + 段号/用途 为准；同一 seed 多条 completed
-   即重复 take（保留最新一条，旧 take 移入 `_old/`）。
+   即重复 take（保留最新一条，旧 take 的 manifest 条目与磁盘文件一并物理删除，不再移入 `_old/`）。
 
 ## 3. 对 E 法则的覆盖（用户已确认）
 

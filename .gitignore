@@ -63,3 +63,7 @@ err.txt
 *.bak*
 # 历史技能交付补丁备份（已被 short-drama-director / drama-pipeline 取代）
 app/skills/.deliverdir-patch*/
+
+# one-off generator scripts (runtime artifact, do not commit)
+generate_e02.py
+

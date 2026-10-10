@@ -372,6 +372,7 @@ async function uploadFileToBar(file) {
     if (State.pendingAttachments.length >= 6) throw new Error("一次最多挂 6 个附件");
     State.pendingAttachments.push({ path: d.path, name: d.name || d.path, isImg: imgLike, size: d.size || 0 });
     renderAttachBar();
+    updateComposer();
     chatInput.focus();
   } catch (e) {
     toast("上传失败: " + e.message);
@@ -394,6 +395,7 @@ function renderAttachBar() {
   $$(".attach-remove", bar).forEach((b) => b.addEventListener("click", () => {
     State.pendingAttachments.splice(+b.dataset.i, 1);
     renderAttachBar();
+    updateComposer();
   }));
   refreshComposerStats(null, false);
 }
@@ -767,24 +769,57 @@ function createToolCard(name) {
   return wrap;
 }
 
-/* ==================== 审批卡片 ==================== */
+/* ==================== 审批卡片 / 人工决策选项卡 ==================== */
 function renderApprovalCard(data) {
   const host = State.currentAssistantEl || addAssistantBubble("");
   const card = document.createElement("div");
   card.className = "approval-card";
+  const isAsk = data.kind === "ask";
+  const options = (data.options || []).filter((o) => String(o || "").trim());
+  card.dataset.kind = isAsk ? "ask" : "approval";
   card.innerHTML = `
     <div class="approval-title">
       <svg class="approval-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="7.5" width="9" height="6" rx="1.5"/><path d="M5.5 7.5V5a2.5 2.5 0 0 1 5 0v2.5"/></svg>
-      <span>需要你的确认</span>
+      <span>${isAsk ? "需要你来决定" : "需要你的确认"}</span>
     </div>
-    <div class="approval-question">${escapeHtml(data.question || "是否允许执行该操作？")}</div>
-    ${data.command ? `<div class="approval-cmd">${escapeHtml(data.command)}</div>` : ""}
-    <div class="approval-actions">
-      <button class="btn-approve">允许执行</button>
-      <button class="btn-deny">拒绝</button>
-    </div>`;
-  $(".btn-approve", card).addEventListener("click", () => respondApproval(true, data.mode));
-  $(".btn-deny", card).addEventListener("click", () => respondApproval(false, data.mode));
+    <div class="approval-question">${escapeHtml(data.question || (isAsk ? "请选择：" : "是否允许执行该操作？"))}</div>
+    ${data.command && !isAsk ? `<div class="approval-cmd">${escapeHtml(data.command)}</div>` : ""}
+    ${isAsk ? `
+      <div class="ask-options">
+        ${options.length ? options.map((o, i) =>
+          `<button class="ask-option" data-value="${escapeHtml(o)}">${escapeHtml(o)}</button>`
+        ).join("") : ""}
+        ${data.allow_custom !== false ? `
+          <div class="ask-custom-row">
+            <input class="ask-custom-input" placeholder="或输入自定义答案…" maxlength="500" />
+            <button class="ask-custom-send">确定</button>
+          </div>
+        ` : ""}
+      </div>
+      <div class="ask-hint">选择后将挂起执行，直到你给出答案再继续</div>
+    ` : `
+      <div class="approval-actions">
+        <button class="btn-approve">允许执行</button>
+        <button class="btn-deny">拒绝</button>
+      </div>
+    `}`;
+  if (isAsk) {
+    $$(".ask-option", card).forEach((b) => b.addEventListener("click", () => respondAsk(b.dataset.value, data)));
+    const input = $(".ask-custom-input", card);
+    const send = $(".ask-custom-send", card);
+    const doSend = () => {
+      const v = (input && input.value || "").trim();
+      if (v) respondAsk(v, data);
+    };
+    if (send) send.addEventListener("click", doSend);
+    if (input) {
+      input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); doSend(); } });
+      setTimeout(() => { try { input.focus(); } catch (e) {} }, 60);
+    }
+  } else {
+    $(".btn-approve", card).addEventListener("click", () => respondApproval(true, data));
+    $(".btn-deny", card).addEventListener("click", () => respondApproval(false, data));
+  }
   // 移除气泡里的加载中动画（审批卡取代了它）
   const msgText = $(".msg-text", host);
   if (msgText) $(".typing-dots", msgText)?.remove();
@@ -793,14 +828,32 @@ function renderApprovalCard(data) {
   scrollToBottom();
 }
 
-function respondApproval(allow, mode) {
+function _lockApprovalCard() {
   const card = State.approvalCard;
   if (card) {
-    const btns = $$("button", card);
-    btns.forEach((b) => (b.disabled = true));
+    $$("button", card).forEach((b) => (b.disabled = true));
+    const inp = $(".ask-custom-input", card);
+    if (inp) inp.disabled = true;
   }
+}
+
+function respondApproval(allow, data) {
+  _lockApprovalCard();
   State.approvalCard = null;
-  sendMessage("", { resume: true, allow, mode });
+  sendMessage("", { resume: true, allow, mode: (data && data.mode) || "per_ask" });
+}
+
+function respondAsk(answer, data) {
+  _lockApprovalCard();
+  State.approvalCard = null;
+  // 卡片换成「已提交」态，避免用户重复点击同一张卡发两次答案
+  const card = State.currentAssistantEl && $(".approval-card", State.currentAssistantEl);
+  if (card) {
+    const box = $(".ask-options", card);
+    if (box) box.innerHTML = `<div class="ask-hint">已提交你的选择，等待任务继续…</div>`;
+  }
+  sendMessage("", { resume: true, allow: true, answer: answer, mode: "ask",
+                     ask_id: (data && data.ask_id) || "" });
 }
 
 /* ==================== 任务待办面板 ==================== */
@@ -1690,7 +1743,16 @@ async function sendMessage(text, opts) {
   State.chatAbort = new AbortController();
 
   const body = isResume
-    ? { resume: true, allow: !!opts.allow, mode: opts.mode || "per_ask", thread_id: State.threadId }
+    ? {
+        resume: true,
+        allow: !!opts.allow,
+        mode: opts.mode || "per_ask",
+        answer: opts.answer || "",
+        // ask 选项卡：把 ask_id 回传，后端据此把答案交回进程内注册表唤醒挂起的
+        // executor 节点（线程池 worker 不能用 langgraph interrupt，故不走 resume 图）
+        ask_id: opts.ask_id || "",
+        thread_id: State.threadId,
+      }
     : { message: text, thread_id: State.threadId, selected_kbs: kbSelectionForSend() };
 
   try {
@@ -1738,6 +1800,105 @@ function stopChat() {
   updateComposer();
 }
 
+/* 执行期插话（2026-09-29）：DAG 多节点执行时该 thread 的 main SSE 一直 open、
+   State.streaming 恒真。用户在输入框继续发消息，走这里"插话入队"：
+   - 不在前端读跑批 SSE（那条归停住的主链路）；只发 POST /api/chat 拿轻量 SSE
+   - 后端 run_registry 判定同 thread 有 run 在执行 → 消息入队，返回"已入队"轻流
+   - 正在执行的 executor 引擎下批节点消费该补充并注入 prompt */
+async function sendSupplement(text) {
+  if (!text || !State.threadId) return;
+  // 展示用户气泡 + 清空输入框（与 sendMessage 的新消息分支一致）
+  const _inner = messagesInner();
+  if ($(".welcome", _inner)) {
+    _inner.innerHTML = "";
+    updateChatTitle(text);
+  }
+  addUserBubble(text);
+  $("#chatInput").value = "";
+  autosizeInput();
+  hideCmdMenu();
+  updateComposer();  // 空输入 → 恢复「⏹ 停止」（若仍在 streaming）
+
+  const body = { message: text, thread_id: State.threadId, selected_kbs: kbSelectionForSend() };
+  try {
+    const resp = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      addErrorBubble(err.error || `HTTP ${resp.status}`);
+      return;
+    }
+    if (!resp.body) return;
+    // 读回执流。两种可能：
+    //   A. 执行期插话被接受 → 轻量流：final（入队文案）→ done
+    //   B. 上一 run 恰在这时结束、锁已释放 → 变成了一个完整新 run
+    //      此时事件流以 node/dag_push 等开头，须转交 handleChatEvent 全量处理
+    //      （否则 todo 面板、过程气泡都会丢）。
+    // 按第一个业务事件决定模式：final 开头 = 插话回执；否则 = 真 run。
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    let mode = "auto";
+    let sawFinal = false;
+    while (true) {
+      let { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf("\n\n")) >= 0) {
+        const chunk = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        const line = chunk.split("\n").find((l) => l.startsWith("data:"));
+        if (!line) continue;
+        let evt;
+        try { evt = JSON.parse(line.slice(5).trim()); } catch (e) { continue; }
+        const step = evt.step || "";
+        if (mode === "auto") {
+          if (step === "node" || step === "dag_push" || step === "node_status"
+              || step === "llm_call" || step === "retrieval" || step === "tool") {
+            mode = "run";
+          } else if (step === "final") {
+            mode = "ack";
+          } else {
+            continue; // heartbeat 等忽略
+          }
+        }
+        if (mode === "run") {
+          // 真 run：说明上一轮刚结束、锁已释放，本条变成了完整新一跑。
+          // 先收敛旧链路（若有），防止两个 SSE 同时写 DOM；事件全部转交主处理器。
+          if (State.streaming) stopChat();
+          handleChatEvent(evt);
+          continue;
+        }
+        // ack 模式：final（入队文案）→ done；done 到达即可结束
+        if (step === "final" && evt.text && !sawFinal) {
+          sawFinal = true;
+          if (window.drmOnSupplementInline && typeof window.drmOnSupplementInline === "function") {
+            window.drmOnSupplementInline(evt.text);
+            continue;
+          }
+          const el = addAssistantBubble("");
+          el.classList.remove("pending", "streaming");
+          const box = $(".msg-text", el);
+          if (box) {
+            box.innerHTML = renderMarkdown(evt.text);
+            box.querySelectorAll(".typing-dots").forEach((n) => n.remove());
+          }
+          scrollToBottom();
+        } else if (step === "done" || step === "error") {
+          try { reader.cancel(); } catch (e2) {}
+          return;
+        }
+      }
+    }
+  } catch (e) {
+    addErrorBubble(e.message || "补充消息发送失败");
+  }
+}
+
 /* ==================== 历史消息加载 ==================== */
 async function loadHistory(tid) {
   const inner = messagesInner();
@@ -1760,6 +1921,27 @@ async function loadHistory(tid) {
     renderWelcome();
   }
   scrollToBottom();
+  // 刷新后若该 thread 仍有待答复的 ask_user 问题（进程没重启、executor 还挂着），
+  // 历史回放只会把它画成只读气泡——这里补一张可交互卡片，否则用户永远答不了。
+  try { await restorePendingAskCard(); } catch (e) { /* 忽略 */ }
+}
+
+// 拉取当前 thread 待答复的 ask 问题并渲染成可交互选项卡（刷新/切会话后恢复）
+async function restorePendingAskCard() {
+  const tid = State.threadId;
+  if (!tid) return;
+  const r = await apiGet(`/api/chat/pending-ask?thread_id=${encodeURIComponent(tid)}`);
+  const p = r && r.pending;
+  if (!p || !p.question) return;
+  State.currentAssistantEl = addAssistantBubble("");
+  renderApprovalCard({
+    kind: "ask",
+    ask_id: p.ask_id || "",
+    question: p.question,
+    options: p.options || [],
+    allow_custom: p.allow_custom !== false,
+    mode: "ask",
+  });
 }
 
 function renderHistory(msgs) {
@@ -2258,10 +2440,24 @@ function autosizeInput() {
   chatInput.style.height = Math.min(chatInput.scrollHeight, 200) + "px";
 }
 
+function _composerHasInput() {
+  // 发送按钮是否"有内容可发"：输入框有文字，或挂了待发送附件。
+  return !!((chatInput.value || "").trim() || (State.pendingAttachments || []).length);
+}
+
 function updateComposer() {
   const sending = State.streaming;
-  $("#btnSend").classList.toggle("hidden", sending);
-  $("#btnStop").classList.toggle("hidden", !sending);
+  if (sending) {
+    // 执行期间：空输入 → 显示「⏹ 停止」；一旦输入内容/挂附件 → 切成「发送」
+    // （该消息走"插话入队"，交给正在执行的 executor 下批节点消费）。
+    const hasInput = _composerHasInput();
+    $("#btnSend").classList.toggle("hidden", !hasInput);
+    $("#btnStop").classList.toggle("hidden", hasInput);
+  } else {
+    // 空闲：永远显示发送按钮
+    $("#btnSend").classList.toggle("hidden", false);
+    $("#btnStop").classList.toggle("hidden", true);
+  }
   chatInput.disabled = false;
 }
 
@@ -2309,6 +2505,7 @@ function applyCmdSel() {
 chatInput.addEventListener("input", () => {
   autosizeInput();
   showCmdMenu();
+  updateComposer();
 });
 
 chatInput.addEventListener("keydown", (e) => {
@@ -2337,7 +2534,6 @@ $("#cmdMenu").addEventListener("mousedown", (e) => {
 function sendFromComposer() {
   const val = chatInput.value.trim();
   const atts = State.pendingAttachments || [];
-  if (State.streaming) return;
   if (!val && !atts.length) return;
   if (val.startsWith("/") && !atts.length) { runCommand(val); return; }
   // 有附件：把附件 markdown 拼进消息（图片渲染 + Agent 可读 uploads/ 路径），随本次输入一起发送
@@ -2349,6 +2545,12 @@ function sendFromComposer() {
     text = attText + (val ? "\n\n" + val : "");
     State.pendingAttachments = [];
     renderAttachBar();
+  }
+  // 正在执行中（DAG 多节点长跑）：本消息作为"插话入队"发送，交给正在执行的
+  // executor 下批节点消费，前端回一条"已加入进行中任务"；不动主链路 streaming 状态。
+  if (State.streaming) {
+    sendSupplement(text);
+    return;
   }
   sendMessage(text);
 }
@@ -3374,6 +3576,13 @@ function handleLiveEvent(evt) {
     if (State.drawerTab === "logs") renderLogsTab(drawerBody);
   } else if (eType === "event") {
     if (State.drawerTab === "events") renderEventsTab(drawerBody);
+  } else if (eType === "approval") {
+    // 人工确认/ask 选项卡走全局 SSE（/api/sse）而不是本次 /api/chat 的 SSE：
+    // ask_user 抛出后 executor 节点就阻塞在进程内注册表里等答复，本次 run 的 SSE
+    // 此时没有任何新事件可推，走它会死锁（卡片永远弹不出来）。
+    // chat.py 的 _drain_listener 刻意不转发 approval，避免同一张卡渲染两次。
+    if (evt.thread_id && State.threadId && evt.thread_id !== State.threadId) return;
+    renderApprovalCard(eData);
   } else if (eType === "planner" || eType === "executor") {
     // 任务计划/子任务状态变化 → 刷新待办面板。
     // 后端事件负载有两种形态：executor 全量快照用 `nodes`（[{id,status,description,replaces}]），

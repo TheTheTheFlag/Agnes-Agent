@@ -1,4 +1,8 @@
 """
+⚠️【2026-09-29 弃用】本脚本已退出默认流水线。配音改为「视频生成自带音轨」：
+渲染默认保留模型音轨（不再 -an），角色音色写进视频词音色槽（SKILL.md §9 / render-contracts.md §8）。
+本文件仅保留为后备工具（旧项目重制、无音轨旧段修复等特殊场景），不进入新链路的验收入口。
+
 Local TTS dubbing pipeline using Qwen3-TTS-12Hz-0.6B (CPU inference).
 Reads an SRT subtitle file, generates TTS audio per line using local model,
 places multi-line dialogue sequentially within each cue, merges into voice_mix.wav.

@@ -398,7 +398,9 @@ ffmpeg -y -loop 1 -i "$KF" -t "$dur" -vf \
 zoompan=z='min(zoom+0.001,1.10)':d=$((dur*30)):x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1280:720,\
 setsar=1,fps=30" -c:v libx264 -crf 20 -pix_fmt yuv420p -an "$out"
 ```
-落盘的段必须打 `STATIC_FALLBACK` 标记，concat 后在台账列明，**不得当作正常段交付而不告知**。
+落盘的段必须打 `STATIC_FALLBACK` 标记（段目录下写 `.STATIC_FALLBACK` 文件），concat 后在台账列明，
+**不得当作正常段交付而不告知**。静帧段本无音轨，§6/§8 的 QA 对**标记段**豁免 audio 必检
+（默认链路要求视频含 audio，豁免只在标记段生效）。
 
 ### 5.3 统一调色 + 段内淡入淡出（`craft_default`，成片感的最廉价来源）
 
@@ -422,12 +424,12 @@ setsar=1,fps=30" -c:v libx264 -crf 20 -pix_fmt yuv420p -an "$out"
 ```bash
 python3 scripts/normalize_segments.py <项目根> [EP ...] [--workers N]
 # 每段：scale=1280:720:force_original_aspect_ratio=decrease,pad=…,setsar=1
-#      + -t <manifest 声明时长> + -an + libx264 crf18 preset medium +faststart
+#      + -t <manifest 声明时长> + 音频保留（-c:a aac 重编码，不再 -an）+ libx264 crf18 preset medium +faststart
 ```
 
 - **声明时长是唯一权威**：`-t <decl>` 裁掉帧对齐溢出；**不得**反过来改 manifest 迁就产物。
 - **覆盖前备份**：`<R>/.review/pre_normalize/<seg>.mp4` + `INDEX.jsonl`（原路径 + sha256 + 时间）。
-- **幂等**：已达标（1280×720 / ±0.05s / 无音轨）的段直接 `SKIP`，可安全重跑。
+- **幂等**：已达标（1280×720 / ±0.05s / 含 audio 流；`STATIC_FALLBACK` 标记段豁免 audio）的段直接 `SKIP`，可安全重跑。
 - 退出码 0=全 OK/SKIP，1=有 FAIL——FAIL 段**不得**进 concat。
 - 顺序：渲影 → **归一化** → 统一调色（§5.3）→ concat（§6）。
 
@@ -444,7 +446,7 @@ python3 scripts/normalize_segments.py <项目根> [EP ...] [--workers N]
 | 脚本 | 用法 | 退出码 |
 |---|---|---|
 | `qa_manifest.sh` | `<项目根> <EP> [最大总时长秒]` | 0 全绿 / 1 有 FAIL / 2 用法错 |
-| `qa_videos.sh` | `<项目根> <EP>`（`KEEP_AUDIO=1` 反向验收） | 同上 |
+| `qa_videos.sh` | `<项目根> <EP>`（默认要求含 audio=自带配音；`NO_AUDIO=1` 反向验收） | 同上 |
 | `concat_episodes.sh` | `<项目根> <EP1> [EP2] …` | 0 / 1 / 2 |
 | `qa_deliver.sh` | `<项目根> <EP1> [EP2] … [最大总时长秒]` | 0 全绿 / 1 有 FAIL / 2 用法错 |
 
@@ -453,21 +455,22 @@ python3 scripts/normalize_segments.py <项目根> [EP ...] [--workers N]
 - `qa_manifest.sh` 现有检查项：残词扫描 / duration 档位（3/5/10/18）/ 段时长合计对账 /
   keyframes 存在性与 ≥2 / 16:9 / prompt 总字数 / **ref 纯净度（§4.3）** / 同 ref 重复挂载。
 - `qa_videos.sh` 现有检查项：逐段存在性 / 分辨率 16:9 容差 0.05 / 时长 vs manifest 容差 1.0s /
-  流构成（默认只允许 `video`；`KEEP_AUDIO=1` 时必须含 `audio`）/ 段数 >0。
+  流构成（默认必须 `video+audio`=自带配音；`NO_AUDIO=1` 反向只允许 `video`；subtitle 一律禁）/ 段数 >0。
 - 合并语义：主走审核台 `POST /api/drama-review/merge`（合并前自动备份）；
   命令行等价路径即上表。
 
 ### 6.2 流核验
 
-渲染链路已在段视频落盘后 `ffmpeg -an` 去模型音轨，
-`ffprobe -show_entries stream=codec_type` 每片应**只有 `video` 一路流**（无 audio、无 subtitle）——见 §8。
+渲染链路默认**保留模型自带音轨**（自带配音交付），
+`ffprobe -show_entries stream=codec_type` 每片应含 **`video` + `audio`**（无 subtitle）——见 §8；
+`NO_AUDIO=1` 特例才只有 `video`。
 
 ### 6.3 验收线
 
 - 整片 ≤ 上限（默认 240s）。
 - 单段时长 = duration 档位（3/5/10/18）。
 - 分辨率 16:9（容差 0.05；实测交付可能为 1280×704，见 §1.1）。
-- 默认无音轨（`KEEP_AUDIO=1` 特例项目反向验收：必须含 audio 流）。
+- 默认含 audio（自带配音；`NO_AUDIO=1` 特例反向验收：无 audio 流）。
 
 ---
 
@@ -486,14 +489,17 @@ python3 scripts/normalize_segments.py <项目根> [EP ...] [--workers N]
 
 ---
 
-## 8. 无配音契约（2026-09-27 新增，根治模型英文配音）
+## 8. 视频自带配音契约（2026-09-27 曾定为「无配音」，2026-09-29 反转）
 
-- **规则**：`gen_kzqs_videos.py` 渲染**永远不保留模型自带音轨**——段视频复制落盘后立即
-  `ffmpeg -y -i dst -an -c:v copy` 去音轨，失败才保留原轨并记日志；禁止任何后续环节把模型音轨当成品交付。
-- **根因**：模型原生配音偶发生成英文，人工挑段不可靠 → 从源头禁用模型音轨。
-- **配音走向**：由 `scripts/local_tts.py` 从 SRT 生成中文配音，产出 `voice_mix.wav` 后按需混入成片。
-- **验收**：`ffprobe -show_entries stream=codec_type -of csv=p=0 <段.mp4>` 应只有 `video`
-  （`KEEP_AUDIO=1` 特例项目应含 `video,audio`）。
+- **规则**：`gen_kzqs_videos.py` 渲染**默认保留模型自带音轨**作为交付配音——段视频落盘**不 `-an`**，
+  台词内容与角色音色在**视频词**里声明（`SKILL.md` §9 音色槽 + 中文发音锁），**源头控制**替代落盘后一刀切。
+- **旧根因（已反转）**：模型原生配音偶发生成英文，人工挑段不可靠 → 旧链路曾永久 `-an` 并转本地
+  Qwen3-TTS。配音反转后仍须防「英文 / 串角色 / 无声」，防线移到 **prompt（语言锁 + 音色槽）** 与
+  **QA（audio 流 + 人工抽查）**。
+- **音轨去除特例**：`NO_AUDIO=1` 时才 `-an`（个别段发音严重跑偏且急需用该段），
+  QA 反向验收无 audio 流，台账记 `NO_AUDIO=<理由>`。
+- **验收**：`ffprobe -show_entries stream=codec_type -of csv=p=0 <段.mp4>` 默认应含 **`video,audio`**
+  （无 subtitle）；`NO_AUDIO=1` 特例段应只有 `video`；静帧兜底段（`STATIC_FALLBACK`）豁免 audio。
 
 ---
 

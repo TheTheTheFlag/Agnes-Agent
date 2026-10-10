@@ -1,6 +1,6 @@
 ---
 name: drama-pipeline
-description: "【复用包】一站式短剧/视听创作流水线执行技能（OpenCode 侧）。经 plink/pscp 调用远端 agnes-agent 创作台（127.0.0.1:8081，唯一媒体通道 agnes-media/media.py）完成全流程：①画风选择（任务起始必选，画风库 STYLE-01 摄影写实/STYLE-02 原神风·二次元卡通渲/STYLE-11 次世代国漫CG）→②4 View 角色/场景/道具资产（--ref 锁形象，换装走 assets/regenerate 不新出图）→③剧本(sumeru-* 技能族)+投喂稿→④validate_prompt.py 机检逐段全绿→⑤关键帧（首尾帧独立·九段式帧词·ref≤2·禁资产板·人数前置）→⑥gen_kzqs_videos.py 渲染无配音版（16:9 注入，段视频落盘自动 -an 去模型音轨）→⑦8081 工作台「短剧审核」页验收（资产审核/分镜审核，可改词重生成）→⑧concat 拼接→⑨qa_manifest/qa_videos/qa_deliver 机检（时长/分辨率/流构成/refs 纯净度）→⑩本包 scripts/local_tts.py 离线配音→台账登记（含 credit/耗时/重试账目）。内置 agnes-media 服务运维与 skill 优化循环（复盘→根因→最小修复→规则沉淀→复核清理）。触发词：短剧流水线、出短剧、生成视频、短剧审核、重新生成、配音、agnes 服务、skill 优化、复盘沉淀。"
+description: "【复用包】一站式短剧/视听创作流水线执行技能（OpenCode 侧）。经 plink/pscp 调用远端 agnes-agent 创作台（127.0.0.1:8081，唯一媒体通道 agnes-media/media.py）完成全流程：①画风选择（任务起始必选，画风库 STYLE-01 摄影写实/STYLE-02 原神风·二次元卡通渲/STYLE-11 次世代国漫CG）→②4 View 角色/场景/道具资产（--ref 锁形象，换装走 assets/regenerate 不新出图）→③剧本(sumeru-* 技能族)+投喂稿→④validate_prompt.py 机检逐段全绿→⑤关键帧（首尾帧独立·九段式帧词·ref≤2·禁资产板·人数前置）→⑥gen_kzqs_videos.py 渲染（16:9 注入，默认保留模型自带配音音轨，视频词已含各角色音色+中文发音锁）→⑦8081 工作台「短剧审核」页验收（资产审核/分镜审核，可改词重生成）→⑧concat 拼接→⑨qa_manifest/qa_videos/qa_deliver 机检（时长/分辨率/流构成/refs 纯净度）→⑩音轨质检与交付（配音随视频生成自带，不再本地 TTS）→台账登记（含 credit/耗时/重试账目）。内置 agnes-media 服务运维与 skill 优化循环（复盘→根因→最小修复→规则沉淀→复核清理）。触发词：短剧流水线、出短剧、生成视频、短剧审核、重新生成、配音、agnes 服务、skill 优化、复盘沉淀。"
 triggers:
   - 短剧流水线
   - 出短剧
@@ -23,7 +23,7 @@ triggers:
 
 | 项 | 值 |
 |----|----|
-| 远端主机 | `mirror@192.168.31.58`，SSH 端口 9000（`ssh -i ~/.ssh/id_ed25519 -p 9000`） |
+| 远端主机 | `mirror@god.makeup`，SSH 端口 9000（key 用 `~/.ssh/agnes_ops`，勿用 `192.168.31.58`——LAN 网段已换，经公网可达） |
 | agnes 服务 | systemd 单位 `agnes-agent.service`；日志 `journalctl -u agnes-agent.service` |
 | 服务命令 | `python -m app.service --host 0.0.0.0 --port 8081`（`/home/mirror/Agnes-Agent/.venv`） |
 | 唯一媒体通道 | `python3 /home/mirror/Agnes-Agent/app/skills_builtin/agnes-media/media.py`（image/video/fetch） |
@@ -34,8 +34,8 @@ triggers:
 | 画风机制 | `app/skills/short-drama-director/references/art-style-selection.md`（任务起始必选） |
 | **审核台后端** | `app/server/api/drama_review.py`（前缀 `/api/drama-review/*`） |
 | **审核台前端** | `app/server/static/drama-review.js`（工作台「短剧审核」tab，面板 `#studioReviewPanel`） |
-| **配音** | 本包自带 `scripts/local_tts.py`（离线 Qwen3-TTS） |
-| 配音环境 | `C:/Users/Mirror/Documents/Qoder/2026-09-26/f738e157/ttsenv`（Python 3.12+torch cpu） |
+| **配音** | **视频生成自带音轨**（默认保留，不再本地 TTS）；角色音色写进视频词声音层（§9 音色槽） |
+| 配音选项 | `NO_AUDIO=1` 时才去音轨（个别段模型发音跑偏的弃音轨处置，见 §9） |
 
 ## 一、执行流程（十步，顺序不可乱）
 
@@ -99,7 +99,7 @@ triggers:
   | **标志色** | 给每个核心角色分配**互补或不重叠**的标志色，落到服装主色/发色/标志性饰品 | 模型靠颜色区分人最稳；两人同色 → 被画成同一类 → 重复人 |
   | **剪影特征** | 明确体型/发型体积/肩宽比例/随身轮廓/**手势幅度**/**静息姿态张力** 差异 | 剪影不同 = 剪影层面就不可混同 |
   | **运动节奏**（P1） | 动作快慢/停顿习惯/发力方式差异 | 映射视频层；帧词静态时用不上，但角色卡要写，否则全片动作同质 |
-  | **音色**（P1） | 音高/语速/沙哑度差异 | 直接喂 §9 的 TTS 音色分配 |
+  | **音色**（P1） | 音高/语速/沙哑度差异 | 写进视频词声音层（§9 音色槽），随视频生成自带配音 |
   - **条件化判据（P1，优先于「两两都不同」）**：
     **在目标画幅 / 光线 / 服装条件下会被看混的那一对，必须改**。
     「两两都不同」是不可执行的口号；「这一对在本片条件下会混」才是可判的。
@@ -155,7 +155,7 @@ triggers:
 - 设计期账本格式（放投喂稿头部注释即可）：`14 段：3s×2 + 5s×4 + 10s×6 + 18s×2 = 178s ≤ 240s`。
 - 校验落点：`qa_manifest.sh`「段时长合计 > 上限」红项即这条的机检面——设计期漏算到这里才暴露。
 
-**台词字数预算**（`craft_default`，中文播报经验值 **5-6 字/秒**，待本模型校准后升 `structural_invariant`）：
+**台词字数预算**（`craft_default`，中文播报经验值 **5-6 字/秒**，按自带配音模型实际语速校准后升 `structural_invariant`）：
 
 | 段时长 | 台词字数上限 | 单段镜头数 |
 |---|---|---|
@@ -164,8 +164,8 @@ triggers:
 | 10s | ≤50-60 字 | 2-3 镜 |
 | 18s | ≤90-108 字 | 3 镜 |
 
-- 句间换气 0.15-0.25s。**台词溢出必然踩爆下游 TTS 时间码**（见 §9 与
-  `skill-optimization-loop.md` 的「段内多行台词时间码连锁漂移」案例）。
+- 句间换气 0.15-0.25s（台词节奏设计参照）。**台词溢出 = 自带配音念不完/被吞词**——配音已烘焙进视频，
+  **不可后期 atempo 提速补救**（旧 §9 本地 TTS 的做法已随配音反转一并废弃），见 §9。
 - 台词必须**适配所在镜头时长**：3 秒的镜头塞不进一整句书面语。
 
 **【音效】段必填或显式声明无**：可写完整内容，也可写「无台词/无旁白，仅环境声 + BGM」，
@@ -194,6 +194,8 @@ triggers:
 - `split_validate.sh <md> <EP>`（stage-kzqs）绿才继续；红则按提示修 md 重跑。
 - `qa_manifest.sh <项目根> <EP>` 绿才继续。它同时校验**世界规则禁用元素**——
   架空 / 全女性类项目必须先建 `world_rules.json`（`references/world-rules.md` §2）。
+- 声音层机检：`validate_prompt.py` H11 已含「发言人首次出场缺语气/音色/语速 → WARN」（见 §9 音色槽）；
+  段视频级 **audio 流**检查在 §8 `qa_videos.sh`（默认必须含 audio = 自带配音已落盘）。
 
 ### 5. 关键帧（首尾帧独立 · 九段式帧词 · ref≤2）★ 最高风险环节
 
@@ -249,14 +251,15 @@ triggers:
 - 唯一硬约束：**同一段不得同时开两个任务**（段内顺序 出帧→渲影）；
   渲影期间不重启 agnes 服务、不改投喂稿/manifest。
 
-### 6. 渲染（无配音版；音轨策略可配）
+### 6. 渲染（自带配音版；音轨策略可配）
 - 驱动：`/home/mirror/Agnes-Agent/tools_deliver/gen_kzqs_videos.py <manifest.json> [段号]`
   （自动注入 `--width 1280 --height 720`；manifest 由 `rebuild_manifest.sh <EP>` 从投喂稿重建；
   **keyframes 双帧插值**：`[kf1,kf2]` 按首尾帧插值，缺双帧才降级 img2vid）。
   ⚠️ **必须用 tools_deliver 版**，stage-kzqs 下的旧副本没有画幅注入。
-- **段视频复制落盘后默认 `ffmpeg -an` 去掉模型自带音轨**（根治个别段落被模型说成英文）。
-- **音轨保留特例**：用户指定保留模型音轨的项目（`KEEP_AUDIO=1`）跳过 `-an`，
-  QA 反向验收**必须含 audio 流**。
+- **段视频默认保留模型自带配音音轨**（不再 `-an`；§9 要求视频词声明各角色音色 + 中文发音锁，
+  **源头控制**而非落盘后一刀切）。
+- **音轨去除特例**：显式 `NO_AUDIO=1` 才去音轨——个别段模型发音跑偏须弃音轨时用
+  （QA 反向验收无 audio 流），不可静默放行，见 §9 无声段处置。
 - **超时分级（2026-09-28 新增，替换 99 小时空转）**：
   出图 300s / 视频 1800s / 渲影 1800s。超时后先 `fetch` 确认一次 → 仍无 → 判 FAIL 写标记。
   `fetch` 续查、**禁止重复建任务**（重复提交 = 付两次钱）。
@@ -267,7 +270,7 @@ triggers:
 - **段视频归一化（concat 前置步，2026-09-29 沉淀）**：渲影产物必带两类溢出——
   ① 画幅：模型原生出 1280×704（1.818）而非 1280×720；② 时长：24fps 帧对齐使 18s 档实为 18.375s。
   统一用本包 `scripts/normalize_segments.py <项目根> [EP ...] [--workers N]`：
-  按 manifest 声明时长裁剪（`-t`）+ 精确 16:9 pad（`setsar=1`）+ `-an` + crf18；
+  按 manifest 声明时长裁剪（`-t`）+ 精确 16:9 pad（`setsar=1`）+ 音频保留（aac 重编码，不再 `-an`）+ crf18；
   覆盖前自动备份 `.review/pre_normalize/` 并登记 `INDEX.jsonl`（原路径+sha256）；幂等可重跑。
   **不归一化 = 整片超 240s 与 concat 时长对账（容差 0.5s）双双必破**（4 段 × 0.375s 已可累积超线）。
   配方见 `render-contracts.md` §5.4。
@@ -292,7 +295,7 @@ triggers:
   | 脚本 | 用法 | 退出码 |
   |---|---|---|
   | `qa_manifest.sh` | `<项目根> <EP> [最大总时长秒]` | 0 全绿 / 1 有 FAIL / 2 用法错 |
-  | `qa_videos.sh` | `<项目根> <EP>`（`KEEP_AUDIO=1` 反向验收） | 同上 |
+  | `qa_videos.sh` | `<项目根> <EP>`（默认要求含 audio=自带配音；`NO_AUDIO=1` 反向验收） | 同上 |
   | `concat_episodes.sh` | `<项目根> <EP1> [EP2] …` | 0 / 1 / 2 |
   | `qa_deliver.sh` | `<项目根> <EP1> [EP2] … [最大总时长秒]` | 0 / 1 / 2 |
 - `qa_manifest.sh` 检查：残词 / duration 档位(3/5/10/18) / 段时长合计 / 段数 / keyframes 存在性与 16:9 /
@@ -300,58 +303,46 @@ triggers:
   **台词字数预算** / 词形软检查 / **世界规则禁用元素**。
   缺 `world_rules.json` 只 warn 不阻断，但架空 / 全女性类项目必须建（`references/world-rules.md`）。
 - `qa_videos.sh` 检查：段存在性 / **缺段检测（对照 manifest）** / 分辨率 16:9 容差 0.05 /
-  时长 vs manifest 容差 1.0s / 孤儿段 / 流构成（默认只允许 `video`）。
+  时长 vs manifest 容差 1.0s / 孤儿段 / 流构成（默认必须 `video+audio`=自带配音；`NO_AUDIO=1` 反向只允许 `video`；`subtitle` 一律禁）。
 - `concat_episodes.sh` 现有检查：**段数 vs manifest 对账** + **输出时长 vs 输入段合计对账**（容差 0.5s）——
   静默丢段当场 FAIL。⚠️ 脚本内**禁止用 `"$ep"-0*` 通配枚举段目录**（只能匹配到 `-01..-09`，
   段数 ≥10 必漏），用 `find -name "$ep-*"` + 纯数字后缀校验。
-- 验收线：整片 ≤240s、单段时长 = duration 档位、分辨率 16:9、**ffprobe 确认无音轨也无字幕流**。
+- 验收线：整片 ≤240s、单段时长 = duration 档位、分辨率 16:9、**ffprobe 确认含 audio（自带配音）流、无 subtitle 流**。
 
-### 9. 配音（本地 Qwen3-TTS，离线）
-- 统一由本包 `scripts/local_tts.py`（离线 Qwen3-TTS）从 SRT 生成：
-  ```bash
-  "C:/Users/Mirror/Documents/Qoder/2026-09-26/f738e157/ttsenv/Scripts/python.exe" `
-    "<包>/scripts/local_tts.py" --srt "<SRT>" --out-dir "<输出目录>" `
-    --voice-map "<voice_map.json>" --atempo 1.25 `
-    --model "C:/Users/Mirror/Documents/Qoder/2026-09-26/f738e157/models/ms/models/Qwen--Qwen3-TTS-12Hz-0.6B-CustomVoice/snapshots/master"
+### 9. 配音（视频生成自带音轨；本地 TTS 已弃用）
+
+> **2026-09-29 反转**：旧链路「渲染落盘 `-an` 去模型音轨 + 本包 `scripts/local_tts.py` 本地 Qwen3-TTS 配音」作废。
+> 配音 = **视频生成时模型自带的音轨**：段视频默认保留 audio 流，台词内容与角色音色由**视频词**直接驱动
+> （§6、`video-prompt-craft.md` §5）。`local_tts.py` 保留为后备（旧项目重制、无音轨旧段修复），**不进入默认流水线**。
+
+- **音色槽（视频词声音层必写；`validate_prompt.py` H11 可判）**：`{}` 台词必须带 **发言人 + 音色定语**，
+  角色首次出声写明 音高/语速/沙哑度（对应 §2 角色差异化四维·音色）：
   ```
-- 角色→音色映射（SRT 每行 `角色：台词`）：女主角/祝祝/苏夜→`serena`，男主角/蒋蒋/林深→`ryan`，
-  同学甲/旁白→`eric`；`--voice-map <json>` 覆盖。voice-map 值两种写法：
-  字符串（仅音色）或对象 `{"voice":"…","instruct":"…"}`。
-- **实测自然语速（2026-09-29，代号烛龙小样本）**：dylan/serena/vivian ≈ 3.7-3.9 字/秒，
-  uncle_fu ≈ 2.9 字/秒；与 §3.1 台词预算的 5-6 字/秒差 1.4-2 倍。
-  **必须 `--atempo` 统一补偿**：`atempo ≈ 设计预算 ÷ 实测语速`（代号烛龙取 1.25）。
-  atempo 保音高（勿用 `asetrate` 改语速，会变调）；**在混音期施加 → 调参零成本、wav 可复用**。
-- **CRLF SRT 是致命坑（2026-09-29 实测）**：Windows 文本模式写出的 SRT 全是 CRLF，
-  按 `"\n\n"` 分块解析会整体退化成 **1 条 cue**（实测 51 → 1），整片配音全错。
-  `parse_srt` 必须先 `content.replace("\r\n","\n").replace("\r","\n")` 归一化再切。
-- **全局防重叠排程（2026-09-29）**：实际起点 = `max(设计起点, 上一行实际结束 + 0.15)`。
-  设计稿按 5-6 字/秒写、模型语速更慢，直排必语音互叠（实测 17 cue 超窗、7 处重叠最深 5.4s）。
-  顺延只让时间码漂移，**不得丢行**——丢行 = 台词从成片消失。
-- 产物：`voice_mix.wav` + 每行 `NNN_1.wav` + **`voice_mix.srt`（按实际排程的时间轴）**。
-  voice_mix.srt 作交付字幕旁挂附件，与音轨同步准于设计稿（先例：角色前缀「角色：」保留）。
-  **voice_mix.wav 实测格式 = PCM 16bit / 48000Hz / 2ch**（混音链 `aresample=48000` +
-  `aformat=…stereo` 的产物；代号烛龙实测 nframes=32219584 → 671.241s）。
-  ⚠️ **不得按 24000Hz/mono 反推时长**——`wav_dur()` 已改读 `soundfile.info`，
-  旧硬编码 24k/mono 是已修缺陷（见 `skill-optimization-loop.md` 案例表）。
-- **混入成片必须给音轨加 `apad`（2026-09-29）**：vox_mix 末尾短于成片时（如 671s vs 690s），
-  `-shortest` 会把成片截到音频长度（EP04 会被砍到 ~45s）。滤镜链：
-  `[1:a]atrim=start=<off>:end=<off+dur>,asetpts=PTS-STARTPTS,apad,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a]` +
-  `-map 0:v -map "[a]" -c:v copy -c:a aac -b:a 192k -shortest -movflags +faststart`；
-  各集按固定偏移切音轨（代号烛龙 EP01/02/03/04 = 0/178/390/630，总 690s）。
-- **本机无 ffmpeg 时**（ttsenv 无 pip）：系统 pip `install --target _tools imageio-ffmpeg`
-  取静态构建，再复制为 `_tools/ffbin/ffmpeg.exe`（`shutil.which("ffmpeg")` 只认全名），
-  并把 `_tools/ffbin` 前置进子进程 PATH。脚本内置守卫：缺 ffmpeg 时 wav 与 srt 先落盘、exit 3，可换机合成。
-- **情绪是独立于音色的第二维（2026-09-28 沉淀；2026-09-29 验证）**：
-  每个角色配 2-3 档情绪（常调/激动/低沉），写进 voice-map。
-  **`instruct=` 中文情绪指令实测可用**（代号烛龙已按角色写入「沉稳/虚弱冰凉/冰冷机械」等档，
-  见该项目 voice_map.json），成本为零；不支持时才退回 ffmpeg 后处理
-  （`atempo` 保音高改语速、`asetrate=N*k,aresample=SR` 改音高）。
-- **标点参与节奏控制**（零成本，对任何 TTS 成立）：`！` 加强语气、`……` 制造断点、
-  `——` 拉长元音（`起——！`）、`，` 自然停顿。写进台词规范。
-- 混音注意：`amix` 必须 `normalize=0` + `dropout_transition=0` + 每路 `aresample` 统一采样率 +
-  **末端 `alimiter=limit=0.95`**。⚠️ **不要用 `volume=14` 手动补偿归一化**（必削波）。
-- **QA 验收（配音版）**：每集 + 连播逐项查 video+audio 流存在、**无 subtitle 流**、
-  时长 ±1.0s、1280x720、aac/2ch/48000Hz、`volumedetect` max_volume < -30dB 判近静音、SRT cue 数。
+  台词：{冰璃（清冷女声·语速中快）：这是……共鸣？}
+  台词：{赤焰（低沉男声·语速缓·沙哑）：别动。}
+  ```
+  `角色：台词` → `角色（音色定语）：台词`。H11 对「发言人首次出场缺语气/音色/语速」报 WARN，未补不算全绿。
+  音色与情绪折叠进**一个定语串**（如「低沉男声·语速缓·沙哑」），不再单独维护 voice-map / instruct。
+- **旁白/OS 同规则**：`『』` 旁白、`{}` 台词一视同仁——视频词声明「旁白用中文普通话、音色中性平稳」。
+- **中文发音锁（每段必写，替代旧 `-an` 治英文的源头手段）**：含台词/旁白的段，声音层首行写
+  「台词一律用中文普通话发音」。语言是模型配音最容易跑偏的一维，**写进 prompt，不落盘后一刀切**。
+- **语速预算（不可后期调速的关键约束）**：配音已烘焙进视频，**没有 atempo/asetrate 后补手段**。
+  §3.1 的 5-6 字/秒预算是设计闸门；每个新视频模型先拍 3 段样片定实测语速
+  （对标旧 Qwen3-TTS 3.7-3.9 字/秒、低于设计预算 1.4-2 倍的历史），预算按实测收紧，宁少勿满。
+- **标点参与节奏控制**（对任何配音模型成立）：`！` 加强语气、`……` 制造断点、
+  `——` 拉长元音（`起——！`）、`，` 自然停顿。写进台词规范，机检可查。
+- **音轨验收（§8 qa_videos/qa_deliver 默认 `video+audio`）**：逐段 + 整集 + 连播查
+  video+audio 流存在、**无 subtitle 流**、时长 ±1.0s、1280x720、aac ≥128k、2ch、
+  `volumedetect` max_volume < -30dB 判近静音（无声段退回重渲）。
+  人工抽查 ≥1 段/集：**台词能否听清 / 音色是否符合角色设定 / 是否串角色说话**。
+- **无声段处置**：某段模型未生成语音 → 判重渲（改词：更明确的「说」+ 音色定语 + 台词原文）；
+  连续 2 次无声仍无 → 上报走 §4.11 回炉，**不允许静默放行**。
+- **`NO_AUDIO=1` 特例**：个别段模型发音严重跑偏（如卷英文）且急需用该段时，显式去音轨——
+  QA 对该模式反向验收无 audio 流，并在台账记 `NO_AUDIO=<理由>`；不得作为常规通道。
+- **STATIC_FALLBACK 豁免**：静帧兜底段（`render-contracts.md` §5.2）本无音轨，
+  落段同时写 `<段>/STATIC_FALLBACK` 标记文件，QA 对标记段豁免 audio 必检（台账列明）。
+- 遗留：旧 `local_tts.py` 的全部工艺（SRT 解析/防重叠/atempo/混音链）不再进入新链路验收入口，
+  仅作后备工具保留（文件头已标弃用）。
 
 ## 二、agnes 服务运维（见 references/agnes-service-ops.md）
 健康检查、systemd 重启、任务 `fetch` 续查、`media.py` 修补先备份（`cp media.py media.py.bak-<原因>-<日期>`）、
@@ -365,9 +356,9 @@ triggers:
 ## 四、纪律清单（血泪浓缩）
 1. **唯一通道 agnes-media**，禁 h3Prompt/Seedance 直连；禁手写生成脚本绕 media.py。
 2. 机检全绿才交付；遇害/虐待/归案等敏感内容淡化（剪影+声音+光影）。
-2b. **视频默认不带字幕也不带音轨**：链路无字幕烧录，段视频渲染后默认已 `-an` 去音轨；
-    配音一律走第 9 步本地 TTS。交付答疑按此口径。
-    **特例**：用户指定保留模型音轨时（`KEEP_AUDIO=1`），QA 反向验收含 audio 流。
+2b. **视频默认带模型自带配音音轨、不带字幕**：链路无字幕烧录；段视频渲染后默认**保留** audio 流
+    （配音随视频生成自带，音色写进视频词，见 §9）。交付答疑按此口径。
+    **特例**：显式 `NO_AUDIO=1` 才去音轨（QA 反向验收无 audio 流）。
 3. 大文件脚本 = 本地写好 → pscp 落盘（ASCII 暂存名）→ 远端 bash 执行；**禁内联 sed -i**。
 4. 远端中文路径 pscp 会乱码：先 `cp` 成 ASCII 名再传。
 5. 本机 PowerShell 吞 `$VAR` 且不支持 `&&`；含中文/括号的命令一律放脚本文件。
@@ -399,16 +390,16 @@ triggers:
 | `agn_health.sh` | 创作台健康检查（进程/端口/日志/重启提示） |
 | `render_ep.sh <manifest> <段号...>` | 调用 tools_deliver 驱动渲染指定段 |
 | `qa_manifest.sh <项目根> <EP> [最大总时长]` | manifest 机检：残词 / duration 档位 / 段数 / 关键帧 16:9 / **ref 纯净度（资产图 + 重复挂载 + refs>2 硬阻断 + 分布统计）** / **台词字数预算（`{}`·`『』`，6 字/秒 × duration）** / 词形软检查（`--` 截断符 / 抽象情绪词 / 概括复用空话） / **世界规则禁用元素（`world_rules.json`，含否定子句剔除 + 白名单）** |
-| `qa_videos.sh <项目根> <EP>` | 段视频机检（含缺段/孤儿段检测） |
-| `concat_episodes.sh <项目根> <EP...>` | concat 拼接（段数+时长双对账，覆盖前自动备份 + sha256 登记） |
-| `qa_deliver.sh <项目根> <EP...> [最大总时长]` | 全链验收（收集 FAIL 数组，真会 exit 1） |
-| `normalize_segments.py <项目根> [EP...] [--workers N]` | 段视频归一化（concat 前置步）：按声明时长裁剪 + 精确 16:9 pad + `-an`；备份 `.review/pre_normalize/` + INDEX.jsonl；幂等（见 §6/§8） |
-| `local_tts.py` | 本地 Qwen3-TTS 从 SRT 生成中文配音（见 §9） |
+| `qa_videos.sh <项目根> <EP>` | 段视频机检（含缺段/孤儿段检测；默认要求 `video+audio`=自带配音，`NO_AUDIO=1` 反向只允许 video） |
+| `concat_episodes.sh <项目根> <EP...>` | concat 拼接（段数+时长双对账，覆盖前自动备份 + sha256 登记；音频随 `-c copy` 透传） |
+| `qa_deliver.sh <项目根> <EP...> [最大总时长]` | 全链验收（收集 FAIL 数组，真会 exit 1；默认要求含 audio） |
+| `normalize_segments.py <项目根> [EP...] [--workers N]` | 段视频归一化（concat 前置步）：按声明时长裁剪 + 精确 16:9 pad + 音频保留（aac 重编码）；备份 `.review/pre_normalize/` + INDEX.jsonl；幂等（见 §6/§8） |
+| `local_tts.py` | **已弃用**（2026-09-29）：本地 Qwen3-TTS 配音仅作后备，不进入默认流水线（默认配音 = 视频自带音轨，见 §9） |
 
 ## 六、参考文件
 | 文件 | 定位 |
 |---|---|
-| `references/render-contracts.md` | **渲染层唯一权威**：规则分级 / 画幅锁 / manifest 契约 / 段缝 / 关键帧（ref 纪律·资产禁令·九段式·禁令·回炉路径）/ 视频词分层 / 拼接 / 字幕边界 / 无配音 / 成本台账 |
+| `references/render-contracts.md` | **渲染层唯一权威**：规则分级 / 画幅锁 / manifest 契约 / 段缝 / 关键帧（ref 纪律·资产禁令·九段式·禁令·回炉路径）/ 视频词分层 / 拼接 / 字幕边界 / 自带配音 / 成本台账 |
 | `references/keyframe-craft.md` | **帧词工艺**（静态定格）：九段式配方与顺序理由 / 纵深三段 / 焦点层级 / 连戏锚 / EXCLUDE 按帧定制 / 形容词纪律 / 自检清单 / 失败处置五步 |
 | `references/video-prompt-craft.md` | **视频词工艺**（动态分镜）：分层禁令 / 段内时间轴分拍 / 运动幅度白名单 / 情绪具象化 / 受控词表 / 声音符号 / 末尾固定禁令 / **事前复杂度预算 7 轴** |
 | `references/skill-optimization-loop.md` | 复盘→根因→修复→沉淀→复核；规则分级；**缺陷处置五选**；已沉淀案例表；**外部 skill 比对机制 + 搬运前四问 + 明确不引入表** |

@@ -53,6 +53,108 @@ def _filter_internal_tokens(node: str, run_id, text: str, state: dict) -> str:
         return ""
     return text
 
+
+def _supplement_sse_response(thread_id: str, message: str, answer: str = None, note: str = None):
+    """DAG 执行期插话的轻量 SSE：不启动第二个 graph run。
+
+    两种形态（由参数区分）：
+    - answer=None：普通插话入队，回一句"已加入进行中任务"，然后立即 done，
+      让前端本轮结算、解锁发送器，等正在执行的 executor 消费补充。
+    - answer=<文本>：查询类插话的只读回答，直接把 answer 作为最终回复推给前端
+      （不建 run、不入队、不调 LLM），同样立即 done。
+    与 chatbot 入队文案保持一致（builder.py 的 _ 分支），用户感知统一。
+    """
+    from app.graph.builder import _looks_like_query
+    if answer is not None and answer.strip():
+        _is_q = _looks_like_query(message)
+        _note = (note or "[执行期间插话·只读回答]") if _is_q else (note or "（执行期间插话）")
+        _text = (
+            f"{answer}\n\n{_note}"
+        )
+    else:
+        _pui = message.strip()[:2000]
+        _text = (
+            f"收到，已将你的消息加入进行中的任务，执行器会在处理下一节点时结合它继续推进"
+            f"（计划完成前我不会另起炉灶）：\n\n> {_pui}"
+        )
+    try:
+        add_log_entry("info" if answer is None else "info",
+                      f"DAG 执行中{'补充消息入队' if answer is None else '进度查询只读回答'}: {message[:80]}")
+    except Exception:
+        pass
+    # 与 chatbot 分流路径保持一致的落库：用户消息 + 回复都写进 messages 表，
+    # 让 /api/messages 回放与前端展示一致（切会话/刷新后能看到这条插话）。
+    try:
+        from app.memory import MemoryManager as _MM
+        _mm = _MM(db_path=DB_PATH, thread_id=thread_id)
+        _mm.add_message(thread_id, "user", message)
+        _mm.add_message(thread_id, "assistant", _text)
+    except Exception:
+        pass
+
+    async def _gen():
+        yield "data: " + json.dumps({"step": "final", "node": "chatbot", "text": _text},
+                                    ensure_ascii=False) + "\n\n"
+        yield "data: " + json.dumps({"step": "done"}, ensure_ascii=False) + "\n\n"
+
+    return StreamingResponse(_gen(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache", "Connection": "keep-alive", "Access-Control-Allow-Origin": "*",
+    })
+
+
+def _ask_ack_sse_response(thread_id: str, answer: str):
+    """ask 选项卡答复已被受理的轻量确认 SSE。
+
+    答复本身不是「插话」也不是「新任务」：executor 正挂起在进程内注册表里等这个
+    答案，submit_answer 已经唤醒它。这里只回一句确认让前端解锁发送器并结束本轮，
+    后续 executor 的进展由它自己已建立的 SSE 继续推。
+
+    注意前端 respondAsk() 发的是空 message（答案在 answer 字段），所以这里不往
+    messages 表写空的用户消息，只落一条 assistant 确认。
+    """
+    _text = f"已收到你的选择，执行继续：\n\n> {str(answer or '')[:500]}"
+    try:
+        add_log_entry("info", f"[ask] 用户答复已提交: {str(answer or '')[:80]}")
+    except Exception:
+        pass
+    try:
+        from app.memory import MemoryManager as _MM
+        _mm = _MM(db_path=DB_PATH, thread_id=thread_id)
+        _mm.add_message(thread_id, "assistant", _text)
+    except Exception:
+        pass
+
+    async def _gen():
+        yield "data: " + json.dumps({"step": "final", "node": "chatbot", "text": _text},
+                                    ensure_ascii=False) + "\n\n"
+        yield "data: " + json.dumps({"step": "done"}, ensure_ascii=False) + "\n\n"
+
+    return StreamingResponse(_gen(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache", "Connection": "keep-alive", "Access-Control-Allow-Origin": "*",
+    })
+
+
+@router.get("/api/chat/pending-ask")
+async def pending_ask_endpoint(request: Request = None, thread_id: str = None):
+    """查询该 thread 当前是否有待答复的 ask_user 问题。
+
+    刷新页面后 ask 卡片会随历史回放成只读气泡，但进程内的注册表还挂着问题、
+    executor 仍在阻塞等答案——这里把待答问题原样吐给前端，让它重新渲染成可交互卡片。
+    """
+    try:
+        _u = getattr(getattr(request, "state", None), "username", None) or current_user()
+    except Exception:
+        _u = None
+    try:
+        from app.userctx import current_tid as _user_tid
+        _tid = _user_tid(_u)
+    except Exception:
+        _tid = "default"
+    _tid = thread_id or _tid
+    from app.graph import ask_registry
+    return {"pending": ask_registry.get_pending(_tid)}
+
+
 @router.post("/api/chat")
 async def chat_endpoint(payload: dict, request: Request = None):
     """主对话窗口的发送端点（流式 SSE 推送 token）。
@@ -79,19 +181,32 @@ async def chat_endpoint(payload: dict, request: Request = None):
     except Exception as e:
         return JSONResponse({"error": f"用户 graph 构建失败: {e}"}, status_code=500)
 
-    # resume 模式：从中断点继续（payload 带 resume=true, allow, mode）
+    # resume 模式：从中断点继续（payload 带 resume=true, allow, mode 或 answer）
     is_resume = bool((payload or {}).get("resume"))
     if is_resume:
         resume_val = {"allow": bool((payload or {}).get("allow", False))}
         mode = (payload or {}).get("mode")
         if mode in ("per_ask", "session_allow", "always_allow"):
             resume_val["mode"] = mode
+        # ask_user 选项卡的答案：预置选项或用户自定义输入，经 interrupt resume 回传，
+        # 由 executor 的 ask_user 工具消费（resume_val 是 interrupt() 的返回值）。
+        _answer = (payload or {}).get("answer")
+        if _answer is not None:
+            resume_val["answer"] = str(_answer)[:4000]
         inputs = Command(resume=resume_val)
     else:
         message = (payload or {}).get("message", "").strip()
         if not message:
             return JSONResponse({"error": "message 不能为空"}, status_code=400)
         inputs = {"messages": [("user", message)]}
+        # 每轮新用户消息显式清空单次 run 的手握信号（PendingPlan/PendingUserInput）。
+        # 它们只允许在本次 run 内由 chatbot/工具写入并消费；若从 checkpointer 恢复的
+        # state 里残留上一 run 的 pending_plan（LangGraph SqliteSaver 重启/中断后可能把
+        # 半程 writes 回到 state），route_after_chatbot 会误判去 planner，用旧目标重规划、
+        # 覆盖正在执行的任务——2026-09-29 线上根因（用户插话被拉去 planner 建旧目标新计划）。
+        # resume（审批续跑）分支保持原样，因为中断恢复需保留 run 内状态。
+        inputs["pending_plan"] = None
+        inputs["pending_user_input"] = None
 
     # 每用户当前会话：普通数据一律落在该用户自己的 .thread_id，不读全局 _CONFIG
     try:
@@ -108,6 +223,57 @@ async def chat_endpoint(payload: dict, request: Request = None):
         _kb_list = [str(k) for k in _kbs if str(k or "").strip()]
         if _kb_list:
             config["configurable"]["selected_kbs"] = _kb_list
+
+    # 同 thread 运行保护（2026-09-29 插话入院）：DAG 多节点执行期间，该 thread
+    # 的 graph.run 一直在跑（SSE 长连接，几分钟到几十分钟）。此时前端仍允许发新消息
+    # （插话），后端不能再启动第二个 run（并发写 checkpointer 冲突 + state 互相覆盖）；
+    # 改走"执行期插话分流"通道（不启动新 run，见下方）：
+    #   - 查询类插话（进度/状态/多久…短问句）→ 直接只读回答当前 DAG 进度摘要（纯 DB 查询，
+    #     不调 LLM、不动执行状态），不再把进度问句塞进"进行中任务"队列
+    #   - 其余插话 → 进补充队列，正在执行的 executor 下批节点消费注入，
+    #     本请求立即返回一条"已加入进行中任务"的轻量 SSE（前端借此结算本轮）
+    # run 真正启动时才占用锁（try_lock_run 拿不到 = 已有 run），
+    # 释放放在 run_graph() 的 finally 里（只有真正跑起来的 run 才需要释放）。
+    from app.graph.run_registry import try_lock_run, push_supplement as _push_supplement
+    from app.graph.builder import _dag_has_unfinished_work, _looks_like_query, _dag_progress_summary
+
+    # ask 选项卡的答复：必须先于 run 锁判断。executor 正挂起在进程内注册表里等这个
+    # 答案（线程池 worker 不能用 langgraph interrupt），submit_answer 直接唤醒它。
+    # 答复既不是插话也不是新任务，绝不能落到「启动新 run」路径上。
+    if is_resume and str((payload or {}).get("mode") or "") == "ask":
+        from app.graph import ask_registry
+        _ans = str((payload or {}).get("answer") or "")
+        _hit = ask_registry.submit_answer(thread_id, _ans,
+                                          str((payload or {}).get("ask_id") or ""))
+        if _hit:
+            return _ask_ack_sse_response(thread_id, _ans)
+        # 注册表里没有待答问题（超时/进程重启已作废）：明确告知，不静默当插话处理
+        return JSONResponse({"error": "该问题已超时或已失效，请让任务重新提问"},
+                             status_code=409)
+
+    # 执行期插话分流：必须先于 try_lock_run 判断。
+    # 若放在锁之后，当 run 锁恰好空闲（上一 run 已退出但 DAG 仍是 executing 的
+    # 陈旧状态）时，进度问句会走正常路径启动一个新的 graph run——2026-10-01
+    # Test 线程「进度如何了」触发 executor 就是这个坑。
+    if not is_resume and _dag_has_unfinished_work(thread_id):
+        if _looks_like_query(message):
+            _progress = _dag_progress_summary(thread_id)
+            if _progress:
+                # 进度查询：只读回答当前进度，不建 run、不入队、不改执行状态。
+                return _supplement_sse_response(thread_id, message, answer=_progress,
+                                                note="（执行期间插话：只读回答，不回写任务）")
+        _push_supplement(thread_id, message)
+        return _supplement_sse_response(thread_id, message)
+
+    _run_owned = try_lock_run(thread_id)
+    if not _run_owned:
+        if is_resume:
+            # resume（审批续跑）无法入队补充——上一 run 已中断且锁被 finally 释放，
+            # 正常不会出现在锁占用中；出现则说明有并发 run，提示稍后再试。
+            return JSONResponse({"error": "同一会话已有任务在执行，请稍后再试"}, status_code=409)
+        # 锁被占但没有未收敛 DAG：只是普通对话轮次在跑（几秒即结束），
+        # 消息入队没人消费会被丢弃——明确拒绝，避免用户消息静默丢失。
+        return JSONResponse({"error": "回复仍在进行中，请先等本轮结束或点「⏹ 停止」"}, status_code=409)
 
     # resume 即审批决策：把 allow/mode 回填到最近一条审批提问记录（重启后可完整回放审批卡）
     if is_resume:
@@ -301,7 +467,7 @@ async def chat_endpoint(payload: dict, request: Request = None):
                                 # updates 模式：payload 是 {node: update_dict}
                                 for node, upd in (payload or {}).items():
                                     if node == "__interrupt__":
-                                        # 工具审批：upd 本身就是 interrupt tuple（langgraph 1.x）
+                                        # 工具审批/ask_user 选项卡：upd 本身就是 interrupt tuple（langgraph 1.x）
                                         try:
                                             int_list = upd if isinstance(upd, (list, tuple)) else (upd.get("__interrupt__") or ())
                                             for int_info in int_list:
@@ -313,11 +479,17 @@ async def chat_endpoint(payload: dict, request: Request = None):
                                                     "question": q_text,
                                                     "command": c_text,
                                                     "mode": m_mode,
+                                                    "kind": val.get("kind", "approval") if isinstance(val, dict) else "approval",
+                                                    "options": val.get("options", []) if isinstance(val, dict) else [],
+                                                    "allow_custom": val.get("allow_custom", True) if isinstance(val, dict) else True,
                                                 }})
                                                 _persist_event("approval",
                                                                content=(q_text or c_text or "审批请求")[:200],
                                                                meta={"question": q_text, "command": c_text,
-                                                                     "mode": m_mode, "allow": None})
+                                                                     "mode": m_mode,
+                                                                     "kind": val.get("kind", "approval") if isinstance(val, dict) else "approval",
+                                                                     "options": val.get("options", []) if isinstance(val, dict) else [],
+                                                                     "answer": None})
                                         except Exception as ex:
                                             sync_q.put({"step": "approval", "data": {"question": str(ex), "command": "", "mode": "per_ask"}})
                                         # interrupt 后 graph 暂停，本流到此结束（用户操作后走 /api/chat resume）
@@ -427,6 +599,14 @@ async def chat_endpoint(payload: dict, request: Request = None):
             await queue.put({"step": "error", "message": str(e)})
         finally:
             await queue.put({"step": "__close__"})
+            # 本次 run 是这一 thread 的唯一 run（chat_endpoint 里 try_lock_run 占的锁）
+            # 到 graph 收敛/异常/被中断收尾时归还，解锁后该 thread 才能正常启动新 run。
+            if _run_owned:
+                from app.graph.run_registry import release_run
+                try:
+                    release_run(thread_id)
+                except Exception:
+                    pass
             # 移除本次 SSE 连接的 listener queue：否则每次刷新页面都会在
             # _store._event_listeners 累计一个无界 Queue，add_event 每次都往里 put
             # （最多 200KB/条的 LLM 全量输入输出），进程内存会涨到 GB 级

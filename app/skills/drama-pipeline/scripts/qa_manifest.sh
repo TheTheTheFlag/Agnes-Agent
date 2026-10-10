@@ -116,7 +116,7 @@ for s in segs:
     cap = int(d) * 6          # 6 字/秒 为上限档（5-6 字/秒）
     if n_cjk > cap:
         budget_fail += 1
-        fails.append("%s 台词 %d 字 > 上限 %d 字（%ds × 6 字/秒），会踩爆下游 TTS 时间码"
+        fails.append("%s 台词 %d 字 > 上限 %d 字（%ds × 6 字/秒），会有台词念不完/被吞词（配音烘焙进视频，不可后期调速）"
                      % (s.get('seg'), n_cjk, cap, d))
 if budget_skip:
     print("  WARN %d 段未检出 {} / 『』 台词标记，跳过预算（建议采纳 SKILL.md §3.1 声音符号契约）"

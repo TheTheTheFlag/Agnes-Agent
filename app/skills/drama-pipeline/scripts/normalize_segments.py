@@ -3,9 +3,9 @@
 
 - 按 manifest 声明时长裁剪（-t <decl>）：消除 24fps 帧对齐溢出（18s 档实为 18.375s）
 - 精确 16:9 pad：等比缩放 + 居中黑边（1280x704 -> 1280x720，setsar=1；见 render-contracts §1.1）
-- 去音轨（-an）、libx264 crf18 preset medium、+faststart
+- 音频保留（-c:a aac 重编码，默认不再 -an——自带配音是交付物）、libx264 crf18 preset medium、+faststart
 - 覆盖前备份到 <R>/.review/pre_normalize/ 并登记 INDEX.jsonl（路径 + sha256）
-- 幂等：已达标（1280x720 / 声明时长 / 无音轨）的段直接 SKIP
+- 幂等：已达标（1280x720 / 声明时长 / 含 audio 流；STATIC_FALLBACK 标记段豁免 audio）的段直接 SKIP
 用法：normalize_segments.py <项目根> [EP ...] [--workers N]
   不给 EP 时扫描 <R>/投喂稿/*/manifest.json 全量；兼容旧写法第二参直接给并行度数字
 退出码：0 全 OK/SKIP；1 有 FAIL；2 用法/缺 manifest
@@ -90,7 +90,8 @@ def do_seg(seg, decl, tw, th):
     info = probe(mp4)
     if info is None:
         return (seg, 'PROBE_FAIL', '')
-    if (info['w'] == tw and info['h'] == th and not info['audio']
+    static_fb = os.path.exists(os.path.join(R, seg, 'STATIC_FALLBACK'))
+    if (info['w'] == tw and info['h'] == th and (info['audio'] or static_fb)
             and abs(info['dur'] - decl) <= 0.05):
         return (seg, 'SKIP', 'already %dx%d %.3fs' % (info['w'], info['h'], info['dur']))
 
@@ -109,14 +110,15 @@ def do_seg(seg, decl, tw, th):
     tmp = mp4 + '.norm.tmp.mp4'
     cmd = ['ffmpeg', '-y', '-i', mp4, '-vf', vf, '-t', str(decl),
            '-c:v', 'libx264', '-crf', '18', '-preset', 'medium',
-           '-pix_fmt', 'yuv420p', '-an', '-movflags', '+faststart', tmp]
+           '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k',
+           '-movflags', '+faststart', tmp]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0 or not os.path.exists(tmp):
         return (seg, 'FFMPEG_FAIL', (r.stderr or '')[-300:].replace('\n', ' '))
     os.replace(tmp, mp4)
 
     v2 = probe(mp4)
-    if (v2 is None or v2['w'] != tw or v2['h'] != th or v2['audio']
+    if (v2 is None or v2['w'] != tw or v2['h'] != th or (not v2['audio'] and not static_fb)
             or abs(v2['dur'] - decl) > 0.1):
         return (seg, 'VERIFY_FAIL', json.dumps(v2))
     return (seg, 'OK', '%dx%d/%.2fs -> %dx%d/%.3fs fps%s' % (

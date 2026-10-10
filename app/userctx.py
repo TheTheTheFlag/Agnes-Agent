@@ -88,6 +88,15 @@ def user_paths(username: Optional[str] = None) -> UserPaths:
     )
 
 
+def deliverables_rel(username: Optional[str] = None) -> str:
+    """交付物目录相对项目根的写法（data/users/<用户名>/deliverables），供提示词注入。
+
+    与主对话模板注入的 {{deliverables_dir}} 保持同一风格（相对 BASE_DIR），
+    让 DAG 规划/执行节点拿到与 chatbot 节点一致的路径约定。
+    """
+    return os.path.relpath(user_paths(username).deliverables_dir, BASE_DIR)
+
+
 def ensure_user_dirs(username: Optional[str] = None) -> UserPaths:
     p = user_paths(username)
     for d in (p.data_dir, p.uploads_dir, p.deliverables_dir, p.rag_root, p.skills_dir):

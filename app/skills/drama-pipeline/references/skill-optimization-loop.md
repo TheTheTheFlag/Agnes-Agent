@@ -63,7 +63,7 @@
 | 交付返工 | 无逐段机检 | `validate_prompt.py --model agnes` 全绿才交付；split_validate 分段守门 |
 | 台账失联 | 资产产出未登记 | assets/manifest.json + 剧组产出册 + 资产图册 强制登记（含总数行） |
 | 用户疑问"视频带不带字幕" | 未沉淀链路字幕边界结论 | ffprobe 三样片无 subtitle 流；驱动/media.py 无烧录逻辑；沉淀 render-contracts §7 + 流核验 + 交付话术 |
-| 原音频轨个别段生成英文配音 | 模型原生配音跑偏，人工挑段不可靠 | 渲染链路永久 `-an` 去模型音轨（§8）；配音改由本包 `scripts/local_tts.py` 本地 Qwen3-TTS（SKILL.md §9） |
+| 原音频轨个别段生成英文配音 | 模型原生配音跑偏，人工挑段不可靠 | 【2026-09-29 反转】不再 `-an` 一刀切：防线改为 视频词中文发音锁 + 音色槽（H11）+ QA audio 流，配音 = 视频自带音轨（SKILL.md §9）；`local_tts.py` 降级后备 |
 | 图片/视频出完无法逐项审核重生成 | 流水线一次性产出，缺审核环节 | 8081 工作台「短剧审核」tab：资产改词重生成、分镜改词/直接重渲、确认后合并 |
 | 改 agnes 后端多文件后服务卡死 | uvicorn 热重载多文件变更卡住 | 多文件补丁后直接 `systemctl restart agnes-agent` |
 | 段间画面跳变 | 无过渡规则 | ~~上游末帧复制为下游首帧（0 新图）~~ → **2026-09-27 已废止**：坏帧沿段缝一路传染无法自愈。改为每帧独立出图 + 帧词画面连续（render-contracts §3）。⚠️ 外部 skill 的「首尾帧素材」是跨镜头**另起图**，不是帧复制，不得据此复活 |
@@ -82,9 +82,10 @@
 | **形象变更回炉说「更新受影响的帧词」，却没说怎么判断「受影响」** | `render-contracts.md` §4.11 步骤 5 是纯祈使句，没有判据也没有清单格式 → 实际执行时靠记忆 | 补**影响面清单模板**（变更资产/受影响段/需改 refs/需改帧词段/需重出帧/需重渲段），判据写死为「`kf_plan.refs` 含该资产 **或** 帧词 `[CHARACTER]` 段点名该角色，一律进清单」；清单**必须落盘**。同时补：旧版标 `superseded` 登记 `relationships`、变体 ID 走 `{类型}-{ID}-{状态}[-vNN]`、下游产物必须引用 canonical ID + 版本、派生图登记 `derived_from` |
 | **世界规则只有口头约定，没有机检** | 架空全女性设定只存在于剧本描述与我的记忆里；模型不区分「设定」与「描述」，帧词里写「她看向窗外的男爵」模型就会画出来 | 新建 `references/world-rules.md`（三型分离：世界不变量 / **禁用元素**（唯一可机检的一型）/ 偏好元素）+ `world_rules.json` + `qa_manifest.sh` 扫描（视频词 / 帧词 / 资产 prompt / 投喂稿，跳过【强制禁止项】段）。**处置不是加词**：`❌「男爵的军旗」→ ✅「霜华军团的军旗」`——改设定归属，不删信息 |
 | **远端脚本被装成 0 字节** | scp 静默失败（`Connection closed`），安装脚本只查 `[ -f ]` 不查非空，`cp` 把备份好的好文件覆盖成空的 | 安装脚本加**非空断言**（`stat -c%s > 200`）+ `bash -n` 语法自检 + 装后复检 + grep 写死路径 |
-| **配音情绪层完全空白** | Qwen3-TTS `generate_custom_voice(..., instruct=None)`，无 rate/pitch；角色↔音色压成 1:1 一层 | 沉淀「情绪是独立于音色的第二维，每角色 ≥2-3 档」+ 标点节奏规则 + 落地顺序（先验 `instruct=`，不行则 `atempo`+`asetrate` 后处理） |
+| **配音情绪层完全空白** | Qwen3-TTS `generate_custom_voice(..., instruct=None)`，无 rate/pitch；角色↔音色压成 1:1 一层 | 沉淀「情绪是独立于音色的第二维，每角色 ≥2-3 档」+ 标点节奏规则 + 落地顺序（先验 `instruct=`，不行则 `atempo`+`asetrate` 后处理）。（本地 TTS 已弃用，此案保留为历史；情绪档现折进视频词音色槽，见 SKILL.md §9） |
 | **`local_tts.py` 段内多行台词时间码连锁漂移** | `except` 分支后仍执行 `cursor += dur+0.15`，`dur` 用的是**上一条的残值**；且段内 `cursor` 递增**不校验是否越过 `c["end"]`**，会溢出压到下一 cue | 见 §9 已修：异常时 `dur=None` 不推进 cursor、段内累计超 `c["end"]` 即停并告警、`wav_dur` 改用 `soundfile.info` 不再硬编码 24k/mono |
 | **混音 `dropout_transition=3` 隐患** | 某路输入结束后其余路增益在 3s 内被重新归一化抬升；当前无 BGM 听不出，**一旦引入 BGM，每句台词结束瞬间 BGM 突响** | 改 `dropout_transition=0` + `aresample=48000,aformat=stereo` 统一 + 末端 `alimiter=limit=0.95`。⚠️ 不抄外部的 `volume=14` 手动补偿（必削波） |
+| **配音链路反转：本地 TTS → 视频自带音轨（2026-09-29）** | 旧链路依赖本地 Qwen3-TTS（离线模型 + atempo 补偿 + 混音链），与「生成模型视频自带配音」能力重复且多一份维护；且模型音轨被 `-an` 白白丢弃 | 渲染默认保留模型音轨、`NO_AUDIO=1` 特例才去；视频词音色槽（H11 可判）+ 中文发音锁；qa_videos/qa_deliver 默认要求 audio；normalize_segments 保留音频；`local_tts.py` 弃用为后备（SKILL.md §9 / render-contracts §8） |
 
 ## 外部 skill 比对机制（2026-09-28 新增）
 
@@ -101,7 +102,7 @@
 |---|---|
 | 四宫格固定方案数 | 平台差异，ours 单方案直出 |
 | 每镜时长按台词字数折算 | ours 的 3/5/10/18 档位是与用户协商过的硬约束 |
-| 模型音轨分层保留 | ours `-an` 一刀切更省，且根治了英文配音 |
+| ~~模型音轨分层保留~~ | 【2026-09-29 反转】已改为**默认保留**模型音轨作交付配音（render-contracts §8）；`NO_AUDIO=1` 才弃 |
 | 通用安全框式交付面避让 | ours 16:9 固定，无多平台交付需求 |
 | `pad` 出的 9:16 竖版 | 有效画面仅 31.6%，68% 黑边，**黑边片不算交付** |
 | `amix` 用 `volume=14` 手动补偿归一化 | 必削波失真；正解 `normalize=0` + 末端 `alimiter` |

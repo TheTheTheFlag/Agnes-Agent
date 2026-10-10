@@ -20,17 +20,6 @@ const IMAGE_RATIO_PX = {
   "1:1": "1024×1024", "3:4": "864×1152", "4:3": "1152×864", "16:9": "1312×736",
   "9:16": "736×1312", "2:3": "832×1248", "3:2": "1248×832", "21:9": "1568×672",
 };
-const IMAGE_STYLE_CHIPS = [
-  ["电影写实", "，电影级写实风格，广角构图，柔和自然光，高视觉密度"],
-  ["赛博朋克", "，赛博朋克夜景，霓虹招牌，湿滑路面反光，冷青色与品红主调"],
-  ["产品摄影", "，商业产品摄影，纯色摄影棚背景，柔和阴影，清晰细节"],
-  ["奇幻插画", "，奇幻插画风格，丰富细节，浓郁色彩，梦幻氛围"],
-  ["水墨国风", "，传统水墨画风格，留白构图，轻柔晕染，诗意意境"],
-  ["3D 渲染", "，高质感 3D 渲染，PBR 材质，柔和全局光照"],
-  ["扁平插画", "，扁平矢量插画风格，明快配色，简约几何构图"],
-  ["电影海报", "，电影海报式构图，顶部留白区，高对比戏剧光"],
-];
-
 const Studio = {
   mode: "txt2img",
   refs: [],           // [{path, name, role}]
@@ -51,82 +40,81 @@ const _GENERATE_TIMEOUT = 120000; // 提交请求超时 120s（仅前端，不�
 /* ---------- 主渲染 ---------- */
 window.renderStudioTab = async function renderStudioTab(el) {
   el.innerHTML = `
-    <div class="st">
-      <div class="st-head">
-        <div class="st-head-title">🎨 图片创作工作台</div>
-        <div class="st-head-hint">Agnes Image 2.5 / 2.1 / 2.0 Flash · 文生图 / 图生图 / 多图合成 · 全部档位当前免费</div>
+    <div class="st woo">
+      ${studioShell.hero("你好，今天想要创作什么？", "")}
+      <div class="woo-panel">
+        <div class="woo-headrow">
+          ${studioShell.typeButton("stType", "image")}
+          <div class="woo-model-wrap">
+            <select class="d-input st-param woo-model-select" id="stModel"></select>
+          </div>
+          <div class="st-mode-seg woo-mode" id="stModeSeg"></div>
+        </div>
+
+        <div class="woo-input-wrap">
+          <textarea id="stPrompt" class="woo-input" rows="5" placeholder="上传参考图、输入文字或 @主体，描述你想生成的图片。"></textarea>
+          <button type="button" id="stAddRef" class="woo-attach" title="添加参考图">＋</button>
+        </div>
+        <div class="woo-input-status" id="stPromptHint"></div>
+
+        <div style="display:flex;gap:8px;margin-top:10px;justify-content:flex-end">
+          <button type="button" class="d-btn sm" id="stCopyBtn">复制</button>
+          <button type="button" class="d-btn sm" id="stClearBtn">清空</button>
+        </div>
+
+        <div class="st-block woo-refblock" id="stRefBlock" style="display:none;margin-top:10px">
+          <div class="woo-refhd">
+            <span class="st-ref-hint" id="stRefHint"></span>
+            <span class="d-empty" style="margin:0">图生图 1 张 · 多图合成 ≥2 张 · 顺序即"图1 / 图2"</span>
+          </div>
+          <div class="woo-refs" id="stRefs"><div class="d-empty">暂无参考图</div></div>
+          <div class="d-row" id="stRefNoteRow" style="margin-top:6px;flex-wrap:wrap;gap:2px 12px"></div>
+          <input type="file" id="stRefFile" accept="image/*" multiple style="display:none">
+        </div>
+
+        <div class="woo-bar">
+          <button type="button" id="stRatioBtn" class="woo-ratio-btn"><b>16:9</b><span class="woo-caret">▾</span></button>
+          <div class="woo-res-seg" id="stResSeg">
+            <button type="button" data-sz="2K" class="active">2K</button>
+            <button type="button" data-sz="4K">4K</button>
+          </div>
+          <button type="button" id="stCountBtn" class="woo-count-btn"><b>4</b> 张<span class="woo-caret">▾</span></button>
+          <div style="flex:1"></div>
+          <button type="button" class="woo-submit" id="stGen" title="生成">↑</button>
+          <span class="d-empty st-busy" id="stBusy" style="display:none"></span>
+        </div>
       </div>
-      <div id="stKeyBanner" class="st-banner hidden"></div>
-      <div class="st-cols">
-        <section class="st-left">
-          <div class="st-mode-seg" id="stModeSeg"></div>
 
-          <div class="st-block" id="stRefBlock" style="display:none">
-            <div class="st-block-hd"><span>参考图</span><span class="st-ref-hint" id="stRefHint"></span></div>
-            <div class="st-refs" id="stRefs"><div class="d-empty">暂无参考图</div></div>
-            <div class="d-row" style="margin-top:8px">
-              <button class="d-btn" id="stAddRef">＋ 添加参考图</button>
-              <span class="d-empty" style="margin:0">图生图 1 张 · 多图合成 ≥2 张 · 顺序即"图1 / 图2"</span>
-            </div>
-            <div class="d-row" id="stRefNoteRow" style="margin-top:6px;flex-wrap:wrap;gap:2px 12px"></div>
-            <input type="file" id="stRefFile" accept="image/*" multiple style="display:none">
-          </div>
+      <div id="stKeyBanner" class="st-banner woo-banner hidden"></div>
 
-          <div class="st-block">
-            <div class="st-block-hd"><span>提示词</span><span class="st-block-tip" id="stPromptHint"></span></div>
-            <textarea class="st-prompt" id="stPrompt" rows="4" placeholder=""></textarea>
-            <div class="st-chips">
-              <span class="st-chip-title">样式速选</span>
-              ${IMAGE_STYLE_CHIPS.map(([k]) => `<button class="st-chip" data-style="${k}">${k}</button>`).join("")}
-              <button class="st-chip st-chip-clear" data-style="__clear">清空</button>
-            </div>
-          </div>
-
-          <div class="st-block">
-            <div class="st-block-hd"><span>参数</span></div>
-            <div class="d-row"><label>模型</label>
-              <select class="d-input st-param" id="stModel"></select>
-              <span class="st-model-note" id="stModelNote"></span></div>
-            <div class="d-row"><label>档位</label>
-              <select class="d-input st-param" id="stSize"><option>1K</option><option selected>2K</option><option>3K</option><option>4K</option></select></div>
-            <div class="d-row"><label>宽高比</label>
-              <select class="d-input st-param" id="stRatio"></select>
-              <span class="d-empty" style="margin:0" id="stPx"></span></div>
-            <div class="d-row"><label>生成张数</label>
-              <select class="d-input st-param" id="stCount"><option>1</option><option>2</option><option>3</option><option>4</option></select>
-              <span class="d-empty" style="margin:0">同参数多张，逐个出图</span></div>
-          </div>
-
-          <div class="st-actions">
-            <button class="d-btn primary st-gen" id="stGen">✦ 生成图像</button>
-            <span class="d-empty st-busy" id="stBusy" style="display:none"></span>
-          </div>
-        </section>
-
-        <section class="st-right">
-          <div class="st-gallery-hd">
-            <span class="st-gallery-title">🗂 作品库</span>
-            <span class="d-empty" style="margin:0" id="stCountLbl"></span>
-            <span class="d-empty" style="margin:0 8px;color:#c0392b;display:none" id="stSelLbl"></span>
-            <div style="flex:1"></div>
-            <span id="stSelBar" style="display:none">
-              <button class="d-btn sm" id="stSelAll">全选</button>
-              <button class="d-btn sm danger" id="stSelDel" disabled>删除选中</button>
-              <button class="d-btn sm" id="stSelCancel">取消</button>
-            </span>
-            <button class="d-btn sm danger" id="stBatchDel">🗑 批量删除</button>
-            <button class="d-btn sm" id="stRefresh">⟳ 刷新</button>
-          </div>
-          <div id="stGrid" class="st-grid"><div class="d-empty">加载中…</div></div>
-          <div id="stPagination" class="st-pagination" style="display:none"></div>
-        </section>
+      <div class="woo-gallery">
+        <div class="st-gallery-hd">
+          <span class="st-gallery-title">🗂 作品库</span>
+          <span class="d-empty" style="margin:0" id="stCountLbl"></span>
+          <span class="d-empty" style="margin:0 8px;color:#c0392b;display:none" id="stSelLbl"></span>
+          <div style="flex:1"></div>
+          <span id="stSelBar" style="display:none">
+            <button class="d-btn sm" id="stSelAll">全选</button>
+            <button class="d-btn sm danger" id="stSelDel" disabled>删除选中</button>
+            <button class="d-btn sm" id="stSelCancel">取消</button>
+          </span>
+          <button class="d-btn sm danger" id="stBatchDel">🗑 批量删除</button>
+          <button class="d-btn sm" id="stRefresh">⟳ 刷新</button>
+        </div>
+        <div id="stGrid" class="st-grid"><div class="d-empty">加载中…</div></div>
+        <div id="stPagination" class="st-pagination" style="display:none"></div>
       </div>
+
+      <select id="stSize" class="d-input st-param" style="display:none"><option>1K</option><option selected>2K</option><option>3K</option><option>4K</option></select>
+      <select id="stRatio" class="d-input st-param" style="display:none"></select>
+      <select id="stCount" class="d-input st-param" style="display:none"><option>1</option><option>2</option><option>3</option><option selected>4</option></select>
+      <span class="d-empty" style="display:none" id="stPx"></span>
     </div>`;
 
   Studio.el = {
     seg: $("#stModeSeg", el), refs: $("#stRefs", el), prompt: $("#stPrompt", el),
     promptHint: $("#stPromptHint", el), refHint: $("#stRefHint", el),
-    model: $("#stModel", el), modelNote: $("#stModelNote", el), size: $("#stSize", el),
+    model: $("#stModel", el), size: $("#stSize", el),
     ratio: $("#stRatio", el), px: $("#stPx", el), count: $("#stCount", el),
     gen: $("#stGen", el), busy: $("#stBusy", el), grid: $("#stGrid", el),
     countLbl: $("#stCountLbl", el), banner: $("#stKeyBanner", el), refBlock: $("#stRefBlock", el),
@@ -150,25 +138,47 @@ window.renderStudioTab = async function renderStudioTab(el) {
   paintRefs();
   paintPromptPlaceholder();
 
+  // —— v2 参数条默认值 ——
+  Studio.el.size.value = "2K";
+  Studio.el.ratio.value = "16:9";
+  Studio.el.count.value = "4";
+
   // —— 事件 ——
-  $("#stAddRef", el).addEventListener("click", () => $("#stRefFile", el).click());
+  $("#stAddRef", el).addEventListener("click", () => {
+    if (Studio.mode === "txt2img") {
+      Studio.mode = "img2img";
+      paintMode(); paintPromptPlaceholder(); paintRefs();
+      toast("已切换到图生图模式，可上传参考图", "info");
+    }
+    $("#stRefFile", el).click();
+  });
   $("#stRefFile", el).addEventListener("change", (e) => {
     if (e.target.files && e.target.files.length > 0) onRefFiles(e.target.files);
     e.target.value = "";
   });
-  $$(".st-chip", el).forEach((c) => c.addEventListener("click", () => {
-    const v = Studio.el.prompt.value;
-    if (c.dataset.style === "__clear") { Studio.el.prompt.value = ""; }
-    else {
-      const style = IMAGE_STYLE_CHIPS.find(([k]) => k === c.dataset.style);
-      if (style) Studio.el.prompt.value = (v && !v.endsWith("，") && !v.endsWith(",") ? v + "，" : v) + style[1];
-    }
+  $("#stCopyBtn", el).addEventListener("click", async () => {
+    const v = Studio.el.prompt.value.trim();
+    if (!v) { toast("提示词为空，无法复制", "info"); return; }
+    await copyText(v);
+    toast("提示词已复制", "success");
+  });
+  $("#stClearBtn", el).addEventListener("click", () => {
+    Studio.el.prompt.value = "";
     Studio.el.prompt.focus();
-  }));
+  });
   Studio.el.model.addEventListener("change", paintModelList);
   Studio.el.ratio.addEventListener("change", paintRatioList);
   $("#stRefresh", el).addEventListener("click", () => loadGallery());
   Studio.el.gen.addEventListener("click", generate);
+
+  // —— v2 参数条 ——
+  syncBarUI();
+  $("#stRatioBtn", el).addEventListener("click", openImageConfig);
+  $("#stCountBtn", el).addEventListener("click", openImageConfig);
+  $$("#stResSeg button", el).forEach((b) => b.addEventListener("click", () => {
+    Studio.el.size.value = b.dataset.sz; syncBarUI();
+  }));
+  studioShell.bindTypeButton("stType", "image");
 
   // —— 批量删除 ——
   $("#stBatchDel", el).addEventListener("click", () => {
@@ -225,8 +235,6 @@ function paintModelList() {
   const def = ms[0] && ms[0].id;
   Studio.el.model.innerHTML = ms.map((m) =>
     `<option value="${escapeHtml(m.id)}" ${(m.id === cur || (!cur && m.id === def)) ? "selected" : ""}>${escapeHtml(m.id)}</option>`).join("");
-  const sel = ms.find((m) => m.id === Studio.el.model.value);
-  Studio.el.modelNote.textContent = sel ? "「" + sel.note + "」" : "";
 }
 
 function paintRatioList() {
@@ -239,9 +247,41 @@ function paintRatioList() {
 }
 
 function paintPromptPlaceholder() {
-  const m = IMAGE_MODE_META[Studio.mode];
-  Studio.el.prompt.placeholder = m.ex ? ("示例：" + m.ex) : "";
-  Studio.el.promptHint.textContent = m.hint;
+  Studio.el.prompt.placeholder = "上传参考图、输入文字或 @主体，描述你想生成的图片。";
+  Studio.el.promptHint.innerHTML = "";
+}
+
+/* ---------- v2 参数条（比例 / 分辨率 / 数量） ---------- */
+function syncBarUI() {
+  const r = Studio.el.ratio.value || "16:9";
+  const cnt = Studio.el.count.value || "4";
+  const b = document.getElementById("stRatioBtn");
+  const cb = document.getElementById("stCountBtn");
+  if (b) b.innerHTML = "<b>" + r + "</b><span class=\"woo-caret\">▾</span>";
+  if (cb) cb.innerHTML = "<b>" + cnt + "</b> 张<span class=\"woo-caret\">▾</span>";
+  document.querySelectorAll("#stResSeg button").forEach((x) =>
+    x.classList.toggle("active", x.dataset.sz === Studio.el.size.value));
+}
+
+function openImageConfig() {
+  const sizes = Array.from(Studio.el.size.options).map((o) => o.value);
+  studioShell.ratioModal({
+    title: "图片生成设置",
+    ratios: Object.keys(IMAGE_RATIO_PX),
+    px: IMAGE_RATIO_PX,
+    sizes: sizes,
+    counts: [1, 2, 3, 4, 5, 6, 7, 8],
+    countLimit: 4,
+    cur: { ratio: Studio.el.ratio.value || "16:9", size: Studio.el.size.value || "2K", count: Number(Studio.el.count.value) || 4 },
+    note: "当前所有档位与参考图均免费 · 单次最多生成 4 张（后端上限）。",
+    onSubmit: (v) => {
+      Studio.el.ratio.value = v.ratio;
+      Studio.el.size.value = v.size;
+      Studio.el.count.value = v.count;
+      paintRatioList();
+      syncBarUI();
+    },
+  });
 }
 
 function paintRefs() {
@@ -447,7 +487,8 @@ function pollImageTask(id) {
 async function loadGallery() {
   Studio.page = 1;
   try {
-    const r = await apiGet("/api/image/history?limit=2000");
+    // 隐藏短剧流程（source=short-drama-director / drama）与技能同步产物，仅展示创作台页面生成内容
+    const r = await apiGet("/api/image/history?limit=2000&exclude_source=short-drama-director,drama");
     Studio.gallery = r.items || [];
   } catch (e) { /* 网络失败时保留现有视图 */ }
   paintGallery();
@@ -569,8 +610,10 @@ function paintGallery() {
           Studio.el.prompt.value = item.prompt || "";
           Studio.el.size.value = item.size || "2K";
           Studio.el.ratio.value = item.ratio || "1:1";
+          Studio.el.count.value = String(item.count || 4);
           Studio.mode = item.mode || "txt2img";
           paintMode(); paintPromptPlaceholder();
+          syncBarUI();
           toast("已载入参数，可直接生成", "success");
         } else if (b.dataset.act === "del") {
           if (!confirm("从作品库移除该作品？")) return;

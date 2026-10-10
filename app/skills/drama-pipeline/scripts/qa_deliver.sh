@@ -45,10 +45,10 @@ echo "############## 4. 验收 ##############"
 # 2026-09-28 重写为 python 主体。原 bash+awk 版本两处容差判断方向写反
 # （`exit !(d>tol)` 在「未超容差」时才返回失败；时长那处更是「超上限反而通过」），
 # 且空值会被 awk 当 0 静默放行。
-python3 - "$R" "$MAXSEC" "${KEEP_AUDIO:-0}" "${EPISODES[@]}" <<'PYEOF'
-import json, os, subprocess, sys
+python3 - "$R" "$MAXSEC" "${NO_AUDIO:-0}" "${EPISODES[@]}" <<'PYEOF'
+import json, os, re, subprocess, sys
 
-R, MAXSEC, KEEP = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+R, MAXSEC, NOAUDIO = sys.argv[1], int(sys.argv[2]), sys.argv[3]
 eps = sys.argv[4:]
 fails = []
 
@@ -95,14 +95,33 @@ for f in targets:
     elif dur > MAXSEC:
         fails.append("%s 时长 %.2fs > 上限 %ds" % (b, dur, MAXSEC))
 
-    if KEEP == "1":
-        if "audio" not in streams:
-            fails.append("%s KEEP_AUDIO=1 但无 audio 流" % b)
-    else:
+    # 流构成：默认必须含 audio（自带配音）；NO_AUDIO=1 反向；subtitle 一律禁
+    # 静帧兜底段（STATIC_FALLBACK 标记）豁免：整集/连播含标记段时 audio 缺失豁免但打印
+    static_fb = 0
+    if b.endswith(".mp4") and b not in ("连播.mp4",):
+        ep = b[:-4]
+        for n in os.listdir(R):
+            dd = os.path.join(R, n)
+            if re.match(r"^%s-\d\d$" % re.escape(ep), n) and os.path.isdir(dd) \
+                    and os.path.exists(os.path.join(dd, "STATIC_FALLBACK")):
+                static_fb += 1
+    elif b == "连播.mp4":
+        for n in os.listdir(R):
+            dd = os.path.join(R, n)
+            if re.match(r"^E\d+-\d\d$", n) and os.path.isdir(dd) \
+                    and os.path.exists(os.path.join(dd, "STATIC_FALLBACK")):
+                static_fb += 1
+    if NOAUDIO == "1":
         if "audio" in streams:
-            fails.append("%s 存在 audio 流（渲染应已 -an 去模型音轨）" % b)
-        if "subtitle" in streams:
-            fails.append("%s 存在 subtitle 流（本链路不烧字幕）" % b)
+            fails.append("%s NO_AUDIO=1 但仍含 audio 流" % b)
+    else:
+        if "audio" not in streams:
+            if static_fb:
+                print("  [%s 含 %d 段静帧兜底，豁免 audio 必检]" % (b, static_fb))
+            else:
+                fails.append("%s 缺 audio 流（视频应自带配音）" % b)
+    if "subtitle" in streams:
+        fails.append("%s 存在 subtitle 流（本链路不烧字幕）" % b)
 
 # 时长账目：manifest 段时长合计 vs 连播实测（对账，不阻断）
 want = 0
