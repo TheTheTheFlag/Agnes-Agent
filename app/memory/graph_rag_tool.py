@@ -187,6 +187,20 @@ def _triage_triplets_json(raw: str) -> list:
     return out
 
 
+def ingest_graph_manual(thread_id: str, text: str, max_chars: int = 12000) -> str:
+    """手动录入图数据库：将指定文本异步写入 LightRAG（实体/关系抽取）。"""
+    if not text or not text.strip():
+        return "无有效文本"
+    t = text.strip()
+    if len(t) > max_chars:
+        t = t[:max_chars]
+    try:
+        lightrag_insert(thread_id, [t])
+        return f"已提交手动图录入（约 {len(t)} 字符）"
+    except Exception as e:
+        return f"手动图录入失败：{e}"
+
+
 def get_l6_context(thread_id: str, query: str, limit_chars: int = 1500,
                    kb_ids: Optional[List[str]] = None) -> str:
     """给 chatbot system prompt 的 L6 注入片段。

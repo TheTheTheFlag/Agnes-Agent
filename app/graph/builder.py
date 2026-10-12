@@ -503,13 +503,12 @@ def chatbot(state: State, config: RunnableConfig):
 
     content = re.sub(r'<tool_call>.*?</tool_call>', '', content, flags=re.DOTALL | re.IGNORECASE).strip()
     content = re.sub(r'<tool_calls>.*?</tool_calls>', '', content, flags=re.DOTALL | re.IGNORECASE).strip()
-    # L6 对话全量喂养：把本回合（用户消息 + 助手回答）异步写进 LightRAG 建图。
-    # 后台 daemon 线程执行、失败静默，不阻塞主流程。
-    try:
-        from app.memory.graph_rag_tool import _feed_turn_async
-        _feed_turn_async(thread_id, user_content, content)
-    except Exception:
-        pass
+    # L6 对话全量喂养：改为手动触发，不再每次对话自动录入图数据库
+    # try:
+    #     from app.memory.graph_rag_tool import _feed_turn_async
+    #     _feed_turn_async(thread_id, user_content, content)
+    # except Exception:
+    #     pass
     # 不再设置默认内容"已处理完毕。"，让空内容直接触发规划跳转
 
     # 检测规划触发（两种来源，结果等价）：

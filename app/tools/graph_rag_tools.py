@@ -72,3 +72,13 @@ def record_graph(triplets_json: str, source: str = "user") -> str:
         return "[GraphRAG] 未定位到当前会话，请先开始一段对话再记录."
     from app.memory.graph_rag_tool import record_graph as _record
     return _record(thread_id, triplets_json, source=source)
+
+
+@tool
+def ingest_graph_manual(text: str, thread_id: str | None = None, max_chars: int = 12000) -> str:
+    """手动录入图数据库（需要手动触发，每次对话不自动录入）。"""
+    tid = thread_id or _resolve_thread()
+    if not tid:
+        return "[GraphRAG] 未定位到当前会话，请先开始一段对话再录入."
+    from app.memory.graph_rag_tool import ingest_graph_manual as _ingest
+    return _ingest(tid, text, max_chars=max_chars)
