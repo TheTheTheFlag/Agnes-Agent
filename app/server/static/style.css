@@ -2552,6 +2552,7 @@ input, textarea { font-family: inherit; }
 .vs-badge { font-size: 10.5px; font-weight: 700; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--border); }
 .vs-badge.doing { color: #58a6ff; border-color: rgba(88, 166, 255, 0.5); animation: rg-blink 0.9s ease-in-out infinite alternate; }
 .vs-badge.failed { color: var(--danger, #f2555a); border-color: rgba(242, 85, 90, 0.5); }
+.vs-badge.cancelled { color: #8b949e; border-color: rgba(139, 148, 158, 0.5); }
 
 @media (max-width: 720px) {
   .studio-meta { display: none; }

@@ -278,6 +278,8 @@
       background: transparent; color: var(--text-faint,#6c7079); cursor: pointer; line-height: 1;
       padding: 4px 9px; font-size: 12px; }
     .drv-bp-x:hover { color: var(--danger,#f2555a); border-color: var(--danger,#f2555a); }
+    .drv-bp-x.cancel { color: #e3b341; border-color: rgba(227,179,65,.4); }
+    .drv-bp-x.cancel:hover { color: #f2c94c; border-color: #f2c94c; background: rgba(227,179,65,.08); }
     .drv-bp-bar { height: 5px; border-radius: 3px; background: rgba(255,255,255,.1);
       margin: 8px 0 8px; overflow: hidden; }
     .drv-bp-bar.big { height: 8px; }
@@ -1172,6 +1174,7 @@ function drvFmtDur(sec) {
 
 function drvTaskPhase(t) {
   const status = (t && t.status) || "queued";
+  if (status === "cancelled") return { cls: "warn", txt: "⏹ 已取消", pct: 0 };
   if (status === "failed") return { cls: "fail", txt: "❌ 失败", pct: 0 };
   if (status === "done") return { cls: "ok", txt: "✅ 完成", pct: 100 };
   const log = (t && t.log) || [];
@@ -1197,7 +1200,7 @@ function drvTaskCardHtml(tid, d) {
   const t = d.t || {};
   const status = t.status || "queued";
   const icon = status === "running" ? "⏳" : status === "done" ? "✅"
-    : status === "failed" ? "❌" : "⏸";
+    : status === "failed" ? "❌" : status === "cancelled" ? "⏹" : "⏸";
   const jobs = t.jobs || 0, done = t.done || 0;
   const dur = drvFmtDur(((d.finishedAt || Date.now()) - d.startedAt) / 1000);
   const pct = jobs > 1 ? Math.min(100, Math.round(done * 100 / jobs)) : 0;
@@ -1206,7 +1209,8 @@ function drvTaskCardHtml(tid, d) {
   if (jobs > 1) { barPct = pct; }
   else if (phase.pct > 0) { barPct = phase.pct; }
   else if (phase.cls === "ok" || status === "done") { barPct = 100; }
-  else if (status === "running" || status === "queued" || phase.cls === "run" || phase.cls === "warn") { indet = true; }
+  else if (status === "running" || status === "queued" || phase.cls === "run"
+           || (phase.cls === "warn" && status !== "cancelled")) { indet = true; }
   if (barPct > 0) bar = `<div class="drv-bp-bar big"><i style="width:${barPct}%"></i></div>`;
   else if (indet) bar = '<div class="drv-bp-bar big indet"><i></i></div>';
   const pctTxt = jobs > 1 ? `${done}/${jobs} · ${pct}%` : (phase.pct > 0 ? `${phase.pct}%` : "");
@@ -1214,11 +1218,13 @@ function drvTaskCardHtml(tid, d) {
   const metaTxt = [proj, pctTxt].filter(Boolean).join(" · ");
   const log = t.log || [];
   const last = log.slice(-1)[0] || (status === "queued" ? "已提交，等待开始…" : "");
+  const canCancel = status === "running" || status === "queued";
   return `<div class="drv-bp drv-tk ${status}" data-tid="${escapeHtml(tid)}" title="${escapeHtml(log.slice(-40).join("\n"))}">
     <div class="drv-bp-hd">
       <span class="drv-bp-title">${icon} ${escapeHtml(drvTaskLabel(d.meta))}</span>
       ${metaTxt ? `<span class="drv-bp-meta">${escapeHtml(metaTxt)}</span>` : ""}
       <span class="drv-bp-pct">${escapeHtml(dur)}</span>
+      ${canCancel ? `<button class="drv-bp-x cancel drv-task-cancel" data-tid="${escapeHtml(tid)}" title="取消任务">⏹ 取消</button>` : ""}
       <button class="drv-bp-x drv-task-x" data-tid="${escapeHtml(tid)}" title="关闭">×</button>
     </div>
     ${bar}
@@ -1254,13 +1260,16 @@ function drvBatchPanelHtml(tid, d) {
       ${bar}
     </div>`;
   }).join("");
-  const stTxt = status === "done" ? "✅ 批量完成" : status === "failed" ? "❌ 批量失败" : status === "running" ? "⏳ 进行中" : "⏸ 已提交";
+  const stTxt = status === "done" ? "✅ 批量完成" : status === "failed" ? "❌ 批量失败"
+    : status === "cancelled" ? "⏹ 已取消" : status === "running" ? "⏳ 进行中" : "⏸ 已提交";
   const projTxt = meta.proj ? `· ${escapeHtml(meta.proj)} ` : "";
+  const canCancel = status === "running" || status === "queued";
   return `<div class="drv-bp" data-tid="${escapeHtml(tid)}">
     <div class="drv-bp-hd">
       <span class="drv-bp-title">🎬 批量渲影 ${projTxt}${stTxt}</span>
       <span class="drv-bp-meta">${gapTxt ? escapeHtml(gapTxt) : ""}</span>
       <span class="drv-bp-pct">${done}/${jobs} · ${pct}%</span>
+      ${canCancel ? `<button class="drv-bp-x cancel drv-task-cancel" data-tid="${escapeHtml(tid)}" title="取消任务">⏹ 取消</button>` : ""}
       <button class="drv-bp-x drv-task-x" data-tid="${escapeHtml(tid)}" title="关闭">×</button>
     </div>
     <div class="drv-bp-bar big"><i style="width:${pct}%"></i></div>
@@ -1288,6 +1297,17 @@ function drvRenderTasks() {
     DRV.dock.delete(tid);
     if (DRV.batchPid === tid) { DRV.batchPid = null; DRV.batchSegs = []; }
     drvRenderTasks();
+  }));
+  $$(".drv-task-cancel", box).forEach((b) => b.addEventListener("click", async () => {
+    const tid = b.dataset.tid;
+    if (!confirm("确认取消该任务？运行中的生成进程将被终止。")) return;
+    try {
+      const r = await apiPost("/api/drama-review/tasks/" + encodeURIComponent(tid) + "/cancel", {});
+      if (!r.ok) { toast(r.error || "取消失败", "warn"); return; }
+      if (!r.already) toast("⏹ 已取消任务", "info");
+    } catch (e) {
+      toast("取消失败: " + (e.message || e), "warn");
+    }
   }));
 }
 
@@ -1395,13 +1415,16 @@ async function drvPollStep() {
         el.textContent = (t.status === "running" ? "⏳" : t.status === "done" ? "✅" : t.status === "failed" ? "❌" : "") + " " + last;
         el.title = (t.log || []).slice(-30).join("\n");
       }
-      if (t.status === "done" || t.status === "failed") {
+      if (t.status === "done" || t.status === "failed" || t.status === "cancelled") {
         if (meta.kind === "batch") {
           const sum = (t.log || []).slice().reverse()
             .find((l) => l.includes("结束")) || (t.log || []).slice(-1)[0] || "";
-          toast(sum || "批量任务结束", t.status === "done" ? "ok" : "warn");
+          toast(t.status === "cancelled" ? "⏹ 批量任务已取消" : (sum || "批量任务结束"),
+                t.status === "done" ? "ok" : "warn");
         } else if (t.status === "failed") {
           toast(drvTaskLabel(meta) + " 失败", "warn");
+        } else if (t.status === "cancelled") {
+          toast("⏹ " + drvTaskLabel(meta) + " 已取消", "info");
         }
         if (meta.cb) meta.cb();
         DRV.tasks.delete(tid);

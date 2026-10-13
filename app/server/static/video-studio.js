@@ -589,6 +589,7 @@ async function generateVideo() {
       if (i >= 0) VideoStudio.gallery[i] = it; else VideoStudio.gallery.unshift(it);
     }
     if (r.deduped) toast("♻️ 检测到同内容任务进行中，已复用该任务（未重复提交）", "info");
+    else if (r.submit_pending) toast("⏳ 提交失败，已排队后台每 60 秒自动重试，直至成功", "info");
     else toast(`✅ 任务已提交（${elapsed}ms），正在生成`, "success");
     paintVideoGallery();
     (r.items || []).forEach((it) => pollVideoTask(it.id));
@@ -713,6 +714,8 @@ function getVsPaginatedItems() {
 function videoStatusBadge(it) {
   if (it.status === "completed") return "";
   if (it.status === "failed") return `<span class="vs-badge failed">失败</span>`;
+  if (it.status === "cancelled") return `<span class="vs-badge cancelled">已取消</span>`;
+  if (it.submit_pending || !it.video_id) return `<span class="vs-badge doing">⏳ 提交排队中</span>`;
   return `<span class="vs-badge doing">生成中 ${it.progress || 0}%</span>`;
 }
 
@@ -734,8 +737,9 @@ function paintVideoGallery() {
     const media = done
       ? `<img class="vs-thumb" src="/api/video/file/${it.id}?thumb=1" loading="lazy" alt="">
          <span class="vs-play">▶</span>`
-      : `<div class="vs-ph">${videoStatusBadge(it)}<span class="vs-ph-hint">${escapeHtml(it.status === "failed" ? (it.error || "生成失败") : "视频生成中…")}</span></div>`;
+      : `<div class="vs-ph">${videoStatusBadge(it)}<span class="vs-ph-hint">${escapeHtml(it.status === "failed" ? (it.error || "生成失败") : (it.submit_pending || !it.video_id ? (it.error || "提交失败，等待自动重试…") : "视频生成中…"))}</span></div>`;
     const dl = done ? `href="/api/video/file/${it.id}" download="${escapeHtml(it.id)}.mp4"` : `href="#" onclick="return false"`;
+    const canCancel = !isTerminal(it.status);
     return `
     <figure class="st-card" data-id="${escapeHtml(it.id)}"${selOn ? ` style="position:relative${VideoStudio.sel.has(it.id) ? ";outline:2px solid #c0392b;outline-offset:-2px" : ""}"` : ""}>
       ${selOn ? `<label class="st-card-cb" style="position:absolute;top:6px;left:6px;z-index:6;background:rgba(0,0,0,0.55);border-radius:4px;padding:2px;line-height:1;cursor:pointer"><input type="checkbox" data-sel="${escapeHtml(it.id)}" ${VideoStudio.sel.has(it.id) ? "checked" : ""} style="width:16px;height:16px;cursor:pointer;accent-color:#c0392b"></label>` : ""}
@@ -750,6 +754,7 @@ function paintVideoGallery() {
         <button class="d-btn sm" data-act="open" ${done ? "" : "disabled"}>播放</button>
         <a class="d-btn sm" data-act="dl" ${dl}>下载</a>
         <button class="d-btn sm" data-act="copy">复用提示词</button>
+        ${canCancel ? `<button class="d-btn sm danger" data-act="cancel">取消</button>` : ""}
         <button class="d-btn sm danger" data-act="del">删除</button>
       </div>
     </figure>`;
@@ -806,6 +811,15 @@ function paintVideoGallery() {
       try {
         if (b.dataset.act === "open") openVideoLightbox(item);
         else if (b.dataset.act === "copy") { await copyText(item.prompt || ""); toast("提示词已复制", "success"); }
+        else if (b.dataset.act === "cancel") {
+          if (!confirm("确认取消该任务？提交中的任务将停止自动重试。")) return;
+          const r = await apiPost("/api/video/cancel", { ids: [item.id] });
+          if (!r.ok) throw new Error(r.error || "取消失败");
+          toast("⏹ 已取消任务", "info");
+          const i = VideoStudio.gallery.findIndex((g) => g.id === item.id);
+          if (i >= 0) { VideoStudio.gallery[i].status = "cancelled"; VideoStudio.gallery[i].submit_pending = false; }
+          paintVideoGallery();
+        }
         else if (b.dataset.act === "del") {
           if (!confirm("从作品库移除该视频（含服务器文件）？")) return;
           const r = await apiPost("/api/video/delete", { ids: [item.id] });

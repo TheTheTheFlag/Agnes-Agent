@@ -51,6 +51,7 @@ _REF_KEEP_SEC = 3 * 24 * 3600   # 参考图临时文件保留 3 天
 _REBUILD_MAX = 30            # 单个任务自动重建次数上限
 _REBUILD_TTL = 6 * 3600      # 任务从创建起最长存活 6 小时
 _CREATE_RETRY = 3            # 创建阶段 429/5xx/网络错误自动重试次数
+_SUBMIT_RETRY_INTERVAL = 60  # 提交失败（429/5xx/网络）后后台自动重试间隔（秒），直到成功或被取消
 
 # 提交去重：同一入参（含参考图内容哈希）在窗口内的在途任务只保留一个（防重复扣费）
 _DEDUP_WINDOW = 300          # 秒；窗口内同内容且在途（queued/running）视为重复提交
@@ -73,6 +74,10 @@ def _find_dedup(username: str, key: str) -> list:
             if it.get("dedup_key") != key:
                 continue
             if it.get("status") not in ("queued", "running"):
+                continue
+            if it.get("submit_pending"):
+                # 提交仍在后台 60s 重试中：不窗口限时，防止同内容重复提交（重复扣费）
+                out.append(it)
                 continue
             if not (it.get("video_id") or it.get("task_id")):
                 continue
@@ -424,6 +429,73 @@ def _post_create(key: str, payload: dict) -> requests.Response:
     }, json=payload, timeout=_TIMEOUT)
 
 
+def _is_retryable_create_msg(msg: str) -> bool:
+    """创建任务失败信息是否属于「瞬时/限流」类（可自动重试）；4xx 参数级错误不重试。"""
+    return bool(msg and ("429" in msg or "limit" in msg.lower()
+                         or "网络错误" in msg or "HTTP 5" in msg))
+
+
+def _submit_retry_worker(item_id: str, username: str, keys: list, payload: dict):
+    """提交失败后每 _SUBMIT_RETRY_INTERVAL 秒重试一次，直到成功或被取消。
+
+    与短剧审核「批量渲影（串行提交）」同款提交纪律：某次提交失败不放弃，
+    等固定间隔后重试该段，直到上游接受（拿到 video_id）为止。取消或条目被
+    删除后立即退出，不再提交。
+    """
+    interval = _SUBMIT_RETRY_INTERVAL
+    while True:
+        time.sleep(interval)
+        with _user_items_lock(username):
+            item = _find(item_id, username)
+        if not item or item.get("status") == "cancelled" or not item.get("submit_pending"):
+            return
+        try:
+            key_idx, created = _create_task(keys, payload)
+        except RuntimeError as e:
+            msg = str(e)
+            if not _is_retryable_create_msg(msg):
+                with _user_items_lock(username):
+                    item = _find(item_id, username)
+                    if not item or item.get("status") == "cancelled":
+                        return
+                    item["status"] = "failed"
+                    item["submit_pending"] = False
+                    item["error"] = f"提交失败（不可恢复）：{msg}"
+                    item["last_heartbeat"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                    item["completed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                    _save_user_manifest(username)
+                return
+            with _user_items_lock(username):
+                item = _find(item_id, username)
+                if not item or item.get("status") == "cancelled":
+                    return
+                item["submit_retries"] = int(item.get("submit_retries") or 0) + 1
+                item["error"] = f"提交失败，{interval} 秒后自动重试（第 {item['submit_retries']} 次）"
+                item["last_heartbeat"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                _save_user_manifest(username)
+            continue
+        with _user_items_lock(username):
+            item = _find(item_id, username)
+            if not item or item.get("status") == "cancelled" or not item.get("submit_pending"):
+                return
+            item["video_id"] = created.get("video_id") or ""
+            item["task_id"] = created.get("task_id") or created.get("id") or ""
+            item["key_idx"] = key_idx
+            item["attempt"] = int(item.get("attempt") or 1) + 1
+            item["status"] = created.get("status") or "queued"
+            item["progress"] = int(created.get("progress") or 0)
+            if created.get("seconds"):
+                item["seconds"] = str(created.get("seconds"))
+            if created.get("size"):
+                item["size"] = str(created.get("size"))
+            item["error"] = ""
+            item["submit_pending"] = False
+            item["submit_retries"] = 0
+            item["last_heartbeat"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            _save_user_manifest(username)
+        return
+
+
 def _create_task(keys: list, payload: dict) -> tuple:
     """轮换 key 创建任务：429（限流）/ 5xx 换下一个 key；4xx 参数错误直接抛。"""
     last = ""
@@ -730,12 +802,25 @@ def generate(payload: dict, request: Request):
                 else:
                     return JSONResponse({"error": f"{msg}（参考图体积过小或格式不受支持，请换一张更清晰的图片）"},
                                         status_code=502)
-            can_retry = ("429" in msg or "limit" in msg.lower() or "网络错误" in msg or "HTTP 5" in msg)
+            can_retry = _is_retryable_create_msg(msg)
             if can_retry and attempt < _CREATE_RETRY - 1:
                 time.sleep(5 * (attempt + 1))
                 continue
             break
     if key_idx is None:
+        if _is_retryable_create_msg(create_msg):
+            # 短剧「批量渲影」同款提交纪律：快速重试用尽仍失败 → 后台每 60s 重试直到成功
+            item = _persist_new(model, mode, prompt, upstream_payload, 0, {}, username,
+                                bparams=p, dedup_key=dedup_key, source=src)
+            item["submit_pending"] = True
+            item["submit_retries"] = 0
+            item["error"] = f"提交失败，{_SUBMIT_RETRY_INTERVAL} 秒后自动重试（第 0 次）：{create_msg}"
+            _save_user_manifest(username)
+            threading.Thread(target=_submit_retry_worker,
+                             args=(item["id"], username, keys, upstream_payload),
+                             daemon=True).start()
+            return {"ok": True, "count": 1, "task_id": item.get("id"), "items": [item],
+                    "async": True, "submit_pending": True}
         return JSONResponse({"error": create_msg}, status_code=502)
 
     item = _persist_new(model, mode, prompt, upstream_payload, key_idx, created, username,
@@ -759,6 +844,10 @@ def task(item_id: str, request: Request = None):
     if item.get("status") == "cancelled":
         return {"ok": True, "item": item}
     if item.get("status") in ("completed", "failed") and item.get("file"):
+        return {"ok": True, "item": item}
+
+    # 尚未拿到 video_id（提交仍在后台 60s 重试 / 提交已判失败）→ 直接返回当前状态，不查上游
+    if not item.get("video_id"):
         return {"ok": True, "item": item}
 
     keys = _agnes_keys()

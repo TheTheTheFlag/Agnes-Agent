@@ -42,6 +42,8 @@ AGNES_ROOT = "/home/mirror/Agnes-Agent"
 
 _TASKS = {}
 _TASKS_LOCK = threading.RLock()
+_PROCS = {}          # tid -> Popen（用于用户取消时终止子进程）
+_PROCS_LOCK = threading.RLock()
 
 
 def _username(request) -> str:
@@ -107,14 +109,18 @@ def _kill_process_tree(proc: subprocess.Popen) -> None:
             continue
 
 
-def _run_proc(cmd, timeout: int, env):
+def _run_proc(cmd, timeout: int, env, tid: str = None):
     """subprocess.run 的进程组版：超时先杀整条进程组再抛 TimeoutExpired。
 
     subprocess.run 超时只杀直接子进程，渲染脚本（gen_kzqs_videos.py）派生的
     media.py 孙进程会变孤儿继续跑，重试即产生重复 take。
+    tid 给定时登记 Popen，/tasks/{tid}/cancel 可中途终止。
     """
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             text=True, env=env, start_new_session=True)
+    if tid:
+        with _PROCS_LOCK:
+            _PROCS[tid] = proc
     try:
         out, err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -124,16 +130,24 @@ def _run_proc(cmd, timeout: int, env):
         except Exception:
             pass
         raise
+    finally:
+        if tid:
+            with _PROCS_LOCK:
+                _PROCS.pop(tid, None)
     return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
 
 
-def _run_proc_stream(cmd, timeout: int, env, on_line=None):
+def _run_proc_stream(cmd, timeout: int, env, on_line=None, tid: str = None):
     """_run_proc 的流式版：逐行回调 stdout/stderr（实时进度），超时仍按进程组杀掉。
 
     on_line 收到的是去掉行尾换行符的原始行；回调异常被吞掉，不影响子进程。
+    tid 给定时登记 Popen，/tasks/{tid}/cancel 可中途终止。
     """
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             text=True, env=env, start_new_session=True, bufsize=1)
+    if tid:
+        with _PROCS_LOCK:
+            _PROCS[tid] = proc
     out_buf, err_buf = [], []
 
     def _reader(stream, buf):
@@ -167,9 +181,26 @@ def _run_proc_stream(cmd, timeout: int, env, on_line=None):
             th.join(timeout=5)
         raise subprocess.TimeoutExpired(cmd, timeout, output="".join(out_buf),
                                         stderr="".join(err_buf))
+    finally:
+        if tid:
+            with _PROCS_LOCK:
+                _PROCS.pop(tid, None)
     for th in ths:
         th.join(timeout=10)
     return subprocess.CompletedProcess(cmd, proc.returncode, "".join(out_buf), "".join(err_buf))
+
+
+def _kill_task_proc(tid: str) -> bool:
+    """终止任务当前关联的子进程（进程组），无论其是否仍在运行。"""
+    with _PROCS_LOCK:
+        proc = _PROCS.pop(tid, None)
+    if proc is None:
+        return False
+    try:
+        _kill_process_tree(proc)
+    except Exception:
+        pass
+    return True
 
 
 # ==================== 任务登记（前端轮询） ====================
@@ -195,6 +226,10 @@ def _touch(tid: str, status=None, line=None, inc: int = 0):
         if inc:
             t["done"] = min(int(t.get("done", 0)) + int(inc),
                             t.get("jobs") or int(t.get("done", 0)) + int(inc))
+        if status:
+            cur = t.get("status")
+            if cur == "cancelled" and status in ("done", "failed"):
+                status = None          # 已被用户取消，终态优先，不降级
         if status:
             t["status"] = status
         t["updated"] = time.time()
@@ -695,7 +730,7 @@ def assets_regenerate(payload: dict, request: Request):
             if ref:
                 cmd += ["--ref", ref]
             _touch(tid, line=f"[{_now()}] media.py image 启动")
-            pr = _run_proc(cmd, 7200, _token_env())
+            pr = _run_proc(cmd, 7200, _token_env(), tid=tid)
             out = (pr.stdout or "") + (pr.stderr or "")
             fm = re.search(r"FILE=(\S+)", out)
             if pr.returncode == 0 and fm and os.path.isfile(fm.group(1).strip()):
@@ -1118,7 +1153,7 @@ def segments_render(payload: dict, request: Request):
         _touch(tid, line=f"[{_now()}] 提示词头: {seg_item['prompt'][:60]}…")
         cmd = ["python3", GENERATOR, mpath, seg, "--force"]
         try:
-            pr = _run_proc_stream(cmd, 7200, _render_env(), on_line=_line)
+            pr = _run_proc_stream(cmd, 7200, _render_env(), on_line=_line, tid=tid)
         except subprocess.TimeoutExpired:
             _touch(tid, "failed", line=f"[{_now()}] 渲染超时(2h)")
             return
@@ -1189,7 +1224,7 @@ def segments_cascade(payload: dict, request: Request):
             args = ["python3", GENERATOR, mpath, "--force"] + (["--from", start_seg] if ep == start_seg[:3] else [])
             _touch(tid, line=f"[{_now()}] {ep}: 启动 {args[-1] if args[-1] != mpath else '全段'}")
             try:
-                pr = _run_proc_stream(args, 10800, _render_env(), on_line=_line)
+                pr = _run_proc_stream(args, 10800, _render_env(), on_line=_line, tid=tid)
             except subprocess.TimeoutExpired:
                 _touch(tid, line=f"[{_now()}] {ep}: 超时(3h)")
                 failed += ep_segs
@@ -1267,7 +1302,7 @@ def _batch_exit(name: str) -> None:
         _BATCH_BUSY.discard(name)
 
 
-def _kf_generate(pdir: str, item: dict, frame: str, prompt_override: str = ""):
+def _kf_generate(pdir: str, item: dict, frame: str, prompt_override: str = "", tid: str = None):
     """出一张关键帧，返回 (ok, msg)。单帧端点与批量端点共用，避免两份实现行为漂移。"""
     seg = str(item.get("seg") or "")
     prompt = (prompt_override or str(item.get(f"{frame}_prompt") or "")).strip()
@@ -1288,7 +1323,7 @@ def _kf_generate(pdir: str, item: dict, frame: str, prompt_override: str = ""):
     for r in refs:
         cmd += ["--ref", r]
     try:
-        pr = _run_proc(cmd, 1800, _token_env())
+        pr = _run_proc(cmd, 1800, _token_env(), tid=tid)
     except subprocess.TimeoutExpired:
         return False, "出图超时(30min)"
     out = (pr.stdout or "") + (pr.stderr or "")
@@ -1363,7 +1398,7 @@ def keyframes_regenerate(payload: dict, request: Request):
         if os.path.exists(out_file):
             _touch(tid, line=f"[{_now()}] 已删除旧帧 {os.path.basename(out_file)}")
         _touch(tid, line=f"[{_now()}] media.py image 启动 refs={[os.path.basename(r) for r in refs]}")
-        ok, msg = _kf_generate(pdir, item, frame, prompt_override)
+        ok, msg = _kf_generate(pdir, item, frame, prompt_override, tid=tid)
         if not ok:
             _touch(tid, "failed", line=f"[{_now()}] {msg}")
             return
@@ -1434,7 +1469,7 @@ def keyframes_batch(payload: dict, request: Request):
 
             def one(job):
                 s, fr = job
-                return job, _kf_generate(pdir, s, fr)
+                return job, _kf_generate(pdir, s, fr, tid=tid)
 
             with ThreadPoolExecutor(max_workers=workers) as ex:
                 for (s, fr), (ok, msg) in ex.map(one, jobs):
@@ -1541,7 +1576,7 @@ def segments_batch(payload: dict, request: Request):
                        "--submit-gap", str(submit_gap)]
                 try:
                     _run_proc_stream(cmd, 7200 * max(1, len(segs)) + submit_gap * len(segs),
-                                     _render_env(), on_line=on_line)
+                                     _render_env(), on_line=on_line, tid=tid)
                 except subprocess.TimeoutExpired:
                     _touch(tid, line=f"[{_now()}] {ep} 渲染超时，已终止")
         finally:
@@ -1719,3 +1754,26 @@ async def task(tid: str, request: Request = None):
         if t is None:
             return JSONResponse({"error": "任务不存在"}, status_code=404)
         return dict(t, log=list(t["log"]))
+
+
+@router.post("/tasks/{tid}/cancel")
+def task_cancel(tid: str, request: Request = None):
+    """取消任务：置为 cancelled 并终止正在运行的生成子进程（进程组）。
+
+    批量渲影等「串行提交 + 失败 60s 重试」的任务在此被中止：_run_proc{,_stream}
+    已按 tid 登记 Popen，_kill_process_tree 连同 media.py 孙进程一并终止。
+    已取消的任务终态不再被 worker 降级（_touch 保护）。
+    """
+    with _TASKS_LOCK:
+        t = _TASKS.get(tid)
+        if t is None:
+            return JSONResponse({"error": "任务不存在"}, status_code=404)
+        if t["status"] in ("done", "failed", "cancelled"):
+            return {"ok": True, "already": True, "status": t["status"]}
+        if len(t["log"]) >= 500:
+            t["log"] = t["log"][-500:]
+        t["log"].append(f"[{_now()}] ⏹ 用户取消任务")
+        t["status"] = "cancelled"
+        t["updated"] = time.time()
+    killed = _kill_task_proc(tid)
+    return {"ok": True, "cancelled": True, "killed_proc": killed}
