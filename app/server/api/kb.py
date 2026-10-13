@@ -170,6 +170,11 @@ async def delete(req: DeleteReq) -> dict:
     return L.kb_delete_doc(req.thread_id, req.doc_id)
 
 
+@router.post("/delete")
+async def delete_post(req: DeleteReq) -> dict:
+    return L.kb_delete_doc(req.thread_id, req.doc_id)
+
+
 @router.post("/reprocess")
 async def reprocess(req: ReprocessReq) -> dict:
     return L.kb_reprocess(req.thread_id, req.doc_id)
