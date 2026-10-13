@@ -109,6 +109,22 @@ def record_graph(thread_id: str, triplets_json: str, source: str = "user") -> st
         return f"写入失败：{e}"
 
 
+def ingest_kb_manual(thread_id: str, text: str, max_chars: int = 12000, strategy: str = "", target: str = "both") -> str:
+    """手动录入知识库（KB）到指定 thread_id/命名空间，默认 __global__ 对应全局知识库。"""
+    if not text or not text.strip():
+        return "无有效文本"
+    t = text.strip()
+    if len(t) > max_chars:
+        t = t[:max_chars]
+    try:
+        from app.memory import ligraphrag_adapter as L
+        ns = L._kb_resolve_ns(thread_id)
+        L.kb_ingest_async(thread_id, [t], strategy=strategy, target=target)
+        return f"已提交手动 KB 录入（约 {len(t)} 字符，ns={ns})"
+    except Exception as e:
+        return f"手动 KB 录入失败：{e}"
+
+
 def _try_ingest_lightrag(thread_id: str, text: str) -> None:
     """轻量被动注入：把一段文本（如 tavily 搜索结果）异步塞进 LightRAG。
     不等待、不阻塞主流程；出错静默吞掉。

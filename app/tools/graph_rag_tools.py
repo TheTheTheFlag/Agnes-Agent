@@ -82,3 +82,10 @@ def ingest_graph_manual(text: str, thread_id: str | None = None, max_chars: int 
         return "[GraphRAG] 未定位到当前会话，请先开始一段对话再录入."
     from app.memory.graph_rag_tool import ingest_graph_manual as _ingest
     return _ingest(tid, text, max_chars=max_chars)
+
+
+@tool
+def ingest_kb_manual(text: str, thread_id: str = "__global__", max_chars: int = 12000) -> str:
+    """手动录入知识库（KB）到指定 thread_id/命名空间；默认写入 __global__ 知识库。"""
+    from app.memory.graph_rag_tool import ingest_kb_manual as _ingest
+    return _ingest(thread_id or "__global__", text, max_chars=max_chars)
