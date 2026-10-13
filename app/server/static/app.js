@@ -3330,7 +3330,12 @@ const GRAPH_KIND_COLORS = {
 let _graphNetwork = null;
 let _graphRefreshKey = 0;
 
-async function renderGraphTab(el){el.innerHTML="<div class=\"d-empty\">加载图谱管理...</div>";if(!(location.hash||"").startsWith("#/rag-admin/")){location.hash="#/rag-admin/graph";}else{try{await renderRagRoute();}catch(e){el.innerHTML=drawerErr(e);}}}async function renderUsersTab(el) {
+async function renderGraphTab(el) {
+  el.innerHTML = `<div class="d-empty">加载中…</div>`;
+  try { await ragGraphManage(el); } catch (e) { el.innerHTML = drawerErr(e); }
+}
+
+async function renderUsersTab(el) {
   el.innerHTML = `<div class="tab-title">用户管理</div>
     <div class="tab-note">注册用户需审批通过后才能登录；新注册账号初始为「待审批」。</div>
     <div id="usersList" class="users-list">加载中…</div>`;

@@ -2496,7 +2496,7 @@ def graph_relations(thread_id: str, q: str = "", src: str = "", tgt: str = "", p
     start = (page - 1) * page_size
     page_items = items[start:start + page_size]
     return {"thread_id": thread_id, "total": total, "page": page, "page_size": page_size, "relations": page_items}
-def graph_entity_edit(thread_id: str, name: str, entity_type: str = "", description: str = "", allow_rename: bool = True, allow_merge: bool = False) -> dict:
+def graph_entity_edit(thread_id: str, name: str, entity_type: str = "", description: str = "", new_name: str = "", allow_rename: bool = True, allow_merge: bool = False) -> dict:
     ns = _kb_resolve_ns(thread_id)
     rag = get_lightrag(thread_id, ns=ns)
     try:
@@ -2504,8 +2504,11 @@ def graph_entity_edit(thread_id: str, name: str, entity_type: str = "", descript
     except Exception:
         pass
     if not name:
-        return {"ok": False, "error": "ʵ�����Ʋ���Ϊ��"}
+        return {"ok": False, "error": "实体名称不能为空"}
     updated = {}
+    nn = (new_name or "").strip()
+    if nn and nn != name:
+        updated["entity_name"] = nn
     if entity_type:
         updated["entity_type"] = str(entity_type)
     if description is not None:

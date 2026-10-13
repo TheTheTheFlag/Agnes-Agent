@@ -30,11 +30,14 @@ function ragParseHash() {
     const view = parts[2] || "documents";
     return { section: "detail", tid: parts[1], view: ["documents", "chunks", "config", "test"].includes(view) ? view : "documents" };
   }
+  if (parts[0] === "graph") return { section: "graph" };
   return { section: "kb" };
 }
 
 function ragNavHighlight() {
-  $$(".rag-nav-item").forEach((a) => a.classList.toggle("active", a.dataset.route === "kb"));
+  const r = ragParseHash() || { section: "kb" };
+  const active = ["kb", "create", "detail"].includes(r.section) ? "kb" : r.section;
+  $$(".rag-nav-item").forEach((a) => a.classList.toggle("active", a.dataset.route === active));
 }
 
 async function renderRagRoute() {
@@ -49,6 +52,7 @@ async function renderRagRoute() {
     if (r.section === "kb") await ragKbList(content);
     else if (r.section === "create") await ragKbCreate(content);
     else if (r.section === "detail") await ragKbDetail(content, r);
+    else if (r.section === "graph") await ragGraphManage(content);
   } catch (e) {
     content.innerHTML = drawerErr(e);
   }
@@ -62,6 +66,7 @@ async function renderRagTab(el) {
       <nav class="rag-nav">
         <div class="rag-nav-brand"><i></i> RAG</div>
         <a class="rag-nav-item" data-route="kb" href="#/rag-admin/kb"><span class="rag-nav-ico">${RAG_ICONS.kb}</span>知识库管理</a>
+        <a class="rag-nav-item" data-route="graph" href="#/rag-admin/graph"><span class="rag-nav-ico">🕸</span>全局图谱</a>
         <a class="rag-nav-new" href="#/rag-admin/kb/create">＋ 新建知识库</a>
         <div class="rag-nav-hint">每个会话（thread）自动沉淀为独立知识库，含文档、切片、实体关系与向量索引。</div>
       </nav>
@@ -793,4 +798,336 @@ async function ragTest(content, tid, body) {
     } catch (e) { $("#rgTRes", body).innerHTML = drawerErr(e); }
     busy(false);
   });
+}
+
+/* ==================== 全局图谱管理（仅 __global__） ==================== */
+
+const RAG_GRAPH = { tab: "entities", page: 1, pageSize: 50, q: "", kind: "", selected: new Set(), kinds: [] };
+
+function _ragGraphAttrs(obj) {
+  try { return JSON.parse((obj && obj.attrs) || "{}") || {}; } catch (e) { return {}; }
+}
+
+function _ragGraphKey(tab, it) {
+  return tab === "entities" ? String(it.name || "") : String(it.from_id || "") + "\u0001" + String(it.to_id || "");
+}
+
+function _ragGraphAttrRows(a) {
+  const keys = Object.keys(a || {});
+  if (!keys.length) return `<div class="d-empty">无附加属性</div>`;
+  return `<table class="d-table"><tbody>` + keys.map((k) => {
+    let v = a[k];
+    if (v && typeof v === "object") v = JSON.stringify(v);
+    return `<tr><td style="white-space:nowrap;color:var(--text-soft);vertical-align:top">${escapeHtml(k)}</td><td style="word-break:break-word">${escapeHtml(String(v))}</td></tr>`;
+  }).join("") + `</tbody></table>`;
+}
+
+async function ragGraphManage(content) {
+  const TID = "__global__";
+  const S = RAG_GRAPH;
+  S.tab = S.tab === "relations" ? "relations" : "entities";
+  S.page = 1;
+  S.selected = new Set();
+  let reg = new Map();
+
+  content.innerHTML = `
+    <div class="d-row" style="justify-content:space-between;flex-wrap:wrap;gap:6px">
+      <div class="d-empty" style="margin:0">全局图谱（跨会话） · <b>__global__</b></div>
+      <div class="d-row" style="gap:6px">
+        <span id="gStat" class="d-empty" style="margin:0"></span>
+        <button class="d-btn d-btn-sm" id="gMergeVariant" title="把大小写/拼写变体实体并入规范名节点">合并变体</button>
+        <button class="d-btn d-btn-sm" id="gExport">导出 JSON</button>
+        <button class="d-btn d-btn-sm" id="gRefresh">刷新</button>
+      </div>
+    </div>
+    <div class="rag-subtabs">
+      <a class="rag-subtab${S.tab === "entities" ? " active" : ""}" data-gtab="entities" href="javascript:void(0)">实体</a>
+      <a class="rag-subtab${S.tab === "relations" ? " active" : ""}" data-gtab="relations" href="javascript:void(0)">关系</a>
+    </div>
+    <div id="gBody"></div>`;
+
+  const body = $("#gBody", content);
+
+  const setTab = (tab) => {
+    if (S.tab === tab) return;
+    S.tab = tab; S.page = 1; S.kind = ""; S.selected = new Set();
+    $$("[data-gtab]", content).forEach((x) => x.classList.toggle("active", x.dataset.gtab === tab));
+    load();
+  };
+  $$("[data-gtab]", content).forEach((a) => a.addEventListener("click", () => setTab(a.dataset.gtab)));
+  $("#gRefresh", content).addEventListener("click", () => load());
+
+  $("#gMergeVariant", content).addEventListener("click", async () => {
+    if (!confirm("合并图谱中的大小写/拼写变体实体？将把变体节点并入规范名，不可恢复。")) return;
+    const btn = $("#gMergeVariant", content);
+    btn.disabled = true; const old = btn.textContent; btn.textContent = "合并中…";
+    try {
+      const r = await apiPost(`/api/graph/merge_variants?thread_id=${encodeURIComponent(TID)}`, {});
+      if (!r.ok) throw new Error(r.error || "合并失败");
+      const n = r.merged ? Object.keys(r.merged).length : 0;
+      toast(`已并入 ${n} 组变体`, "success");
+      load();
+    } catch (e) { toast("合并失败：" + e.message, "error"); }
+    finally { btn.disabled = false; btn.textContent = old; }
+  });
+
+  const fetchAll = async () => {
+    const out = [];
+    let page = 1;
+    while (page <= 200) {
+      const params = { thread_id: TID, q: S.q, page, page_size: 500 };
+      if (S.tab === "entities") params.kind = S.kind;
+      const r = await apiGet(`/api/graph/${S.tab}?${new URLSearchParams(params)}`);
+      const items = S.tab === "entities" ? (r.entities || []) : (r.relations || []);
+      out.push(...items);
+      if (!items.length || out.length >= (r.total || 0)) break;
+      page++;
+    }
+    return out;
+  };
+
+  $("#gExport", content).addEventListener("click", async () => {
+    const btn = $("#gExport", content);
+    btn.disabled = true; const old = btn.textContent; btn.textContent = "导出中…";
+    try {
+      const data = await fetchAll();
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `graph-${S.tab}-__global__-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.json`;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+      toast(`已导出 ${data.length} 条`, "success");
+    } catch (e) { toast("导出失败：" + e.message, "error"); }
+    finally { btn.disabled = false; btn.textContent = old; }
+  });
+
+  const updateBatch = () => {
+    const btn = $("#gBatchDel", body);
+    if (!btn) return;
+    btn.disabled = S.selected.size === 0;
+    btn.textContent = S.selected.size ? `批量删除 (${S.selected.size})` : "批量删除";
+  };
+
+  async function load() {
+    body.innerHTML = `<div class="d-empty">加载中…</div>`;
+    try {
+      const params = { thread_id: TID, q: S.q, page: S.page, page_size: S.pageSize };
+      if (S.tab === "entities") params.kind = S.kind;
+      const r = await apiGet(`/api/graph/${S.tab}?${new URLSearchParams(params)}`);
+      if (r.kinds) S.kinds = r.kinds;
+      render(r);
+    } catch (e) { body.innerHTML = drawerErr(e); }
+  }
+
+  function render(r) {
+    const total = r.total || 0;
+    const pages = Math.max(1, Math.ceil(total / S.pageSize));
+    if (S.page > pages) { S.page = pages; return load(); }
+    const items = S.tab === "entities" ? (r.entities || []) : (r.relations || []);
+    $("#gStat", content).textContent = `${total} 条`;
+    reg = new Map(items.map((it, idx) => [String(idx), it]));
+
+    const toolbar = `
+      <div class="rg-toolbar" style="flex-wrap:wrap">
+        <input class="d-input" id="gQ" placeholder="搜索名称 / 描述…" value="${escapeHtml(S.q)}" style="width:200px">
+        ${S.tab === "entities" ? `<select class="d-input" id="gKind" style="width:auto;flex:none">
+          <option value="">全部类型</option>
+          ${(S.kinds || []).map((k) => `<option value="${escapeHtml(k)}"${k === S.kind ? " selected" : ""}>${escapeHtml(k)}</option>`).join("")}
+        </select>` : ``}
+        <select class="d-input" id="gPageSize" style="width:auto;flex:none">
+          ${[20, 50, 100, 200].map((n) => `<option value="${n}"${n === S.pageSize ? " selected" : ""}>每页 ${n}</option>`).join("")}
+        </select>
+        <button class="d-btn" id="gSearch">搜索</button>
+        <div style="flex:1"></div>
+        <button class="d-btn danger" id="gBatchDel" disabled>批量删除</button>
+      </div>`;
+
+    let table;
+    if (S.tab === "entities") {
+      table = `<table class="d-table"><thead><tr>
+        <th style="width:28px"><input type="checkbox" id="gAll"></th>
+        <th>名称</th><th style="width:120px">类型</th><th>描述</th><th style="width:170px">操作</th>
+      </tr></thead><tbody>${items.length ? items.map((n, idx) => {
+        const a = _ragGraphAttrs(n);
+        const ck = S.selected.has(_ragGraphKey("entities", n)) ? " checked" : "";
+        return `<tr>
+          <td><input type="checkbox" data-idx="${idx}"${ck}></td>
+          <td><b>${escapeHtml(n.name)}</b></td>
+          <td>${escapeHtml(n.kind || "Entity")}</td>
+          <td>${escapeHtml(truncate(a.description || "", 90))}</td>
+          <td class="d-row" style="gap:6px">
+            <button class="d-btn d-btn-sm" data-view="${idx}">详情</button>
+            <button class="d-btn d-btn-sm" data-edit="${idx}">编辑</button>
+            <button class="d-btn d-btn-sm danger" data-del="${idx}">删除</button>
+          </td>
+        </tr>`;
+      }).join("") : `<tr><td colspan="5"><div class="d-empty">没有实体</div></td></tr>`}</tbody></table>`;
+    } else {
+      table = `<table class="d-table"><thead><tr>
+        <th style="width:28px"><input type="checkbox" id="gAll"></th>
+        <th>源</th><th>目标</th><th>描述</th><th style="width:70px">权重</th><th style="width:170px">操作</th>
+      </tr></thead><tbody>${items.length ? items.map((e, idx) => {
+        const a = _ragGraphAttrs(e);
+        const ck = S.selected.has(_ragGraphKey("relations", e)) ? " checked" : "";
+        return `<tr>
+          <td><input type="checkbox" data-idx="${idx}"${ck}></td>
+          <td>${escapeHtml(e.from_id)}</td>
+          <td>${escapeHtml(e.to_id)}</td>
+          <td>${escapeHtml(truncate(a.description || e.label || "", 80))}</td>
+          <td>${a.weight != null ? escapeHtml(String(a.weight)) : "—"}</td>
+          <td class="d-row" style="gap:6px">
+            <button class="d-btn d-btn-sm" data-view="${idx}">详情</button>
+            <button class="d-btn d-btn-sm" data-edit="${idx}">编辑</button>
+            <button class="d-btn d-btn-sm danger" data-del="${idx}">删除</button>
+          </td>
+        </tr>`;
+      }).join("") : `<tr><td colspan="6"><div class="d-empty">没有关系</div></td></tr>`}</tbody></table>`;
+    }
+
+    body.innerHTML = drawerSection(S.tab === "entities" ? "实体列表" : "关系列表", toolbar + table);
+    body.appendChild(ragBuildPager(S.page, pages, total, (p) => { S.page = p; S.selected = new Set(); load(); }));
+
+    $("#gSearch", body).addEventListener("click", () => {
+      S.q = $("#gQ", body).value.trim(); S.page = 1; S.selected = new Set(); load();
+    });
+    $("#gQ", body).addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { S.q = e.target.value.trim(); S.page = 1; S.selected = new Set(); load(); }
+    });
+    const kindSel = $("#gKind", body);
+    if (kindSel) kindSel.addEventListener("change", () => { S.kind = kindSel.value; S.page = 1; S.selected = new Set(); load(); });
+    $("#gPageSize", body).addEventListener("change", (e) => { S.pageSize = parseInt(e.target.value, 10) || 50; S.page = 1; S.selected = new Set(); load(); });
+
+    $$("[data-idx]", body).forEach((ck) => {
+      if (ck.tagName !== "INPUT") return;
+      ck.addEventListener("change", () => {
+        const it = reg.get(ck.dataset.idx);
+        if (!it) return;
+        const key = _ragGraphKey(S.tab, it);
+        if (ck.checked) S.selected.add(key); else S.selected.delete(key);
+        updateBatch();
+      });
+    });
+    const all = $("#gAll", body);
+    if (all) all.addEventListener("change", () => {
+      $$("input[data-idx]", body).forEach((ck) => {
+        const it = reg.get(ck.dataset.idx);
+        if (!it) return;
+        ck.checked = all.checked;
+        const key = _ragGraphKey(S.tab, it);
+        if (all.checked) S.selected.add(key); else S.selected.delete(key);
+      });
+      updateBatch();
+    });
+
+    const delOne = async (key) => {
+      if (S.tab === "entities") {
+        const r = await apiPost("/api/graph/entity_delete", { thread_id: TID, name: key });
+        if (!r.ok) throw new Error(r.error || "删除失败");
+      } else {
+        const [src, tgt] = key.split("\u0001");
+        const r = await apiPost("/api/graph/relation_delete", { thread_id: TID, src, tgt });
+        if (!r.ok) throw new Error(r.error || "删除失败");
+      }
+    };
+
+    $("#gBatchDel", body).addEventListener("click", async () => {
+      const list = [...S.selected];
+      if (!list.length) return;
+      if (!confirm(`删除选中的 ${list.length} 条${S.tab === "entities" ? "实体" : "关系"}？不可恢复。`)) return;
+      const btn = $("#gBatchDel", body);
+      btn.disabled = true;
+      const res = await ragBatchDelete(list, delOne, (i, n) => { btn.textContent = `删除中 ${i}/${n}`; });
+      S.selected = new Set();
+      toast(`删除完成：成功 ${res.ok}，失败 ${res.fail}`, res.fail ? "error" : "success");
+      load();
+    });
+
+    $$("[data-view]", body).forEach((b) => b.addEventListener("click", () => {
+      const it = reg.get(b.dataset.view);
+      if (!it) return;
+      const a = _ragGraphAttrs(it);
+      const title = S.tab === "entities" ? `实体详情 · ${it.name}` : `关系详情 · ${it.from_id} → ${it.to_id}`;
+      if (S.tab === "relations") { a.from_id = it.from_id; a.to_id = it.to_id; }
+      ragModal(title, `
+        <div class="d-empty" style="padding:0 0 6px">${escapeHtml(it.id || "")}</div>
+        ${_ragGraphAttrRows(a)}
+        <div class="d-row" style="justify-content:flex-end;gap:8px;margin-top:10px"><button class="d-btn" data-close>关闭</button></div>`, { wide: true });
+    }));
+
+    $$("[data-del]", body).forEach((b) => b.addEventListener("click", async () => {
+      const it = reg.get(b.dataset.del);
+      if (!it) return;
+      const key = _ragGraphKey(S.tab, it);
+      const label = S.tab === "entities" ? `实体「${it.name}」` : `关系「${it.from_id} → ${it.to_id}」`;
+      if (!confirm(`删除${label}？不可恢复。`)) return;
+      try {
+        await delOne(key);
+        S.selected.delete(key);
+        toast("已删除", "success"); await load();
+      } catch (e) { toast("删除失败：" + e.message, "error"); }
+    }));
+
+    $$("[data-edit]", body).forEach((b) => b.addEventListener("click", () => {
+      const it = reg.get(b.dataset.edit);
+      if (!it) return;
+      const a = _ragGraphAttrs(it);
+      if (S.tab === "entities") {
+        const m = ragModal("编辑实体", `
+          <label style="font-size:12px;color:var(--text-soft)">名称（修改即重命名）</label>
+          <input class="d-input" id="geName" value="${escapeHtml(it.name)}" style="width:100%">
+          <label style="font-size:12px;color:var(--text-soft);margin-top:6px">类型</label>
+          <input class="d-input" id="geType" value="${escapeHtml(it.kind || a.entity_type || "")}" style="width:100%">
+          <label style="font-size:12px;color:var(--text-soft);margin-top:6px">描述</label>
+          <textarea class="d-input" id="geDesc" rows="6" style="width:100%">${escapeHtml(a.description || "")}</textarea>
+          <div class="d-row" style="justify-content:flex-end;gap:8px;margin-top:10px">
+            <button class="d-btn" data-close>取消</button>
+            <button class="d-btn primary" id="geSave">保存</button>
+          </div>`);
+        $("#geSave", m.bd).addEventListener("click", async () => {
+          try {
+            const r = await apiPost("/api/graph/entity_edit", {
+              thread_id: TID,
+              name: it.name,
+              new_name: $("#geName", m.bd).value.trim(),
+              entity_type: $("#geType", m.bd).value.trim(),
+              description: $("#geDesc", m.bd).value,
+              allow_rename: true,
+              allow_merge: false,
+            });
+            if (!r.ok) throw new Error(r.error || "保存失败");
+            toast("实体已更新", "success"); m.close(); await load();
+          } catch (e) { toast("保存失败：" + e.message, "error"); }
+        });
+      } else {
+        const m = ragModal("编辑关系", `
+          <div class="d-empty" style="padding:0 0 6px">${escapeHtml(it.from_id)} → ${escapeHtml(it.to_id)}</div>
+          <label style="font-size:12px;color:var(--text-soft)">描述</label>
+          <textarea class="d-input" id="grDesc" rows="5" style="width:100%">${escapeHtml(a.description || it.label || "")}</textarea>
+          <label style="font-size:12px;color:var(--text-soft);margin-top:6px">关键词（逗号分隔）</label>
+          <input class="d-input" id="grKw" value="${escapeHtml(Array.isArray(a.keywords) ? a.keywords.join(", ") : (a.keywords || ""))}" style="width:100%">
+          <label style="font-size:12px;color:var(--text-soft);margin-top:6px">权重</label>
+          <input class="d-input" id="grWeight" type="number" step="0.1" value="${a.weight != null ? escapeHtml(String(a.weight)) : ""}" style="width:100%">
+          <div class="d-row" style="justify-content:flex-end;gap:8px;margin-top:10px">
+            <button class="d-btn" data-close>取消</button>
+            <button class="d-btn primary" id="grSave">保存</button>
+          </div>`);
+        $("#grSave", m.bd).addEventListener("click", async () => {
+          const wraw = $("#grWeight", m.bd).value.trim();
+          try {
+            const r = await apiPost("/api/graph/relation_edit", {
+              thread_id: TID, src: it.from_id, tgt: it.to_id,
+              description: $("#grDesc", m.bd).value,
+              keywords: $("#grKw", m.bd).value,
+              weight: wraw === "" ? null : parseFloat(wraw),
+            });
+            if (!r.ok) throw new Error(r.error || "保存失败");
+            toast("关系已更新", "success"); m.close(); await load();
+          } catch (e) { toast("保存失败：" + e.message, "error"); }
+        });
+      }
+    }));
+  }
+
+  await load();
 }
