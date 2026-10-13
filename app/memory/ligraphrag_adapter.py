@@ -1791,6 +1791,92 @@ def _patch_text_doc_paths(thread_id: str, texts: List[str], doc_ids: List[str], 
             json.dump(data, f, ensure_ascii=False, indent=2)
 
 
+def _kb_graph_source_chunk_ids(rag: Any, nid: str) -> List[str]:
+    """从图谱节点/关系的 source_id 反推某文档的分块 ID。
+
+    当 ``doc_status.chunks_list`` 为空（例如分块被逐个删除）但
+    ``full_entities`` / ``full_relations`` 锚点仍指向图谱对象时，LightRAG 的
+    fail-closed 删除会以「恢复锚点命名了图谱对象却无分块可归属」为由拒绝。
+    此时图谱对象的 ``source_id`` 仍保留形如 ``<doc>-chunk-NNN`` 的分块 ID，
+    据此可把 chunks_list 补回，让标准删除路径完成图谱清理（唯一归属的实体/关系
+    被删除、多文档共享的被重建），而不是简单丢弃锚点后留下孤立对象。
+    """
+    try:
+        from lightrag.constants import GRAPH_FIELD_SEP
+    except Exception:
+        GRAPH_FIELD_SEP = "<SEP>"
+    prefix = f"{nid}-chunk-"
+    ids: set = set()
+
+    def _collect(source_id: Any) -> None:
+        if not source_id:
+            return
+        for cid in str(source_id).split(GRAPH_FIELD_SEP):
+            cid = cid.strip()
+            if cid.startswith(prefix):
+                ids.add(cid)
+
+    try:
+        fe = _run_on_worker(rag.full_entities.get_by_id(nid), timeout=60)
+    except Exception:
+        fe = None
+    try:
+        fr = _run_on_worker(rag.full_relations.get_by_id(nid), timeout=60)
+    except Exception:
+        fr = None
+    names = [str(x) for x in (((fe or {}).get("entity_names")) or [])]
+    pairs = [
+        (p[0], p[1])
+        for p in (((fr or {}).get("relation_pairs")) or [])
+        if isinstance(p, (list, tuple)) and len(p) == 2
+    ]
+
+    # 分块追踪存储（entity_chunks / relation_chunks）通常比图谱 source_id 更保真：
+    # 图谱对象被重建后 source_id 可能已不含本文件的分块，但追踪存储仍保留，
+    # 用于让 LightRAG 的归属分类（chunk_ids ∩ 追踪项 ∩ source_id）正确判定。
+    ec = getattr(rag, "entity_chunks", None)
+    rc = getattr(rag, "relation_chunks", None)
+
+    def _scan_chunk_store(store: Any, keys: List[str]) -> None:
+        if store is None or not keys:
+            return
+        for key in keys:
+            try:
+                row = _run_on_worker(store.get_by_id(key), timeout=60)
+            except Exception:
+                row = None
+            if isinstance(row, dict):
+                for cid in (row.get("chunk_ids") or []):
+                    if isinstance(cid, str) and cid.startswith(prefix):
+                        ids.add(cid)
+
+    _scan_chunk_store(ec, names)
+    _scan_chunk_store(rc, [f"{s}{GRAPH_FIELD_SEP}{t}" for s, t in pairs])
+
+    graph = getattr(rag, "chunk_entity_relation_graph", None)
+    if graph is not None:
+        if names:
+            try:
+                nodes = _run_on_worker(graph.get_nodes_batch(names), timeout=180) or {}
+                for nd in nodes.values():
+                    if isinstance(nd, dict):
+                        _collect(nd.get("source_id"))
+            except Exception:
+                pass
+        if pairs:
+            try:
+                edges = _run_on_worker(
+                    graph.get_edges_batch([{"src": s, "tgt": t} for s, t in pairs]),
+                    timeout=180,
+                ) or {}
+                for ed in edges.values():
+                    if isinstance(ed, dict):
+                        _collect(ed.get("source_id"))
+            except Exception:
+                pass
+    return sorted(ids)
+
+
 def kb_delete_doc(thread_id: str, doc_id: str) -> dict:
     """删除某文档及其分块/图谱/向量数据。"""
     nid = doc_id if str(doc_id).startswith("doc-") else "doc-" + str(doc_id)
@@ -1801,8 +1887,40 @@ def kb_delete_doc(thread_id: str, doc_id: str) -> dict:
     except Exception:
         pass
     try:
-        _run_on_worker(rag.adelete_by_doc_id(nid), timeout=180)
-        return {"ok": True, "doc_id": nid}
+        res = _run_on_worker(rag.adelete_by_doc_id(nid), timeout=180)
+        status = getattr(res, "status", None)
+        if status in ("success", "not_found"):
+            return {"ok": True, "doc_id": nid}
+
+        msg = str(getattr(res, "message", "") or "").strip()
+        # LightRAG 的 fail-closed 删除：文档还有图谱锚点、但 chunks_list 已空
+        # （分块被逐个删除后），会拒绝删除以免留下无法归属的图谱对象。此时从图谱
+        # source_id 反推分块 ID 补回 chunks_list，再走标准删除以正确清理图谱。
+        if "no chunks to attribute" in msg or "recovery anchor" in msg.lower():
+            repaired = _kb_graph_source_chunk_ids(rag, nid)
+            if repaired:
+                try:
+                    _run_on_worker(
+                        rag.doc_status.update_doc_status_fields(
+                            nid,
+                            {
+                                "chunks_list": list(repaired),
+                                "chunks_count": len(repaired),
+                                "error_msg": "",
+                            },
+                            missing_ok=True,
+                        ),
+                        timeout=60,
+                    )
+                    _run_on_worker(rag.doc_status.index_done_callback(), timeout=120)
+                except Exception:
+                    pass
+                res = _run_on_worker(rag.adelete_by_doc_id(nid), timeout=180)
+                if getattr(res, "status", None) in ("success", "not_found"):
+                    return {"ok": True, "doc_id": nid, "repaired_chunks": len(repaired)}
+                msg = str(getattr(res, "message", "") or msg).strip()
+
+        return {"ok": False, "doc_id": nid, "error": f"删除失败: {msg or '未知错误'}"}
     except Exception as e:
         return {"ok": False, "doc_id": nid, "error": f"删除失败: {e}"}
 
