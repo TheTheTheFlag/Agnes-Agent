@@ -1898,15 +1898,39 @@ def _kb_graph_source_chunk_ids(rag: Any, nid: str) -> List[str]:
     return sorted(ids)
 
 
+def _kb_resolve_doc_key(rag, doc_id: str) -> str:
+    """把前端给的文档 id 解析为 doc_status 中的真实键。
+
+    正常上传的文档键形如 ``doc-<hash>``，但 LightRAG 为"文件名重复"占位条目
+    （``metadata.is_duplicate``）使用 ``dup-<hash>`` 这类无前缀键。若一律补
+    ``doc-`` 前缀会查不到该键，``adelete_by_doc_id`` 即返回 not_found，
+    导致删除"成功"但记录残留。这里按候选键探测实际存在的键。
+    """
+    raw = str(doc_id or "").strip()
+    if not raw:
+        return raw
+    cands = [raw, raw[4:]] if raw.startswith("doc-") else [raw, "doc-" + raw]
+    for c in cands:
+        if not c:
+            continue
+        try:
+            rec = _run_on_worker(rag.doc_status.get_by_id(c), timeout=30)
+        except Exception:
+            rec = None
+        if rec:
+            return c
+    return raw
+
+
 def kb_delete_doc(thread_id: str, doc_id: str) -> dict:
     """删除某文档及其分块/图谱/向量数据。"""
-    nid = doc_id if str(doc_id).startswith("doc-") else "doc-" + str(doc_id)
     ns = _kb_resolve_ns(thread_id)
     rag = get_lightrag(thread_id, ns=ns)
     try:
         _ensure_initialized(thread_id, ns=ns)
     except Exception:
         pass
+    nid = _kb_resolve_doc_key(rag, doc_id)
     try:
         res = _run_on_worker(rag.adelete_by_doc_id(nid), timeout=180)
         status = getattr(res, "status", None)
@@ -1948,13 +1972,13 @@ def kb_delete_doc(thread_id: str, doc_id: str) -> dict:
 
 def kb_reprocess(thread_id: str, doc_id: str) -> dict:
     """重建某文档：先删除、再按原内容重新喂入（向量后端切换后用于重新嵌入）。"""
-    nid = doc_id if str(doc_id).startswith("doc-") else "doc-" + str(doc_id)
     ns = _kb_resolve_ns(thread_id)
     rag = get_lightrag(thread_id, ns=ns)
     try:
         _ensure_initialized(thread_id, ns=ns)
     except Exception:
         pass
+    nid = _kb_resolve_doc_key(rag, doc_id)
     try:
         rec = _run_on_worker(rag.full_docs.get_by_id(nid), timeout=60)
     except Exception:
