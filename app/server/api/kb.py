@@ -165,7 +165,9 @@ async def retry_failed(req: RetryFailedReq) -> dict:
     return L.kb_retry_failed_async(req.thread_id, strategy=req.chunking_strategy, target=req.target)
 
 
-@router.api_route("/delete", methods=["DELETE", "POST"])
+@router.api_route("/delete", methods=["DELETE", "POST", "OPTIONS"])
+@router.api_route("/doc/delete", methods=["DELETE", "POST", "OPTIONS"])
+@router.api_route("/document/delete", methods=["DELETE", "POST", "OPTIONS"])
 async def delete(req: DeleteReq) -> dict:
     return L.kb_delete_doc(req.thread_id, req.doc_id)
 
