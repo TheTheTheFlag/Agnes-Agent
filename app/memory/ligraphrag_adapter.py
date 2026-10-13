@@ -2242,6 +2242,37 @@ def kb_delete_chunk(thread_id: str, chunk_key: str) -> dict:
                 _run_on_worker(rag.doc_status.upsert({doc_id: rec}), timeout=60)
         _run_on_worker(rag.text_chunks.delete([key]), timeout=60)
         _run_on_worker(rag.chunks_vdb.delete([key]), timeout=60)
+        # 兜底清理本地 KV 文件
+        try:
+            base = _workspace_dir(thread_id, ns=ns)
+            for fn in ("kv_store_text_chunks.json", "kv_store_doc_status.json"):
+                p = os.path.join(base, fn)
+                if os.path.exists(p):
+                    try:
+                        with open(p, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                        changed = False
+                        if isinstance(data, dict) and key in data:
+                            data.pop(key, None)
+                            changed = True
+                        if fn == "kv_store_doc_status.json" and isinstance(data, dict) and doc_id and doc_id in data:
+                            rec2 = data.get(doc_id) or {}
+                            cl = list(rec2.get("chunks_list") or [])
+                            if cl and key in cl:
+                                cl = [c for c in cl if c != key]
+                                rec2["chunks_list"] = cl
+                                rec2["chunks_count"] = max(0, len(cl))
+                                data[doc_id] = rec2
+                                changed = True
+                        if changed:
+                            tmp = p + ".tmp"
+                            with open(tmp, "w", encoding="utf-8") as f:
+                                json.dump(data, f, ensure_ascii=False, indent=2)
+                            os.replace(tmp, p)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
         return {"ok": True, "doc_id": doc_id, "chunk_key": key}
     except Exception as e:
         return {"ok": False, "chunk_key": key, "error": f"删除切片失败: {e}"}
