@@ -3364,12 +3364,12 @@ async function renderGraphTab(el) {
         <div class="d-empty" style="margin:0">实体关系可视化 · <b>全局图谱（跨会话）</b></div>
         <button class="d-btn d-btn-sm" id="gvRefresh">刷新</button>
       </div>
-      <div class="d-row" style="gap:14px;flex-wrap:wrap;margin-top:6px">
-        <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-soft)">
-          实体数量 <input type="range" id="gvNodes" min="20" max="500" step="20" value="${S.nodes}" style="width:130px"> <b id="gvNodesVal" style="min-width:26px">${S.nodes}</b>
+      <div style="display:flex;flex-wrap:wrap;gap:18px;align-items:center;margin-top:6px">
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-soft);width:auto;flex:0 0 auto">
+          实体数量 <input type="range" id="gvNodes" min="20" max="500" step="20" value="${S.nodes}" style="width:130px;flex:0 0 auto"> <b id="gvNodesVal" style="min-width:26px">${S.nodes}</b>
         </label>
-        <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-soft)">
-          深度 <input type="range" id="gvDepth" min="1" max="5" step="1" value="${S.depth}" style="width:90px"> <b id="gvDepthVal" style="min-width:14px">${S.depth}</b>
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-soft);width:auto;flex:0 0 auto">
+          深度 <input type="range" id="gvDepth" min="1" max="5" step="1" value="${S.depth}" style="width:90px;flex:0 0 auto"> <b id="gvDepthVal" style="min-width:14px">${S.depth}</b>
         </label>
       </div>
       <div class="d-empty" id="gvHint" style="margin-top:8px">加载中…</div>
