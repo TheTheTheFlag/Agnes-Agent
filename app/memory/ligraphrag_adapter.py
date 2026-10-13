@@ -1220,7 +1220,7 @@ async def _neo4j_snapshot(storage: Any) -> dict:
         node_list.append({
             "id": nid,
             "name": str(n.get("name") or nid),
-            "kind": str(n.get("kind") or "Entity"),
+            "kind": str(n.get("entity_type") or n.get("kind") or n.get("type") or "Entity"),
             "attrs": json.dumps(n, ensure_ascii=False, default=str),
         })
     edge_list = []
@@ -2421,3 +2421,156 @@ def kb_edit_chunk(thread_id: str, chunk_key: str, content: str, tags: str = "") 
         return {"ok": True, "chunk_key": key}
     except Exception as e:
         return {"ok": False, "chunk_key": key, "error": f"编辑切片失败: {e}"}
+
+# GRAPH MGMT
+
+
+# X
+
+# dummy
+
+
+# === GRAPH MGMT ===
+# === GRAPH MGMT FULL ===
+def graph_entities(thread_id: str, q: str = "", kind: str = "", page: int = 1, page_size: int = 50) -> dict:
+    ns = _kb_resolve_ns(thread_id)
+    rag = get_lightrag(thread_id, ns=ns)
+    try:
+        _ensure_initialized(thread_id, ns=ns)
+    except Exception:
+        pass
+    page = max(1, int(page))
+    page_size = min(500, max(10, int(page_size)))
+    qn = (q or "").strip().lower()
+    kindn = (kind or "").strip()
+    try:
+        snap = graph_snapshot(thread_id, ns=ns)
+    except Exception:
+        snap = {"nodes": []}
+    nodes = snap.get("nodes", []) or []
+    items = []
+    for n in nodes:
+        name = str(n.get("name") or n.get("id") or "")
+        k = str(n.get("kind") or "Entity")
+        attrs = n.get("attrs") or "{}"
+        if qn and qn not in name.lower() and qn not in str(attrs).lower():
+            continue
+        if kindn and k != kindn:
+            continue
+        items.append(n)
+    total = len(items)
+    start = (page - 1) * page_size
+    page_items = items[start:start + page_size]
+    kinds = sorted(set(str(x.get("kind") or "Entity") for x in nodes))
+    return {"thread_id": thread_id, "total": total, "page": page, "page_size": page_size, "entities": page_items, "kinds": kinds}
+def graph_relations(thread_id: str, q: str = "", src: str = "", tgt: str = "", page: int = 1, page_size: int = 50) -> dict:
+    ns = _kb_resolve_ns(thread_id)
+    rag = get_lightrag(thread_id, ns=ns)
+    try:
+        _ensure_initialized(thread_id, ns=ns)
+    except Exception:
+        pass
+    page = max(1, int(page))
+    page_size = min(500, max(10, int(page_size)))
+    qn = (q or "").strip().lower()
+    srcn = (src or "").strip()
+    tgtn = (tgt or "").strip()
+    try:
+        snap = graph_snapshot(thread_id, ns=ns)
+    except Exception:
+        snap = {"edges": []}
+    edges = snap.get("edges", []) or []
+    items = []
+    for e in edges:
+        fid = str(e.get("from_id") or e.get("source") or "")
+        tidv = str(e.get("to_id") or e.get("target") or "")
+        lab = str(e.get("label") or "")
+        if qn and qn not in lab.lower() and qn not in f"{fid} {tidv}".lower():
+            continue
+        if srcn and fid != srcn:
+            continue
+        if tgtn and tidv != tgtn:
+            continue
+        items.append(e)
+    total = len(items)
+    start = (page - 1) * page_size
+    page_items = items[start:start + page_size]
+    return {"thread_id": thread_id, "total": total, "page": page, "page_size": page_size, "relations": page_items}
+def graph_entity_edit(thread_id: str, name: str, entity_type: str = "", description: str = "", allow_rename: bool = True, allow_merge: bool = False) -> dict:
+    ns = _kb_resolve_ns(thread_id)
+    rag = get_lightrag(thread_id, ns=ns)
+    try:
+        _ensure_initialized(thread_id, ns=ns)
+    except Exception:
+        pass
+    if not name:
+        return {"ok": False, "error": "ʵ�����Ʋ���Ϊ��"}
+    updated = {}
+    if entity_type:
+        updated["entity_type"] = str(entity_type)
+    if description is not None:
+        updated["description"] = str(description)
+    try:
+        res = _run_on_worker(rag.aedit_entity(name, updated, allow_rename=allow_rename, allow_merge=allow_merge), timeout=180)
+        return {"ok": True, "result": res}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+def graph_entity_delete(thread_id: str, name: str) -> dict:
+    ns = _kb_resolve_ns(thread_id)
+    rag = get_lightrag(thread_id, ns=ns)
+    try:
+        _ensure_initialized(thread_id, ns=ns)
+    except Exception:
+        pass
+    try:
+        res = _run_on_worker(rag.adelete_by_entity(name), timeout=180)
+        st = getattr(res, "status", None)
+        return {"ok": st in ("success", "not_found"), "status": st}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+def graph_relation_edit(thread_id: str, src: str, tgt: str, description: str = "", keywords: str = "", weight: float = None) -> dict:
+    ns = _kb_resolve_ns(thread_id)
+    rag = get_lightrag(thread_id, ns=ns)
+    try:
+        _ensure_initialized(thread_id, ns=ns)
+    except Exception:
+        pass
+    updated = {}
+    if description is not None:
+        updated["description"] = str(description)
+    if keywords:
+        ks = [k.strip() for k in str(keywords).split(",") if k.strip()]
+        updated["keywords"] = ks
+    if weight is not None:
+        try:
+            updated["weight"] = float(weight)
+        except Exception:
+            pass
+    try:
+        res = _run_on_worker(rag.aedit_relation(src, tgt, updated), timeout=180)
+        return {"ok": True, "result": res}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+def graph_relation_delete(thread_id: str, src: str, tgt: str) -> dict:
+    ns = _kb_resolve_ns(thread_id)
+    rag = get_lightrag(thread_id, ns=ns)
+    try:
+        _ensure_initialized(thread_id, ns=ns)
+    except Exception:
+        pass
+    try:
+        res = _run_on_worker(rag.adelete_by_relation(src, tgt), timeout=180)
+        st = getattr(res, "status", None)
+        return {"ok": st in ("success", "not_found"), "status": st}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+def graph_merge_variants(thread_id: str) -> dict:
+    try:
+        merged = merge_entity_variants(thread_id)
+        return {"ok": True, "merged": merged}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}

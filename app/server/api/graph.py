@@ -1,4 +1,4 @@
-from typing import Dict
+﻿from typing import Dict
 from fastapi import APIRouter, Query
 
 router = APIRouter(prefix="/api/graph", tags=["graph"])
@@ -30,3 +30,67 @@ async def graph_edges(thread_id: str = Query(..., description="会话 ID")) -> D
         "edge_count": len(snap.get("edges", [])),
         "edges": snap.get("edges", []),
     }
+
+
+@router.get("/entities")
+async def graph_entities(thread_id: str = Query(...), q: str = Query(""), kind: str = Query(""), page: int = Query(1), page_size: int = Query(50)) -> Dict:
+    from app.memory.ligraphrag_adapter import graph_entities as fn
+    try:
+        return fn(thread_id, q=q, kind=kind, page=page, page_size=page_size)
+    except Exception as e:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/relations")
+async def graph_relations(thread_id: str = Query(...), q: str = Query(""), src: str = Query(""), tgt: str = Query(""), page: int = Query(1), page_size: int = Query(50)) -> Dict:
+    from app.memory.ligraphrag_adapter import graph_relations as fn
+    try:
+        return fn(thread_id, q=q, src=src, tgt=tgt, page=page, page_size=page_size)
+    except Exception as e:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/entity_edit")
+async def entity_edit(req) -> Dict:
+    from app.memory.ligraphrag_adapter import graph_entity_edit as fn
+    try:
+        return fn(req.thread_id, req.name, entity_type=req.entity_type, description=req.description, allow_rename=req.allow_rename, allow_merge=req.allow_merge)
+    except Exception as e:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/entity_delete")
+async def entity_delete(req) -> Dict:
+    from app.memory.ligraphrag_adapter import graph_entity_delete as fn
+    try:
+        return fn(req.thread_id, req.name)
+    except Exception as e:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/relation_edit")
+async def relation_edit(req) -> Dict:
+    from app.memory.ligraphrag_adapter import graph_relation_edit as fn
+    try:
+        return fn(req.thread_id, req.src, req.tgt, description=req.description, keywords=req.keywords, weight=req.weight)
+    except Exception as e:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/relation_delete")
+async def relation_delete(req) -> Dict:
+    from app.memory.ligraphrag_adapter import graph_relation_delete as fn
+    try:
+        return fn(req.thread_id, req.src, req.tgt)
+    except Exception as e:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/merge_variants")
+async def merge_variants(thread_id: str = Query(...)) -> Dict:
+    from app.memory.ligraphrag_adapter import graph_merge_variants as fn
+    try:
+        return fn(thread_id)
+    except Exception as e:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=500, detail=str(e))
