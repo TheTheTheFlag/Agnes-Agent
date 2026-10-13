@@ -2502,6 +2502,105 @@ def graph_relations(thread_id: str, q: str = "", src: str = "", tgt: str = "", p
     start = (page - 1) * page_size
     page_items = items[start:start + page_size]
     return {"thread_id": thread_id, "total": total, "page": page, "page_size": page_size, "relations": page_items}
+
+
+def graph_view(thread_id: str, ns: Optional[str] = None, max_nodes: int = 80, depth: int = 2) -> dict:
+    """为「图谱」可视化面板返回一个受控规模的连通子图。
+
+    - max_nodes：最多展示的实体数（默认 80，避免一次性渲染整张大图）。
+    - depth：从高连接度枢纽节点向外扩展的跳数（默认 2）。
+    选取策略：按度（连接数）降序遍历节点作为种子做多源 BFS，每层邻居再按度降序
+    加入，直到达到 max_nodes 上限；最后返回被选中节点诱导出的边。
+    """
+    try:
+        mn = int(max_nodes)
+    except Exception:
+        mn = 80
+    try:
+        dp = int(depth)
+    except Exception:
+        dp = 2
+    mn = max(10, min(1000, mn))
+    dp = max(1, min(6, dp))
+
+    snap = graph_snapshot(thread_id, ns=ns, max_nodes=20000, max_edges=40000)
+    nodes = snap.get("nodes", []) or []
+    edges = snap.get("edges", []) or []
+    total_nodes = len(nodes)
+    total_edges = len(edges)
+
+    by_id: dict = {}
+    for n in nodes:
+        nid = str(n.get("id") or "")
+        if nid:
+            by_id[nid] = n
+
+    adj: dict = {nid: set() for nid in by_id}
+    for e in edges:
+        a = str(e.get("from_id") or e.get("source") or "")
+        b = str(e.get("to_id") or e.get("target") or "")
+        if a in adj and b in adj and a != b:
+            adj[a].add(b)
+            adj[b].add(a)
+
+    degree = {nid: len(nbrs) for nid, nbrs in adj.items()}
+
+    def nbr_order(nid: str):
+        return sorted(adj[nid], key=lambda x: (-degree.get(x, 0), x))
+
+    order = sorted(by_id.keys(), key=lambda x: (-degree.get(x, 0), x))
+
+    selected: set = set()
+    selected_order: list = []
+    for seed in order:
+        if len(selected) >= mn:
+            break
+        if seed in selected:
+            continue
+        frontier = [seed]
+        selected.add(seed)
+        selected_order.append(seed)
+        for _ in range(dp):
+            nxt = []
+            for cur in frontier:
+                if len(selected) >= mn:
+                    break
+                for nb in nbr_order(cur):
+                    if nb in selected:
+                        continue
+                    selected.add(nb)
+                    selected_order.append(nb)
+                    nxt.append(nb)
+                    if len(selected) >= mn:
+                        break
+            frontier = nxt
+            if not frontier or len(selected) >= mn:
+                break
+
+    out_nodes = [by_id[nid] for nid in selected_order if nid in by_id]
+    out_edges = []
+    for e in edges:
+        a = str(e.get("from_id") or e.get("source") or "")
+        b = str(e.get("to_id") or e.get("target") or "")
+        if a in selected and b in selected:
+            out_edges.append(e)
+
+    ns_resolved = ns or _kb_resolve_ns(thread_id)
+    return {
+        "thread_id": thread_id,
+        "namespace": ns_resolved,
+        "namespace_label": "全局图谱（跨会话）" if ns_resolved == _GLOBAL_GRAPH_NS else ns_resolved,
+        "total_nodes": total_nodes,
+        "total_edges": total_edges,
+        "max_nodes": mn,
+        "depth": dp,
+        "node_count": len(out_nodes),
+        "edge_count": len(out_edges),
+        "nodes": out_nodes,
+        "edges": out_edges,
+    }
+
+
 def graph_entity_edit(thread_id: str, name: str, entity_type: str = "", description: str = "", new_name: str = "", allow_rename: bool = True, allow_merge: bool = False) -> dict:
     ns = _kb_resolve_ns(thread_id)
     rag = get_lightrag(thread_id, ns=ns)

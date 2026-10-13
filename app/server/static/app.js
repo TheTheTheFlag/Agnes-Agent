@@ -2592,6 +2592,7 @@ function closeDrawer() {
 
 function activateTab(id) {
   State.drawerTab = id;
+  if (id !== "graph") { _graphRefreshKey++; _destroyGraphNetwork(); }
   $$(".drawer-tab", drawerTabsEl).forEach((t) => t.classList.toggle("active", t.dataset.id === id));
   const loader = DRAWER_LOADERS[id];
   if (loader) loader(drawerBody);
@@ -3311,7 +3312,7 @@ async function renderDisplayTab(el) {
   });
 }
 
-/* ---- 图谱（GraphRAG / L6） ---- */
+/* ---- 图谱（GraphRAG / L6）：实体关系可视化 ---- */
 const GRAPH_KIND_COLORS = {
   Person: "#7c5cff",
   Organization: "#5a9cff",
@@ -3327,12 +3328,121 @@ const GRAPH_KIND_COLORS = {
   Other: "#95a5a6",
 };
 
+const GRAPH_FALLBACK_COLORS = ["#7c5cff", "#5a9cff", "#34c08b", "#ff9f43", "#ff6b6b", "#22b8b8", "#f783ac", "#74b816", "#a0619a", "#b0965e", "#e17055", "#00b894", "#0984e3", "#d63031", "#6c5ce7", "#95a5a6"];
+
+function _graphKindColor(kind) {
+  const k = String(kind || "").trim();
+  const cap = k ? k.charAt(0).toUpperCase() + k.slice(1) : "Other";
+  if (GRAPH_KIND_COLORS[k]) return GRAPH_KIND_COLORS[k];
+  if (GRAPH_KIND_COLORS[cap]) return GRAPH_KIND_COLORS[cap];
+  let h = 0;
+  for (let i = 0; i < k.length; i++) h = (h * 31 + k.charCodeAt(i)) >>> 0;
+  return GRAPH_FALLBACK_COLORS[h % GRAPH_FALLBACK_COLORS.length];
+}
+
 let _graphNetwork = null;
 let _graphRefreshKey = 0;
 
+function _destroyGraphNetwork() {
+  if (_graphNetwork) {
+    try { _graphNetwork.destroy(); } catch (e) { /* ignore */ }
+    _graphNetwork = null;
+  }
+}
+
 async function renderGraphTab(el) {
-  el.innerHTML = `<div class="d-empty">加载中…</div>`;
-  try { await ragGraphManage(el); } catch (e) { el.innerHTML = drawerErr(e); }
+  _graphRefreshKey++;
+  const key = _graphRefreshKey;
+  _destroyGraphNetwork();
+  const TID = "__global__";
+  const S = { nodes: 80, depth: 2 };
+  const GRAPH_VIEW_DEFAULTS = { nodes: 80, depth: 2 };
+
+  el.innerHTML = `
+    <div style="display:flex;flex-direction:column;height:100%;min-height:0">
+      <div class="d-row" style="justify-content:space-between;flex-wrap:wrap;gap:8px">
+        <div class="d-empty" style="margin:0">实体关系可视化 · <b>全局图谱（跨会话）</b></div>
+        <button class="d-btn d-btn-sm" id="gvRefresh">刷新</button>
+      </div>
+      <div class="d-row" style="gap:14px;flex-wrap:wrap;margin-top:6px">
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-soft)">
+          实体数量 <input type="range" id="gvNodes" min="20" max="500" step="20" value="${S.nodes}" style="width:130px"> <b id="gvNodesVal" style="min-width:26px">${S.nodes}</b>
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-soft)">
+          深度 <input type="range" id="gvDepth" min="1" max="5" step="1" value="${S.depth}" style="width:90px"> <b id="gvDepthVal" style="min-width:14px">${S.depth}</b>
+        </label>
+      </div>
+      <div class="d-empty" id="gvHint" style="margin-top:8px">加载中…</div>
+      <div id="gvLegend" style="display:flex;flex-wrap:wrap;gap:10px;margin-top:6px;font-size:11px;color:var(--text-soft)"></div>
+      <div id="gvCanvas" style="flex:1;border:1px solid var(--border,#333);border-radius:8px;background:var(--panel,#fff);margin-top:8px;min-height:320px"></div>
+    </div>`;
+
+  const renderLegend = (rawNodes) => {
+    const box = $("#gvLegend", el);
+    if (!box) return;
+    const kinds = {};
+    (rawNodes || []).forEach((n) => { const k = n.kind || "Entity"; kinds[k] = (kinds[k] || 0) + 1; });
+    box.innerHTML = Object.keys(kinds).sort((a, b) => kinds[b] - kinds[a]).map((k) =>
+      `<span style="display:inline-flex;align-items:center;gap:4px"><i style="width:10px;height:10px;border-radius:2px;display:inline-block;background:${_graphKindColor(k)}"></i>${escapeHtml(k)} ${kinds[k]}</span>`
+    ).join("");
+  };
+
+  const render = async () => {
+    const hint = $("#gvHint", el);
+    const canvas = $("#gvCanvas", el);
+    if (!hint || !canvas) return;
+    if (key !== _graphRefreshKey) return;
+    hint.textContent = "加载中…";
+    try {
+      const q = new URLSearchParams({ thread_id: TID, max_nodes: String(S.nodes), depth: String(S.depth) });
+      const res = await apiGet("/api/graph/view?" + q.toString());
+      if (key !== _graphRefreshKey) return;
+      const raw = res.nodes || [];
+      const nodes = raw.map((nd) => ({
+        id: nd.id,
+        label: nd.name,
+        color: { background: _graphKindColor(nd.kind), border: "#333" },
+        title: `${nd.name}\n类型: ${nd.kind || "Entity"}`,
+        shape: "dot",
+        size: 16,
+      }));
+      const edges = (res.edges || []).map((ed) => ({
+        id: ed.id,
+        from: ed.from_id,
+        to: ed.to_id,
+        title: ed.label || "",
+        arrows: "to",
+      }));
+      hint.textContent = `显示 ${res.node_count} 个实体 / ${res.edge_count} 条关系（全图 ${res.total_nodes} / ${res.total_edges}）`;
+      renderLegend(raw);
+      _destroyGraphNetwork();
+      if (!nodes.length) {
+        canvas.innerHTML = `<div class="d-empty" style="margin:20px">图谱还没有数据</div>`;
+        return;
+      }
+      canvas.innerHTML = "";
+      const data = { nodes: new vis.DataSet(nodes), edges: new vis.DataSet(edges) };
+      const options = {
+        autoResize: true,
+        nodes: { font: { color: "#222", size: 13 }, borderWidth: 1 },
+        edges: { color: { color: "#b8bcc8" }, smooth: { enabled: true, type: "dynamic" } },
+        interaction: { hover: true, tooltipDelay: 120, dragNodes: true },
+        physics: { enabled: true, stabilization: { iterations: 120 }, barnesHut: { gravitationalConstant: -4200, springLength: 120 } },
+      };
+      _graphNetwork = new vis.Network(canvas, data, options);
+    } catch (err) {
+      if (key !== _graphRefreshKey) return;
+      hint.textContent = "图谱加载失败：" + err.message;
+    }
+  };
+
+  const nInp = $("#gvNodes", el), dInp = $("#gvDepth", el);
+  nInp.addEventListener("input", () => { S.nodes = parseInt(nInp.value, 10) || GRAPH_VIEW_DEFAULTS.nodes; $("#gvNodesVal", el).textContent = S.nodes; });
+  dInp.addEventListener("input", () => { S.depth = parseInt(dInp.value, 10) || GRAPH_VIEW_DEFAULTS.depth; $("#gvDepthVal", el).textContent = S.depth; });
+  nInp.addEventListener("change", render);
+  dInp.addEventListener("change", render);
+  $("#gvRefresh", el).addEventListener("click", render);
+  await render();
 }
 
 async function renderUsersTab(el) {

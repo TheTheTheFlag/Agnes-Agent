@@ -63,6 +63,16 @@ async def graph_edges(thread_id: str = Query(..., description="会话 ID")) -> D
     }
 
 
+@router.get("/view")
+async def graph_view(thread_id: str = Query(...), max_nodes: int = Query(80), depth: int = Query(2)) -> Dict:
+    from app.memory.ligraphrag_adapter import graph_view as fn, _graph_ns
+    try:
+        return fn(thread_id, ns=_graph_ns(thread_id), max_nodes=max_nodes, depth=depth)
+    except Exception as e:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/entities")
 async def graph_entities(thread_id: str = Query(...), q: str = Query(""), kind: str = Query(""), page: int = Query(1), page_size: int = Query(50)) -> Dict:
     from app.memory.ligraphrag_adapter import graph_entities as fn
