@@ -1153,12 +1153,13 @@ def lightrag_query(thread_id: str, query: str, top_k: int = 12, mode: str = "hyb
     return content
 
 
-def graph_snapshot(thread_id: str, ns: Optional[str] = None) -> dict:
+def graph_snapshot(thread_id: str, ns: Optional[str] = None, max_nodes: int = 500, max_edges: int = 1000) -> dict:
     """导出某会话/知识库当前知识图谱的节点/边列表（只在 worker loop 上读，线程安全）。
 
     返回 {nodes: [{id, name, kind, attrs}], edges: [{id, from_id, to_id, label, attrs}]}，
     供 /api/graph/nodes、/api/graph/edges 使用。NetworkX 存储读内网 Graph 对象；
-    Neo4J 存储读 Cypher 快照。
+    Neo4J 存储读 Cypher 快照。max_nodes/max_edges 控制返回上限（默认沿用旧的
+    500/1000 以兼容图渲染；管理页传入更大值以覆盖全图）。
     """
     def _read() -> dict:
         rag = get_lightrag(thread_id, ns=ns)
@@ -1182,7 +1183,7 @@ def graph_snapshot(thread_id: str, ns: Optional[str] = None) -> dict:
                     "label": (data or {}).get("description", "") or "",
                     "attrs": json.dumps(data or {}, ensure_ascii=False, default=str),
                 })
-        return {"nodes": nodes[:500], "edges": edges[:1000]}
+        return {"nodes": nodes[:max_nodes], "edges": edges[:max_edges]}
 
     async def _ensure_then_read() -> dict:
         rag = get_lightrag(thread_id, ns=ns)
@@ -1192,7 +1193,7 @@ def graph_snapshot(thread_id: str, ns: Optional[str] = None) -> dict:
             pass  # 已初始化过时由 LightRAG 内部容忍；失败交 _read 兜底
         storage = getattr(rag, "chunk_entity_relation_graph", None)
         if storage is not None and type(storage).__name__ == "Neo4JStorage":
-            return await _neo4j_snapshot(storage)
+            return await _neo4j_snapshot(storage, max_nodes=max_nodes, max_edges=max_edges)
         return _read()
 
     try:
@@ -1201,7 +1202,7 @@ def graph_snapshot(thread_id: str, ns: Optional[str] = None) -> dict:
         return {"nodes": [], "edges": []}
 
 
-async def _neo4j_snapshot(storage: Any) -> dict:
+async def _neo4j_snapshot(storage: Any, max_nodes: int = 500, max_edges: int = 1000) -> dict:
     """从 Neo4JStorage 读全图快照（worker loop 上的 async Cypher 读取）。
 
     LightRAG 的 Neo4j 节点属性含 entity_id/kind/description 等，边属性含
@@ -1236,7 +1237,7 @@ async def _neo4j_snapshot(storage: Any) -> dict:
             "label": str((e.get("description") or "") or ""),
             "attrs": json.dumps(e, ensure_ascii=False, default=str),
         })
-    return {"nodes": node_list[:500], "edges": edge_list[:1000]}
+    return {"nodes": node_list[:max_nodes], "edges": edge_list[:max_edges]}
 
 
 def clear_instance(thread_id: str, ns: Optional[str] = None) -> None:
@@ -1397,7 +1398,7 @@ def kb_status(thread_id: str) -> dict:
     relations = _read_json_if_exists(os.path.join(ws, "kv_store_full_relations.json"))
     snap = {}
     try:
-        snap = graph_snapshot(thread_id, ns=ns)
+        snap = graph_snapshot(thread_id, ns=ns, max_nodes=50000, max_edges=50000)
     except Exception:
         pass
     vec_cls = type(getattr(rag, "entities_vdb", None)).__name__ if getattr(rag, "entities_vdb", None) else "?"
@@ -2444,7 +2445,7 @@ def graph_entities(thread_id: str, q: str = "", kind: str = "", page: int = 1, p
     qn = (q or "").strip().lower()
     kindn = (kind or "").strip()
     try:
-        snap = graph_snapshot(thread_id, ns=ns)
+        snap = graph_snapshot(thread_id, ns=ns, max_nodes=50000, max_edges=50000)
     except Exception:
         snap = {"nodes": []}
     nodes = snap.get("nodes", []) or []
@@ -2476,11 +2477,12 @@ def graph_relations(thread_id: str, q: str = "", src: str = "", tgt: str = "", p
     srcn = (src or "").strip()
     tgtn = (tgt or "").strip()
     try:
-        snap = graph_snapshot(thread_id, ns=ns)
+        snap = graph_snapshot(thread_id, ns=ns, max_nodes=50000, max_edges=50000)
     except Exception:
         snap = {"edges": []}
     edges = snap.get("edges", []) or []
     items = []
+    seen = set()
     for e in edges:
         fid = str(e.get("from_id") or e.get("source") or "")
         tidv = str(e.get("to_id") or e.get("target") or "")
@@ -2491,6 +2493,10 @@ def graph_relations(thread_id: str, q: str = "", src: str = "", tgt: str = "", p
             continue
         if tgtn and tidv != tgtn:
             continue
+        dk = (fid, tidv)
+        if dk in seen:
+            continue
+        seen.add(dk)
         items.append(e)
     total = len(items)
     start = (page - 1) * page_size
