@@ -345,7 +345,7 @@ async def feedback_list(thread_id: Optional[str] = None, limit: int = Query(100)
     return {"items": L.kb_feedback_list(thread_id, limit)}
 
 
-@router.api_route("/chunk_delete", methods=["POST", "DELETE"])
+@router.api_route("/chunk_delete", methods=["POST", "DELETE", "OPTIONS"])
 async def chunk_delete(req: ChunkDeleteReq) -> dict:
     return L.kb_delete_chunk(req.thread_id, req.chunk_key)
 
