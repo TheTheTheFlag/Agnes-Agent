@@ -850,7 +850,7 @@ async function ragGraphManage(content) {
 
   const setTab = (tab) => {
     if (S.tab === tab) return;
-    S.tab = tab; S.page = 1; S.kind = ""; S.selected = new Set();
+    S.tab = tab; S.page = 1; S.q = ""; S.kind = ""; S.selected = new Set();
     $$("[data-gtab]", content).forEach((x) => x.classList.toggle("active", x.dataset.gtab === tab));
     load();
   };
