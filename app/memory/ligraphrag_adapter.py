@@ -1793,7 +1793,7 @@ def _patch_text_doc_paths(thread_id: str, texts: List[str], doc_ids: List[str], 
 
 def kb_delete_doc(thread_id: str, doc_id: str) -> dict:
     """删除某文档及其分块/图谱/向量数据。"""
-    nid = doc_id if str(doc_id).startswith("doc-") else "doc-" + str(doc_id)
+    nid = str(doc_id) if str(doc_id).startswith("doc-") else "doc-" + str(doc_id)
     ns = _kb_resolve_ns(thread_id)
     rag = get_lightrag(thread_id, ns=ns)
     try:
@@ -1801,9 +1801,26 @@ def kb_delete_doc(thread_id: str, doc_id: str) -> dict:
     except Exception:
         pass
     try:
-        _run_on_worker(rag.adelete_by_doc_id(nid), timeout=180)
+        _run_on_worker(rag.adelete_by_doc_id(nid), timeout=300)
         return {"ok": True, "doc_id": nid}
     except Exception as e:
+        # 尝试清理本地 KV 状态，避免 UI 残留
+        try:
+            ws = _workspace_dir(thread_id, ns=ns)
+            for fname in ("kv_store_doc_status.json", "kv_store_text_chunks.json"):
+                p = os.path.join(ws, fname)
+                if os.path.exists(p):
+                    try:
+                        with open(p, "r", encoding="utf-8") as f:
+                            d = json.load(f)
+                        if nid in d:
+                            del d[nid]
+                        with open(p, "w", encoding="utf-8") as f:
+                            json.dump(d, f, ensure_ascii=False, indent=2)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
         return {"ok": False, "doc_id": nid, "error": f"删除失败: {e}"}
 
 
