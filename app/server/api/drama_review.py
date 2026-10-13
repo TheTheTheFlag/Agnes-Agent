@@ -9,7 +9,7 @@
 
 渲染链路约定（2026-09-29 反转，配音 = 视频自带音轨）：
   段视频默认保留模型自带音轨（不 -an）；配音随视频生成自带，角色音色与中文发音锁写进视频词
-  （short-drama-director `references/drama-pipeline-SOP.md` §9 / `references/render-contracts.md` §8）。
+  （short-drama-agnes-sop `references/drama-pipeline-SOP.md` §9 / `references/render-contracts.md` §8）。
   _render_env 设 `KEEP_AUDIO=1` 为冗余保险（新驱动默认即保留，兼容旧驱动）。
   段缝采用「尾帧接力」：段 N 渲染时首帧=ffmpeg 抽段 N-1 视频真实末帧（resize 2K 覆盖 kf1.png），
   段 N-1 实际渲染末帧 100% 成为段 N 首帧，段缝像素级一致。
@@ -28,7 +28,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, File, Form, Request, UploadFile
 from fastapi.responses import JSONResponse
 
 from app.userctx import current_user
@@ -75,9 +75,11 @@ def _token_env():
 
 
 def _render_env():
-    """渲染子进程环境：token + KEEP_AUDIO=1（新口径默认保留音轨，此值为冗余保险，兼容新旧驱动）。"""
+    """渲染子进程环境：token + KEEP_AUDIO=1（新口径默认保留音轨，此值冗余保险，兼容新旧驱动）。
+    另加 PYTHONUNBUFFERED=1，确保子进程 print 行实时流入任务日志（否则管道缓冲导致进度滞后）。"""
     env = _token_env()
     env["KEEP_AUDIO"] = "1"
+    env["PYTHONUNBUFFERED"] = "1"
     return env
 
 
@@ -125,22 +127,74 @@ def _run_proc(cmd, timeout: int, env):
     return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
 
 
+def _run_proc_stream(cmd, timeout: int, env, on_line=None):
+    """_run_proc 的流式版：逐行回调 stdout/stderr（实时进度），超时仍按进程组杀掉。
+
+    on_line 收到的是去掉行尾换行符的原始行；回调异常被吞掉，不影响子进程。
+    """
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, env=env, start_new_session=True, bufsize=1)
+    out_buf, err_buf = [], []
+
+    def _reader(stream, buf):
+        try:
+            for line in iter(stream.readline, ""):
+                if not line:
+                    break
+                buf.append(line)
+                if on_line:
+                    try:
+                        on_line(line.rstrip("\r\n"))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        finally:
+            try:
+                stream.close()
+            except Exception:
+                pass
+
+    ths = [threading.Thread(target=_reader, args=(proc.stdout, out_buf), daemon=True),
+           threading.Thread(target=_reader, args=(proc.stderr, err_buf), daemon=True)]
+    for th in ths:
+        th.start()
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_process_tree(proc)
+        for th in ths:
+            th.join(timeout=5)
+        raise subprocess.TimeoutExpired(cmd, timeout, output="".join(out_buf),
+                                        stderr="".join(err_buf))
+    for th in ths:
+        th.join(timeout=10)
+    return subprocess.CompletedProcess(cmd, proc.returncode, "".join(out_buf), "".join(err_buf))
+
+
 # ==================== 任务登记（前端轮询） ====================
-def _new_task(kind: str, meta: dict) -> str:
+def _new_task(kind: str, meta: dict, jobs: int = 0) -> str:
+    """登记任务。jobs>0 时前端可按 done/jobs 显示进度条。"""
     tid = uuid.uuid4().hex[:12]
     with _TASKS_LOCK:
         _TASKS[tid] = {"id": tid, "kind": kind, "meta": meta, "status": "queued",
+                       "jobs": int(jobs or 0), "done": 0,
                        "log": [], "created": time.time(), "updated": time.time()}
     return tid
 
 
-def _touch(tid: str, status=None, line=None):
+def _touch(tid: str, status=None, line=None, inc: int = 0):
     with _TASKS_LOCK:
         t = _TASKS.get(tid)
         if not t:
             return
         if line:
             t["log"].append(line)
+            if len(t["log"]) > 500:
+                t["log"] = t["log"][-500:]
+        if inc:
+            t["done"] = min(int(t.get("done", 0)) + int(inc),
+                            t.get("jobs") or int(t.get("done", 0)) + int(inc))
         if status:
             t["status"] = status
         t["updated"] = time.time()
@@ -176,6 +230,65 @@ async def list_projects(request: Request):
                              if os.path.isfile(os.path.join(feed, d, f"投喂稿-{d}.md")))
             out.append({"name": n, "has_assets": has_assets, "episodes": eps})
     return {"projects": out}
+
+
+# ==================== 剧本审核 ====================
+#
+# 剧本来源优先级：
+#   1) 项目根 `剧本/` 目录下的全部 .md（如「一一的两岁」）
+#   2) 项目根 `小说-*.md` / `*剧本*.md` / `screenplay-*.md`
+#   3) 无则视为「未提供剧本」，前端给出提示（该剧中剧本通常以投喂稿承载）
+def _script_docs(pdir: str):
+    root = _deliv_root()
+    docs = []
+    def _push(p):
+        if os.path.isfile(p) and p.startswith(root):
+            rel = os.path.relpath(p, root).replace("\\", "/")
+            try:
+                size = os.path.getsize(p)
+            except OSError:
+                size = 0
+            docs.append({"name": os.path.basename(p), "path": rel, "size": size})
+    feed = os.path.join(pdir, "剧本")
+    if os.path.isdir(feed):
+        for f in sorted(os.listdir(feed)):
+            if f.lower().endswith(".md"):
+                _push(os.path.join(feed, f))
+        if docs:
+            return docs
+    for f in sorted(os.listdir(pdir)):
+        low = f.lower()
+        if not low.endswith(".md"):
+            continue
+        if ("剧本" in f) or f.startswith("小说-") or f.startswith("screenplay") or f.startswith("script"):
+            _push(os.path.join(pdir, f))
+    return docs
+
+
+@router.get("/script")
+async def drama_script(name: str = "", request: Request = None):
+    """列出项目的剧本文档（供剧本审核 tab 展示）。"""
+    pdir = _proj_dir(name)
+    return {"name": name, "docs": _script_docs(pdir)}
+
+
+@router.get("/script/read")
+async def drama_script_read(name: str = "", path: str = "", request: Request = None):
+    """读取某个剧本文档的纯文本（按交付物根定位，防路径穿越）。"""
+    root = _deliv_root()
+    rel = (path or "").strip("/\\")
+    if not rel:
+        return JSONResponse({"error": "path 必填"}, status_code=400)
+    p = os.path.normpath(os.path.join(root, rel))
+    if not p.startswith(root):
+        return JSONResponse({"error": "非法路径"}, status_code=400)
+    if not os.path.isfile(p):
+        return JSONResponse({"error": "文件不存在"}, status_code=404)
+    try:
+        content = open(p, encoding="utf-8", errors="replace").read(600000)
+    except Exception as e:
+        return JSONResponse({"error": f"读取失败: {e}"}, status_code=500)
+    return {"name": rel, "content": content}
 
 
 # ==================== 资产 manifest 结构容错 ====================
@@ -368,6 +481,183 @@ async def list_assets(name: str = "", request: Request = None):
     return {"assets": out, "name": name}
 
 
+# ==================== 资产自定义上传 / 替换 / 新增 / 移除 ====================
+_ASSET_EXT = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+_ASSET_MAX = 50 * 1024 * 1024  # 50MB
+
+
+def _save_asset_bytes(content: bytes, dst: str) -> None:
+    """写上传字节到目标文件（原子写）。"""
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    tmp = dst + ".upload.tmp"
+    with open(tmp, "wb") as f:
+        f.write(content)
+    os.replace(tmp, dst)
+
+
+def _asset_slug(it, aid: str) -> str:
+    """从条目或 id 推导落盘文件基名（保留中文/字母数字，剔除路径危险字符）。"""
+    s = str(it.get("slug") or it.get("name") or aid or "asset")
+    return re.sub(r"[^\w\u4e00-\u9fff\-]+", "-", s).strip("-") or "asset"
+
+
+def _touch_asset_img_fields(it, rel: str, dst: str) -> None:
+    """回写条目的图片引用字段（同时覆盖新老契约形状）。"""
+    it["path"] = rel
+    it["status"] = "ready"
+    it["md5"] = hashlib.md5(open(dst, "rb").read()).hexdigest()
+    it["size_kb"] = int(os.path.getsize(dst) // 1024)
+    if "file" in it:
+        it["file"] = os.path.basename(dst)
+    if "views" in it and isinstance(it["views"], list):
+        it["views"] = [{"file": rel}]
+
+
+@router.post("/assets/upload")
+async def assets_upload(name: str = Form(...), id: str = Form(...),
+                        file: UploadFile = File(...), request: Request = None):
+    """自定义上传替换某资产图片：就地覆盖该资产当前引用文件的字节（路径保持不变）。"""
+    pdir = _proj_dir(name)
+    mp = os.path.join(pdir, "assets", "manifest.json")
+    if not os.path.isfile(mp):
+        return JSONResponse({"error": "manifest.json 不存在"}, status_code=404)
+    data = json.load(open(mp, encoding="utf-8"))
+    _pairs, shape = _asset_items(data)
+    if shape == "nested":
+        data = _flatten_nested(data)
+    it = _asset_raw_ref(data, id)
+    if it is None:
+        return JSONResponse({"error": f"资产 {id} 不存在"}, status_code=404)
+
+    content = await file.read()
+    if not content:
+        return JSONResponse({"error": "文件为空"}, status_code=400)
+    if len(content) > _ASSET_MAX:
+        return JSONResponse({"error": f"文件超过大小限制（{_ASSET_MAX // 1024 // 1024}MB）"}, status_code=400)
+    ext = os.path.splitext((file.filename or "").lower())[1]
+    if ext not in _ASSET_EXT:
+        return JSONResponse({"error": f"不支持的图片类型: {ext or '(无扩展名)'}"}, status_code=400)
+
+    dst = _asset_abs_path(it, pdir)
+    if not dst:
+        dst = os.path.join(pdir, "assets", "images", _asset_slug(it, id) + ext)
+    else:
+        # 原地覆盖：保留原文件路径/扩展名，manifest 引用不变，缩略图按 mtime 自动失效
+        pass
+    _save_asset_bytes(content, dst)
+    rel = os.path.relpath(dst, pdir).replace("\\", "/")
+    _touch_asset_img_fields(it, "assets/" + rel if not rel.startswith("assets/") else rel, dst)
+    _dump_manifest(mp, data)
+    return {"ok": True, "id": id, "path": rel, "md5": it["md5"]}
+
+
+@router.post("/assets/add")
+async def assets_add(name: str = Form(...), type: str = Form(...), asset_name: str = Form(...),
+                     file: UploadFile = File(...), request: Request = None):
+    """新增自定义资产：写入 assets/images/ 并追加 manifest 条目（各种形状均就地兼容）。"""
+    atype = _normalize_asset_type(type)
+    if atype not in _VALID_TYPES:
+        return JSONResponse({"error": f"非法的资产类型: {type}"}, status_code=400)
+    aname = (asset_name or "").strip()
+    if not aname:
+        return JSONResponse({"error": "资产名必填"}, status_code=400)
+
+    pdir = _proj_dir(name)
+    mp = os.path.join(pdir, "assets", "manifest.json")
+    data = []
+    shape = "flat"
+    if os.path.isfile(mp):
+        data = json.load(open(mp, encoding="utf-8"))
+        _pairs, shape = _asset_items(data)
+        if shape == "nested":
+            data = _flatten_nested(data)
+            shape = "flat"
+        elif shape == "categorized":
+            # categorized 顶层 {assets:{characters:[...]}}: 直接把内层都换成列表即可挂载
+            inner = data.get("assets")
+            if isinstance(inner, dict):
+                data = inner
+                for k, v in list(data.items()):
+                    if isinstance(v, dict) and not isinstance(v, list):
+                        data[k] = list(v.values())
+                shape = "categorized"
+
+    content = await file.read()
+    if not content:
+        return JSONResponse({"error": "文件为空"}, status_code=400)
+    if len(content) > _ASSET_MAX:
+        return JSONResponse({"error": f"文件超过大小限制（{_ASSET_MAX // 1024 // 1024}MB）"}, status_code=400)
+    ext = os.path.splitext((file.filename or "").lower())[1]
+    if ext not in _ASSET_EXT:
+        return JSONResponse({"error": f"不支持的图片类型: {ext or '(无扩展名)'}"}, status_code=400)
+
+    slug = _asset_slug({}, aname)
+    dst = os.path.join(pdir, "assets", "images", slug + ext)
+    _save_asset_bytes(content, dst)
+    rel = "assets/images/" + slug + ext
+    it = {"id": slug, "type": atype, "name": aname, "slug": slug, "prompt": "",
+          "ratio": "16:9", "status": "ready", "path": rel,
+          "md5": hashlib.md5(open(dst, "rb").read()).hexdigest(),
+          "size_kb": int(os.path.getsize(dst) // 1024)}
+
+    if shape == "flat" and isinstance(data, list):
+        data.append(it)
+    elif shape == "wrapped" and isinstance(data, dict) and isinstance(data.get("items"), list):
+        data["items"].append(it)
+    elif shape == "categorized" and isinstance(data, dict):
+        cat_key = {"character": "characters", "scene": "scenes",
+                   "prop": "props", "monster": "monsters"}.get(atype, "props")
+        bucket = data.setdefault(cat_key, [])
+        if isinstance(bucket, dict):
+            bucket = data[cat_key] = list(bucket.values())
+        bucket.append(it)
+    elif shape == "flat" and isinstance(data, dict):
+        data["items"] = data.pop("items", [it]) if isinstance(data.get("items"), list) else data.setdefault("items", [it])
+    else:
+        data = [it]
+    _dump_manifest(mp, data)
+    return {"ok": True, "id": slug, "type": atype, "path": rel}
+
+
+@router.post("/assets/delete")
+def assets_delete(payload: dict, request: Request):
+    """从 manifest 移除资产条目（软删除：不删原始图文件，便于回滚）。"""
+    name = str((payload or {}).get("name") or "")
+    aid = str((payload or {}).get("id") or "")
+    if not name or not aid:
+        return JSONResponse({"error": "name/id 必填"}, status_code=400)
+    pdir = _proj_dir(name)
+    mp = os.path.join(pdir, "assets", "manifest.json")
+    if not os.path.isfile(mp):
+        return JSONResponse({"error": "manifest.json 不存在"}, status_code=404)
+    data = json.load(open(mp, encoding="utf-8"))
+    _pairs, shape = _asset_items(data)
+    if shape in ("nested", "categorized"):
+        # 这两种形状先归一化成顶层列表再删，避免形状里定位麻烦
+        if shape == "nested":
+            data = _flatten_nested(data)
+        elif isinstance(data, dict):
+            inner = data.get("assets")
+            data = inner if isinstance(inner, dict) else data
+            for k, v in list(data.items()):
+                if isinstance(v, dict) and not isinstance(v, list):
+                    data[k] = list(v.values())
+    removed = False
+    if isinstance(data, list):
+        new = [x for x in data if isinstance(x, dict) and (x.get("id") or x.get("code")) != aid]
+        removed = len(new) != len(data)
+        data = new
+    elif isinstance(data, dict) and isinstance(data.get("items"), list):
+        items = data["items"]
+        new = [x for x in items if isinstance(x, dict) and (x.get("id") or x.get("code")) != aid]
+        removed = len(new) != len(items)
+        data["items"] = new
+    if not removed:
+        return JSONResponse({"error": f"资产 {aid} 不存在"}, status_code=404)
+    _dump_manifest(mp, data)
+    return {"ok": True, "id": aid}
+
+
 @router.post("/assets/regenerate")
 def assets_regenerate(payload: dict, request: Request):
     name = str((payload or {}).get("name") or "")
@@ -388,7 +678,7 @@ def assets_regenerate(payload: dict, request: Request):
     if it is None:
         return JSONResponse({"error": f"资产 {aid} 不存在"}, status_code=404)
 
-    tid = _new_task("asset", {"name": name, "id": aid})
+    tid = _new_task("asset", {"name": name, "id": aid}, jobs=1)
     _prune_tasks()
 
     def _run():
@@ -420,7 +710,7 @@ def assets_regenerate(payload: dict, request: Request):
                 it["md5"] = hashlib.md5(open(dst, "rb").read()).hexdigest()
                 it["size_kb"] = int(os.path.getsize(dst) // 1024)
                 _dump_manifest(mp, data)
-                _touch(tid, "done", line=f"[{_now()}] OK -> {dst}")
+                _touch(tid, "done", line=f"[{_now()}] OK -> {dst}", inc=1)
             else:
                 tail = out[-500:]
                 _touch(tid, "failed", line=f"[{_now()}] 生成失败: {tail}")
@@ -461,6 +751,127 @@ def _build_seg_prompt(body: str) -> str:
     prompt = re.sub(r"[{}<>]|接续状态|末态继承|拼接节点", "", prompt)
     prompt = re.sub(r"\s+", " ", prompt).strip()
     return prompt
+
+
+# ==================== 段级生成参考图（refs + kf2，≤5，可上传/替换/移除） ====================
+def _plan_files(pdir: str):
+    """kf_plan.json + kf_plan_epNN.json（跳过 .bak 备份与目录）。"""
+    d = os.path.join(pdir, "投喂稿")
+    out = []
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return out
+    for f in sorted(names):
+        if f.startswith("kf_plan") and f.endswith(".json") and ".bak" not in f:
+            out.append(os.path.join(d, f))
+    return out
+
+
+def _plan_segs(path: str):
+    try:
+        raw = json.load(open(path, encoding="utf-8"))
+    except Exception:
+        return []
+    eps = raw if isinstance(raw, list) else [raw]
+    segs = []
+    for ep in eps:
+        if isinstance(ep, dict):
+            segs += [s for s in (ep.get("segments") or []) if isinstance(s, dict)]
+    return segs
+
+
+def _find_plan_seg(pdir: str, seg: str):
+    """定位 seg 所在的 kf_plan 文件与其条目。返回 (plan_path, item) 或 (None, None)。"""
+    for kp in _plan_files(pdir):
+        for s in _plan_segs(kp):
+            if s.get("seg") == seg:
+                return kp, s
+    return None, None
+
+
+def _load_plan_seg(pdir: str, seg: str):
+    """加载 seg 所在 kf_plan 的**根对象**与条目：返回 (plan_path, root, item)。
+
+    修改 item 后必须 `_dump_json(plan_path, root)` 才能落盘（item 是 root 的子节点，
+    直接对 item 改再重新 json.load 写回会丢弃改动）。
+    """
+    for kp in _plan_files(pdir):
+        try:
+            raw = json.load(open(kp, encoding="utf-8"))
+        except Exception:
+            continue
+        eps = raw if isinstance(raw, list) else [raw]
+        for ep in eps:
+            if not isinstance(ep, dict):
+                continue
+            for s in (ep.get("segments") or []):
+                if isinstance(s, dict) and s.get("seg") == seg:
+                    return kp, raw, s
+    return None, None, None
+
+
+def _ref_abs(kp: str, r) -> str:
+    """ref 可能绝对也可能相对（相对 kf_plan 所在目录的上级）。统一成绝对路径。"""
+    r = str(r or "").strip()
+    if not r:
+        return ""
+    if os.path.isabs(r):
+        return r
+    return os.path.normpath(os.path.join(os.path.dirname(kp), "..", r))
+
+
+def _frame_label(p: str) -> str:
+    b = os.path.splitext(os.path.basename(p))[0]
+    b = re.sub(r"^ref[-_]", "", b)
+    return (b.replace("_", " ").strip() or "参考图")
+
+
+def _frame_role(p: str) -> str:
+    d = p.replace("\\", "/").lower()
+    bn = os.path.basename(p).lower()
+    if bn == "kf2.png":
+        return "本段分镜构图"
+    if "/kf_refs/" in d or bn.startswith("ref-"):
+        return "人物形象基准"
+    if re.search(r"scn|scene|场景", bn):
+        return "场景美术基准"
+    if re.search(r"prop|道具", bn):
+        return "道具基准"
+    return "画面参考"
+
+
+def _seg_frames(pdir: str, kp, ep: str, seg: str):
+    """该段绘制生成所用参考图：kf_plan.refs + kf2 构图图（≤5，逐段个性化编排）。"""
+    root = _deliv_root()
+    items = []
+    refs = [(i, _ref_abs(kp, r)) for i, r in enumerate((kp or {}).get("refs") or [])
+            if os.path.isfile(_ref_abs(kp, r))]
+    roles = {str((x or {}).get("path")): x for x in ((kp or {}).get("ref_roles") or [])
+             if isinstance(x, dict)}
+    for i, ap in refs:
+        if len(items) >= 5:
+            break
+        meta = roles.get(str(ap)) or {}
+        items.append({"idx": len(items), "kind": "ref", "path": os.path.relpath(ap, root).replace("\\", "/"),
+                      "label": _frame_label(ap), "role": str(meta.get("use") or _frame_role(ap)),
+                      "controls": str(meta.get("controls") or ""), "not_controls": str(meta.get("not_controls") or "")})
+    kf2 = os.path.join(pdir, "投喂稿", ep, seg, "kf2.png")
+    if os.path.isfile(kf2) and os.path.getsize(kf2) > 0 and len(items) < 5:
+        items.append({"idx": len(items), "kind": "kf2",
+                      "path": os.path.relpath(kf2, root).replace("\\", "/"),
+                      "label": "kf2 构图图", "role": "本段分镜构图",
+                      "controls": "景别、机位、人物站位、构图关系",
+                      "not_controls": "人物长相、服装细节",
+                      "kf_prompt": str((kp or {}).get("kf2_prompt") or "")})
+    return items
+
+
+def _dump_json(p: str, obj) -> None:
+    tmp = p + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, p)
 
 
 @router.get("/storyboard")
@@ -511,8 +922,131 @@ async def storyboard(name: str = "", ep: str = "", request: Request = None):
             "kf1_prompt": str(kp.get("kf1_prompt") or ""),
             "kf2_prompt": str(kp.get("kf2_prompt") or ""),
             "kf1_origin": "gen" if not kp.get("kf1_from") else "relay",
+            "frames": _seg_frames(pdir, kp, ep, seg),
         })
     return {"name": name, "ep": ep, "segments": segs}
+
+
+@router.post("/storyboard/frames/upload")
+async def storyboard_frames_upload(name: str = Form(...), seg: str = Form(...),
+                                   replace: str = Form(""),
+                                   file: UploadFile = File(...), request: Request = None):
+    """上传/替换某段的生成参考图（立即参与下次渲影）。
+
+    replace="" → 追加新参考图（refs+kf2 总数 <5 才允许，写入本段专用 ref{N}.png）；
+    replace=N  → 替换第 N 个槽位：
+        · ref 槽 → 生成该段专用副本 投喂稿/{ep}/{seg}/ref{N}.png 并改写本段 refs[N]，
+          不影响其他段引用的同一人物/场景基准图；
+        · kf2 槽 → 直接覆盖该段 kf2.png（本就是段级文件）。
+    """
+    pdir = _proj_dir(name)
+    kp, root, item = _load_plan_seg(pdir, seg)
+    if item is None:
+        return JSONResponse({"error": f"kf_plan 中无 {seg}"}, status_code=404)
+    ep = seg[:3]
+
+    content = await file.read()
+    if not content:
+        return JSONResponse({"error": "文件为空"}, status_code=400)
+    if len(content) > _ASSET_MAX:
+        return JSONResponse({"error": f"文件超过大小限制（{_ASSET_MAX // 1024 // 1024}MB）"}, status_code=400)
+    ext = os.path.splitext((file.filename or "").lower())[1]
+    if ext not in _ASSET_EXT:
+        return JSONResponse({"error": f"不支持的图片类型: {ext or '(无扩展名)'}"}, status_code=400)
+
+    refs = [(i, _ref_abs(kp, r)) for i, r in enumerate(item.get("refs") or [])
+            if os.path.isfile(_ref_abs(kp, r))]
+    segdir = os.path.join(pdir, "投喂稿", ep, seg)
+    kf2_exists = os.path.isfile(os.path.join(segdir, "kf2.png"))
+
+    if not replace.strip():
+        # ---- 新增 ----
+        if len(refs) + (1 if kf2_exists else 0) >= 5:
+            return JSONResponse({"error": "该段参考图已达 5 张上限，请先替换或移除"}, status_code=400)
+        n = len(refs)
+        dst = os.path.join(segdir, f"ref{n}{ext}")
+        _save_asset_bytes(content, dst)
+        refs_list = item.setdefault("refs", [])
+        refs_list.append(dst)
+        roles = item.setdefault("ref_roles", [])
+        if not isinstance(roles, list):
+            roles = item["ref_roles"] = []
+        roles.append({"idx": n + 1, "path": dst, "use": "自定义参考图",
+                      "controls": "", "not_controls": ""})
+        _dump_json(kp, root)
+        return {"ok": True, "seg": seg, "slot": n, "frames": _seg_frames(pdir, item, ep, seg)}
+
+    try:
+        slot = int(replace)
+    except ValueError:
+        return JSONResponse({"error": f"replace 参数非法: {replace}"}, status_code=400)
+
+    if slot < len(refs):
+        # ---- 替换 ref 槽 ----
+        i_old, ap_old = refs[slot]
+        local = os.path.normpath(ap_old).startswith(os.path.normpath(segdir))
+        cur_ext = os.path.splitext(ap_old)[1].lower()
+        if local and cur_ext == ext:
+            dst = ap_old  # 已是该段专用文件且扩展名一致：原地覆盖
+        else:
+            dst = os.path.join(segdir, f"ref{slot}{ext}")
+        _save_asset_bytes(content, dst)
+        if dst != ap_old:
+            item["refs"][i_old] = dst
+            roles = item.get("ref_roles")
+            if isinstance(roles, list):
+                for r in roles:
+                    if str((r or {}).get("path", "")) == str(ap_old):
+                        r["path"] = dst
+                        break
+                else:
+                    roles.append({"idx": slot + 1, "path": dst, "use": "",
+                                  "controls": "", "not_controls": ""})
+            _dump_json(kp, root)
+        return {"ok": True, "seg": seg, "slot": slot, "frames": _seg_frames(pdir, item, ep, seg)}
+    if slot == len(refs) and kf2_exists:
+        dst = os.path.join(segdir, "kf2.png")
+        _save_asset_bytes(content, dst)
+        return {"ok": True, "seg": seg, "slot": slot, "kind": "kf2",
+                "frames": _seg_frames(pdir, item, ep, seg)}
+    return JSONResponse({"error": f"槽位 {slot} 不存在"}, status_code=404)
+
+
+@router.post("/storyboard/frames/remove")
+def storyboard_frames_remove(payload: dict, request: Request):
+    """从某段移除一个 ref 参考槽（kf2 随文件存在/不存在自然呈现，不在此移除）。"""
+    name = str((payload or {}).get("name") or "")
+    seg = str((payload or {}).get("seg") or "")
+    if not name or not seg:
+        return JSONResponse({"error": "name/seg 必填"}, status_code=400)
+    try:
+        slot = int((payload or {}).get("slot"))
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "slot 必填(0 起)"}, status_code=400)
+    pdir = _proj_dir(name)
+    kp, root, item = _load_plan_seg(pdir, seg)
+    if item is None:
+        return JSONResponse({"error": f"kf_plan 中无 {seg}"}, status_code=404)
+    ep = seg[:3]
+    refs = [(i, _ref_abs(kp, r)) for i, r in enumerate(item.get("refs") or [])
+            if os.path.isfile(_ref_abs(kp, r))]
+    if slot >= len(refs):
+        return JSONResponse({"error": f"槽位 {slot} 不是可移除的参考图槽"}, status_code=404)
+    i_old, ap_old = refs[slot]
+    del item["refs"][i_old]
+    roles = item.get("ref_roles")
+    if isinstance(roles, list):
+        item["ref_roles"] = [r for r in roles if str((r or {}).get("path", "")) != str(ap_old)]
+    # 段级专用副本（位于本段目录内的 ref*.png）随移除一并删除，避免留孤儿；
+    # 共享基准图（kf_refs/ 等本段目录外）绝不删除，其他段仍在引用。
+    segdir = os.path.join(pdir, "投喂稿", ep, seg)
+    if ap_old and os.path.normpath(ap_old).startswith(os.path.normpath(segdir)):
+        try:
+            os.remove(ap_old)
+        except OSError:
+            pass
+    _dump_json(kp, root)
+    return {"ok": True, "seg": seg, "slot": slot, "frames": _seg_frames(pdir, item, ep, seg)}
 
 
 def _rebuild_manifest(pdir: str, ep: str) -> dict:
@@ -571,22 +1105,30 @@ def segments_render(payload: dict, request: Request):
     with open(mpath, "w", encoding="utf-8") as f:
         json.dump(manifest, f, ensure_ascii=False, indent=2)
 
-    tid = _new_task("segment", {"name": name, "ep": ep, "seg": seg})
+    tid = _new_task("segment", {"name": name, "ep": ep, "seg": seg}, jobs=1)
     _prune_tasks()
+
+    def _line(s):
+        s = (s or "").strip()
+        if s:
+            _touch(tid, line=f"[{_now()}] {s[:400]}")
 
     def _run():
         _touch(tid, "running", line=f"[{_now()}] {seg} 渲染开始 (dur={seg_item['duration']}s)")
         _touch(tid, line=f"[{_now()}] 提示词头: {seg_item['prompt'][:60]}…")
-        cmd = ["python3", GENERATOR, mpath, seg]
+        cmd = ["python3", GENERATOR, mpath, seg, "--force"]
         try:
-            pr = _run_proc(cmd, 7200, _render_env())
+            pr = _run_proc_stream(cmd, 7200, _render_env(), on_line=_line)
         except subprocess.TimeoutExpired:
             _touch(tid, "failed", line=f"[{_now()}] 渲染超时(2h)")
             return
-        if pr.returncode == 0:
-            _touch(tid, "done", line=f"[{_now()}] {seg} 渲染完成")
+        out = (pr.stdout or "") + (pr.stderr or "")
+        if pr.returncode == 0 and f"[{seg}] 提交" in out:
+            _touch(tid, "done", line=f"[{_now()}] {seg} 渲染完成", inc=1)
+        elif pr.returncode == 0:
+            _touch(tid, "failed", line=f"[{_now()}] 未提交渲染（生成器未提交，检查 prompt/参考图/段号）：{out.strip()[-300:]}")
         else:
-            _touch(tid, "failed", line=f"[{_now()}] rc={pr.returncode} {((pr.stdout or '')+(pr.stderr or ''))[-500:]}")
+            _touch(tid, "failed", line=f"[{_now()}] rc={pr.returncode} {out[-500:]}")
 
     threading.Thread(target=_run, daemon=True).start()
     return {"ok": True, "task_id": tid, "seg": seg}
@@ -616,8 +1158,14 @@ def segments_cascade(payload: dict, request: Request):
         return JSONResponse({"error": "无可级联段"}, status_code=400)
 
     tid = _new_task("cascade", {"name": name, "start": start_seg,
-                                "count": len(target), "eps": sorted({s[:3] for s in target})})
+                                "count": len(target), "eps": sorted({s[:3] for s in target})},
+                    jobs=len(target))
     _prune_tasks()
+
+    def _line(s):
+        s = (s or "").strip()
+        if s:
+            _touch(tid, line=f"[{_now()}] {s[:400]}")
 
     def _run():
         _touch(tid, "running", line=f"[{_now()}] 级联重渲开始：{start_seg} → 片尾 共 {len(target)} 段")
@@ -638,17 +1186,18 @@ def segments_cascade(payload: dict, request: Request):
                 continue
             with open(mpath, "w", encoding="utf-8") as f:
                 json.dump(manifest, f, ensure_ascii=False, indent=2)
-            args = ["python3", GENERATOR, mpath] + (["--from", start_seg] if ep == start_seg[:3] else [])
+            args = ["python3", GENERATOR, mpath, "--force"] + (["--from", start_seg] if ep == start_seg[:3] else [])
             _touch(tid, line=f"[{_now()}] {ep}: 启动 {args[-1] if args[-1] != mpath else '全段'}")
             try:
-                pr = _run_proc(args, 10800, _render_env())
+                pr = _run_proc_stream(args, 10800, _render_env(), on_line=_line)
             except subprocess.TimeoutExpired:
                 _touch(tid, line=f"[{_now()}] {ep}: 超时(3h)")
                 failed += ep_segs
                 continue
             log_tail = ((pr.stdout or "") + (pr.stderr or ""))
-            ok = pr.returncode == 0
-            _touch(tid, line=f"[{_now()}] {ep}: {'OK' if ok else f'rc={pr.returncode}'}")
+            ok = pr.returncode == 0 and "提交" in log_tail
+            _touch(tid, line=f"[{_now()}] {ep}: {'OK' if ok else f'rc={pr.returncode} 未提交或失败'}",
+                   inc=len(ep_segs) if ok else 0)
             if not ok:
                 failed += ep_segs
             else:
@@ -751,15 +1300,24 @@ def _kf_generate(pdir: str, item: dict, frame: str, prompt_override: str = ""):
     return True, f"{os.path.getsize(out_file) // 1024}KB refs={len(refs)}"
 
 
-def _seg_render_one(mpath: str, seg: str, timeout: int = 7200):
-    """渲一段，返回 (ok, msg)。批量与单段共用。"""
+def _seg_render_one(mpath: str, seg: str, timeout: int = 7200, on_line=None):
+    """渲一段，返回 (ok, msg)。批量与单段共用。on_line 把实时输出写入任务日志。
+
+    显式 --force：重渲语义下已存在的段视频也要覆盖，否则生成器会「已完成，跳过」
+    并以 rc=0 退出，被误判为成功（实测踩过：批量渲影 5 段 0s「成功」其实没渲）。
+    """
     try:
-        pr = _run_proc(["python3", GENERATOR, mpath, seg], timeout, _render_env())
+        pr = _run_proc_stream(["python3", GENERATOR, mpath, seg, "--force"], timeout,
+                              _render_env(), on_line=on_line)
     except subprocess.TimeoutExpired:
         return False, f"渲染超时({timeout // 3600}h)"
-    if pr.returncode == 0:
+    out = (pr.stdout or "") + (pr.stderr or "")
+    if pr.returncode == 0 and f"[{seg}] 提交" in out:
         return True, "OK"
-    tail = ((pr.stdout or "") + (pr.stderr or ""))[-300:].replace("\n", " ")
+    if pr.returncode == 0:
+        tail = " / ".join(l.strip() for l in out.strip().splitlines()[-3:])[:240]
+        return False, f"未提交渲染（{tail}）"
+    tail = out[-300:].replace("\n", " ")
     return False, f"rc={pr.returncode} {tail}"
 
 
@@ -797,7 +1355,7 @@ def keyframes_regenerate(payload: dict, request: Request):
     out_file = os.path.join(outdir, f"{frame}.png")
     refs = [r for r in (item.get("refs") or []) if r and os.path.isfile(str(r))]
 
-    tid = _new_task("keyframe", {"name": name, "seg": seg, "frame": frame})
+    tid = _new_task("keyframe", {"name": name, "seg": seg, "frame": frame}, jobs=1)
     _prune_tasks()
 
     def _run():
@@ -812,7 +1370,8 @@ def keyframes_regenerate(payload: dict, request: Request):
         # 尾帧接力后：kf2 改动不影响相邻段静态图（下游首帧=上游视频真实末帧），
         # 但本段及下游段已渲染视频必须级联重渲才生效。
         _touch(tid, "done", line=f"[{_now()}] OK {msg}"
-                                  "。提醒：本段 kf2 已更新，请对本段及下游段做级联重渲以生效。")
+                                  "。提醒：本段 kf2 已更新，请对本段及下游段做级联重渲以生效。",
+               inc=1)
 
     threading.Thread(target=_run, daemon=True).start()
     return {"ok": True, "task_id": tid, "seg": seg, "frame": frame}
@@ -856,7 +1415,8 @@ def keyframes_batch(payload: dict, request: Request):
                 "msg": "无可重出帧（筛选后为空）"}
 
     tid = _new_task("keyframe-batch",
-                    {"name": name, "ep": ep or "全片", "jobs": len(jobs), "workers": workers})
+                    {"name": name, "ep": ep or "全片", "jobs": len(jobs), "workers": workers},
+                    jobs=len(jobs))
     _prune_tasks()
     if not _batch_enter(name):
         _touch(tid, "failed", line=f"[{_now()}] 「{name}」已有批量任务在跑，本次拒绝提交"
@@ -881,10 +1441,10 @@ def keyframes_batch(payload: dict, request: Request):
                     tag = f"{s.get('seg')}/{fr}"
                     if ok:
                         ok_n += 1
-                        _touch(tid, line=f"[{_now()}] {tag} OK {msg}")
+                        _touch(tid, line=f"[{_now()}] {tag} OK {msg}", inc=1)
                     else:
                         fail_n += 1
-                        _touch(tid, line=f"[{_now()}] !! {tag} 失败：{msg}")
+                        _touch(tid, line=f"[{_now()}] !! {tag} 失败：{msg}", inc=1)
         finally:
             _batch_exit(name)
         _touch(tid, "failed" if fail_n else "done",
@@ -900,14 +1460,15 @@ def keyframes_batch(payload: dict, request: Request):
 # ==================== 批量：一次全量提交渲影（reference 模式，不分波） ====================
 @router.post("/segments/batch")
 def segments_batch(payload: dict, request: Request):
-    """批量渲影：所选段一次全量提交，并发不再设硬上限、不按依赖分波。
+    """批量渲影：**串行提交**（默认间隔 60s，可 submit_gap 覆盖）。
 
     与 /segments/cascade 的区别：cascade 是「某段起串行渲到片尾」（顺序敏感）；
-    本端点用于「一批段并行渲」（如一批返修段）。段视频走 reference 模式，参考图
-    取自 kf_plan 的 refs，各段互不依赖——提交后由 media.py 轮询、后端失败自动
-    重建重试，所以只要提交成功即可，无需等上游出片。
+    本端点用于「一批返修段」。段视频走 reference 模式，参考图取自 kf_plan 的 refs。
 
-    旧实现按 `kf1_from` 接力依赖分波、并发硬压 ≤2，reference 模式下已无依据。
+    实现：按集分组，每集一次调用 gen_kzqs_videos.py --submit-gap N（含这些段的
+    过滤 manifest）。生成器逐段提交：一段被上游接受（TASK_ID）后 sleep N 秒再提交
+    下一段；某段提交失败则等 N 秒重试该段直到成功（直到全部提交成功）。各段提交
+    成功后各自留在后台轮询/落盘，全部提交完后一起等待出片。
     """
     body = payload or {}
     name = str(body.get("name") or "")
@@ -915,6 +1476,7 @@ def segments_batch(payload: dict, request: Request):
     if not name or not segs:
         return JSONResponse({"error": "name/segs 必填(segs 为要批量渲的段号列表)"}, status_code=400)
     workers = _workers_hint(body.get("workers"), len(segs))
+    submit_gap = int(body.get("submit_gap") or 60)
 
     pdir = _proj_dir(name)
     flat = _kfplan_flat(pdir)
@@ -925,11 +1487,10 @@ def segments_batch(payload: dict, request: Request):
     if missing:
         return JSONResponse({"error": f"kf_plan 中无：{missing[:8]}"}, status_code=404)
 
-    # 按集重建 manifest：GEN_ 渲染器只吃单集 manifest，跨集批量需分集写
+    # 按集分组并校验段存在于投喂稿 manifest
     by_ep = {}
     for s in segs:
         by_ep.setdefault(s[:3], []).append(s)
-    mpaths = {}
     try:
         os.makedirs(os.path.join(pdir, ".review"), exist_ok=True)
         for ep, ep_segs in by_ep.items():
@@ -938,16 +1499,13 @@ def segments_batch(payload: dict, request: Request):
             miss = [s for s in ep_segs if s not in avail]
             if miss:
                 return JSONResponse({"error": f"{ep} manifest 中无：{miss[:8]}"}, status_code=404)
-            mp = os.path.join(pdir, ".review", f"{ep}.batch-manifest.json")
-            with open(mp, "w", encoding="utf-8") as f:
-                json.dump(manifest, f, ensure_ascii=False, indent=2)
-            mpaths[ep] = mp
     except Exception as e:
         return JSONResponse({"error": f"重建 manifest 失败: {e}"}, status_code=500)
 
     tid = _new_task("segment-batch",
                     {"name": name, "segs": segs, "eps": sorted(by_ep),
-                     "jobs": len(segs), "workers": workers})
+                     "jobs": len(segs), "workers": workers, "submit_gap": submit_gap},
+                    jobs=len(segs))
     _prune_tasks()
     if not _batch_enter(name):
         _touch(tid, "failed", line=f"[{_now()}] 「{name}」已有批量任务在跑，本次拒绝提交")
@@ -955,26 +1513,42 @@ def segments_batch(payload: dict, request: Request):
 
     def _run():
         t0 = time.time()
-        st = {}          # seg -> (ok, msg)
+        st = {}          # seg -> "ok"/"fail"
         try:
-            _touch(tid, "running", line=f"[{_now()}] 批量渲影 {len(segs)} 段，并发 {workers}"
-                                         f"（不设硬上限，一次全量提交）")
+            for ep in sorted(by_ep):
+                segs_ep = by_ep[ep]
+                manifest = _rebuild_manifest(pdir, ep)
+                keep = set(segs_ep)
+                manifest["segments"] = [s for s in manifest["segments"]
+                                        if str(s.get("seg") or "") in keep]
+                mp = os.path.join(pdir, ".review", f"{ep}.batch-manifest.json")
+                with open(mp, "w", encoding="utf-8") as f:
+                    json.dump(manifest, f, ensure_ascii=False, indent=2)
+                _touch(tid, "running",
+                       line=f"[{_now()}] {ep} 串行提交 {len(segs_ep)} 段，间隔 {submit_gap}s"
+                            f"（提交成功后各段后台轮询）")
 
-            def one(seg):
-                return seg, _seg_render_one(mpaths[seg[:3]], seg)
+                def on_line(s, _ep=ep):
+                    _touch(tid, line=f"[{_now()}] {s[:300]}")
+                    m = re.search(r"(E\d+-\d+): (OK|FAIL)\b", s)
+                    if m:
+                        seg = m.group(1)
+                        ok = m.group(2) == "OK"
+                        st[seg] = "ok" if ok else "fail"
+                        _touch(tid, line=f"[{_now()}] {seg} {'OK' if ok else '失败'}", inc=1)
 
-            with ThreadPoolExecutor(max_workers=workers) as ex:
-                for seg, (ok, msg) in ex.map(one, segs):
-                    st[seg] = (ok, msg)
-                    if ok:
-                        _touch(tid, line=f"[{_now()}] {seg} OK")
-                    else:
-                        _touch(tid, line=f"[{_now()}] !! {seg} 失败：{msg}")
+                cmd = ["python3", GENERATOR, mp, "--force",
+                       "--submit-gap", str(submit_gap)]
+                try:
+                    _run_proc_stream(cmd, 7200 * max(1, len(segs)) + submit_gap * len(segs),
+                                     _render_env(), on_line=on_line)
+                except subprocess.TimeoutExpired:
+                    _touch(tid, line=f"[{_now()}] {ep} 渲染超时，已终止")
         finally:
             _batch_exit(name)
 
-        ok_n = sum(1 for v in st.values() if v[0])
-        bad = sorted(s for s, v in st.items() if not v[0])
+        ok_n = sum(1 for v in st.values() if v == "ok")
+        bad = sorted(s for s in segs if st.get(s) != "ok")
         _touch(tid, "failed" if bad else "done",
                line=f"[{_now()}] 批量渲影结束：成功 {ok_n} / 失败 {len(bad)}，"
                     f"耗时 {int(time.time() - t0)}s")
@@ -982,7 +1556,73 @@ def segments_batch(payload: dict, request: Request):
             _touch(tid, line="失败段：" + ", ".join(bad[:12]))
 
     threading.Thread(target=_run, daemon=True).start()
-    return {"ok": True, "task_id": tid, "jobs": len(segs), "workers": workers}
+    return {"ok": True, "task_id": tid, "jobs": len(segs), "workers": workers,
+            "submit_gap": submit_gap, "mode": "serial-submit"}
+
+
+# ==================== 剧集审核（完整整集视频） ====================
+def _ep_seg_videos(pdir: str, ep: str):
+    """本集各段视频文件（pdir/{ep}-NN/{ep}-NN.mp4）按段号排序。"""
+    out = []
+    try:
+        names = os.listdir(pdir)
+    except OSError:
+        return out
+    for d in sorted(names):
+        if re.match(rf"^{re.escape(ep)}-0(\d+)$", d):
+            v = os.path.join(pdir, d, f"{d}.mp4")
+            if os.path.isfile(v):
+                out.append(v)
+    return out
+
+
+def _ep_seg_total(md: str) -> int:
+    """投喂稿里声明的本集段数。"""
+    try:
+        txt = open(md, encoding="utf-8").read()
+    except Exception:
+        return 0
+    return len(re.findall(r"^##\s.*-\d+", txt, re.M))
+
+
+@router.get("/episodes")
+async def episodes(name: str = "", request: Request = None):
+    """剧集审核：列出各集「完整整集视频」（合并产物 pdir/{ep}.mp4）与全剧连播视频。"""
+    pdir = _proj_dir(name)
+    root = _deliv_root()
+    feed = os.path.join(pdir, "投喂稿")
+    eps = []
+    if os.path.isdir(feed):
+        eps = sorted(d for d in os.listdir(feed)
+                     if os.path.isfile(os.path.join(feed, d, f"投喂稿-{d}.md")))
+    out = []
+    for ep in eps:
+        md = os.path.join(feed, ep, f"投喂稿-{ep}.md")
+        total = _ep_seg_total(md) or len(_ep_seg_videos(pdir, ep))
+        segf = _ep_seg_videos(pdir, ep)
+        video = os.path.join(pdir, f"{ep}.mp4")
+        has = os.path.isfile(video) and os.path.getsize(video) > 0
+        vrel = os.path.relpath(video, root).replace("\\", "/") if has and video.startswith(root) else ""
+        out.append({
+            "ep": ep, "has_video": has, "video": vrel,
+            "vmtime": int(os.path.getmtime(video)) if has else 0,
+            "size": os.path.getsize(video) if has else 0,
+            "segments_done": len(segf), "segments_total": total,
+        })
+    full = None
+    try:
+        for f in sorted(os.listdir(pdir)):
+            m = re.match(r"^(\d+)集连播\.mp4$", f)
+            if m and os.path.getsize(os.path.join(pdir, f)) > 0:
+                fp = os.path.join(pdir, f)
+                full = {"video": os.path.relpath(fp, root).replace("\\", "/"),
+                        "name": f, "count": int(m.group(1)),
+                        "vmtime": int(os.path.getmtime(fp)),
+                        "size": os.path.getsize(fp)}
+                break
+    except OSError:
+        pass
+    return {"name": name, "episodes": out, "full": full}
 
 
 # ==================== 合并（确认后） ====================
@@ -1015,7 +1655,7 @@ def merge(payload: dict, request: Request):
     if not name or not eps:
         return JSONResponse({"error": "name/eps 必填"}, status_code=400)
     pdir = _proj_dir(name)
-    tid = _new_task("merge", {"name": name, "eps": eps})
+    tid = _new_task("merge", {"name": name, "eps": eps}, jobs=len(eps))
     _prune_tasks()
 
     def _run():
@@ -1040,13 +1680,13 @@ def merge(payload: dict, request: Request):
                 and os.path.isfile(os.path.join(pdir, d, f"{d}.mp4"))
             )
             if not seg_dirs:
-                _touch(tid, line=f"[{_now()}] {ep}: 无段视频，跳过")
+                _touch(tid, line=f"[{_now()}] {ep}: 无段视频，跳过", inc=1)
                 continue
             files = [os.path.join(pdir, d, f"{d}.mp4") for d in seg_dirs]
             out = os.path.join(pdir, f"{ep}.mp4")
             ok = _concat_mp4(files, out)
             _touch(tid, line=f"[{_now()}] {ep}: {'OK' if ok and os.path.exists(out) else '失败'}"
-                             f"（{len(files)} 段）")
+                             f"（{len(files)} 段）", inc=1)
         eps_ok = [ep for ep in eps if os.path.exists(os.path.join(pdir, f"{ep}.mp4"))]
         if len(eps_ok) >= 2:
             full = os.path.join(pdir, f"{len(eps_ok)}集连播.mp4")

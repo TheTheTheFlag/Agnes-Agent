@@ -39,6 +39,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 
 MEDIA = "/home/mirror/Agnes-Agent/app/skills_builtin/agnes-media/media.py"
@@ -350,6 +351,133 @@ def _deliver(pdir, seg, src, no_audio):
     return dst
 
 
+# ---------------------------------------------------------------- 串行提交（流水线）
+def _build_submit_cmd(pdir, seg, prompt, dur, args, tok):
+    """构造单段 media.py video 提交命令与环境；上传 refs 只做一次，重试复用。
+    返回 (cmd, env, tag, err)；err 非空时 cmd 为 None。"""
+    items, info = build_refs(pdir, seg)
+    extra = {"aspect_ratio": aspect_of(prompt, args.aspect)}
+    tag = "refs=%d" % info["refs"]
+    if items:
+        try:
+            extra["refs"] = upload_refs([i["path"] for i in items])
+        except FileNotFoundError as e:
+            return None, None, "", str(e)
+        except SystemExit as e:
+            return None, None, "", "上传失败: %s" % e
+        tag += " " + " ".join("<Picture %d>%s" % (i["n"], ref_label(i["path"]))
+                              for i in items)
+        if info["kf2_dropped"]:
+            tag += "（refs 已满 5，kf2 构图未进 ref）"
+    else:
+        tag += "（无参考图，纯文本）"
+    cmd = ["python3", "-u", MEDIA, "video",
+           "--model", VIDEO_MODEL,
+           "--mode", "reference",
+           "--duration", str(dur),
+           "--timeout", str(VIDEO_TIMEOUT),
+           "--prompt", prompt,
+           "--extra", json.dumps(extra, ensure_ascii=False)]
+    env = dict(os.environ)
+    if tok:
+        env["AGENT_INTERNAL_TOKEN"] = tok
+    env["AGENT_MEDIA_SOURCE"] = "short-drama-director"
+    env["PYTHONUNBUFFERED"] = "1"
+    return cmd, env, tag, ""
+
+
+def run_pipelined(pdir, jobs, args, tok, log):
+    """串行提交 + 各段提交成功后即各自轮询（流水线）。
+
+    - 一段一段提交：media.py 输出出现 `TASK_ID=`（提交被上游接受）才算成功；
+      失败则等 submit_gap 秒重试同一段，直到成功（--submit-retries 次；0=不限）。
+    - 提交成功后 sleep submit_gap 秒再提交下一段；各段子进程留在后台自行轮询/落盘。
+    - 每段轮询子进程一结束就立即交付并计数（打印 `seg: OK/FAIL`），不必等其它段；
+      全部提交完后仅等待所有子进程收尾，再汇总。
+    """
+    gap = args.submit_gap
+    max_tries = args.submit_retries if args.submit_retries > 0 else (1 << 31)
+    polls = {}
+    tally = {"ok": 0, "fail": 0}
+    tally_lock = threading.Lock()
+
+    def _spawn(seg, cmd, env):
+        st = {"seg": seg, "file": "", "rc": None, "tail": "",
+              "submitted": threading.Event(), "done": threading.Event()}
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, bufsize=1, env=env)
+
+        def reader():
+            tail = []
+            for line in iter(proc.stdout.readline, ""):
+                if not line:
+                    break
+                tail.append(line)
+                if len(tail) > 400:
+                    tail = tail[-400:]
+                if "TASK_ID=" in line:
+                    st["submitted"].set()
+                m = re.search(r"FILE=(\S+)", line)
+                if m:
+                    st["file"] = m.group(1).strip()
+                log("%s | %s" % (seg, line.rstrip()[:300]))
+            proc.wait()
+            st["rc"] = proc.returncode
+            st["tail"] = "".join(tail)
+            if st["submitted"].is_set():
+                finalize(seg, st)
+            st["done"].set()
+
+        threading.Thread(target=reader, daemon=True).start()
+        return st
+
+    def finalize(seg, st):
+        if st["rc"] == 0 and st["file"]:
+            msg = _deliver(pdir, seg, st["file"], args.no_audio)
+            with tally_lock:
+                tally["ok"] += 1
+                log("%s: OK -> %s" % (seg, msg))
+        else:
+            msg = "rc=%s %s" % (st["rc"], (st["tail"] or "")[-400:].replace("\n", " "))
+            with tally_lock:
+                tally["fail"] += 1
+                log("%s: FAIL %s" % (seg, msg))
+
+    for seg, prompt, dur in jobs:
+        cmd, env, tag, err = _build_submit_cmd(pdir, seg, prompt, dur, args, tok)
+        if cmd is None:
+            with tally_lock:
+                tally["fail"] += 1
+                log("%s: FAIL %s" % (seg, err))
+            continue
+        log("[%s] 提交 %s dur=%ds %s" % (seg, VIDEO_MODEL, dur, tag))
+        st = None
+        tries = 0
+        while True:
+            tries += 1
+            st = _spawn(seg, cmd, env)
+            while not st["submitted"].is_set() and not st["done"].is_set():
+                time.sleep(0.5)
+            if st["submitted"].is_set():
+                polls[seg] = st
+                break
+            if tries >= max_tries:
+                break
+            log("[%s] 第 %d 次提交失败，%ds 后重试（提交阶段）" % (seg, tries, gap))
+            time.sleep(gap)
+        if not st["submitted"].is_set():
+            finalize(seg, st)
+            continue
+        if seg != jobs[-1][0]:
+            time.sleep(gap)
+
+    for seg, st in polls.items():
+        st["done"].wait()
+
+    log("===== 完成: 成功 %d, 失败 %d, dry 0 =====" % (tally["ok"], tally["fail"]))
+    return 0 if tally["fail"] == 0 else 3
+
+
 # ---------------------------------------------------------------- main
 def main():
     ap = argparse.ArgumentParser(add_help=True)
@@ -358,6 +486,10 @@ def main():
     ap.add_argument("--from", dest="from_seg", default="")
     ap.add_argument("--force", action="store_true", help="已完成段也重渲")
     ap.add_argument("--workers", type=int, default=0, help="并发数；0=全量并发（默认，不设上限）")
+    ap.add_argument("--submit-gap", type=int, default=0,
+                    help="串行提交：每段提交被上游接受后等 N 秒再提交下一段（N>0 启用；各段提交成功后后台自行轮询）")
+    ap.add_argument("--submit-retries", type=int, default=0,
+                    help="串行提交时单段提交阶段的重试次数；0=直到成功（受后端超时兜底）")
     ap.add_argument("--retries", type=int, default=2, help="本地失败重试次数（默认 2）")
     ap.add_argument("--retry-gap", type=int, default=20, help="重试间隔秒（默认 20）")
     ap.add_argument("--aspect", default="", help="aspect_ratio；默认按 prompt 判 16:9/9:16")
@@ -423,6 +555,11 @@ def main():
     if not jobs:
         log("===== 无待渲段 =====")
         return 0
+
+    if args.submit_gap > 0:
+        log("串行提交 %d 段，间隔 %ds（提交成功后各自后台轮询）: %s"
+            % (len(jobs), args.submit_gap, " ".join(j[0] for j in jobs)))
+        return run_pipelined(pdir, jobs, args, tok, log)
 
     workers = args.workers if args.workers > 0 else len(jobs)
     log("待渲 %d 段，并发 %d（不设硬上限）: %s"

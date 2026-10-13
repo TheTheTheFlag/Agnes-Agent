@@ -165,6 +165,7 @@ async def retry_failed(req: RetryFailedReq) -> dict:
     return L.kb_retry_failed_async(req.thread_id, strategy=req.chunking_strategy, target=req.target)
 
 
+@router.post("/delete")
 @router.delete("/delete")
 async def delete(req: DeleteReq) -> dict:
     return L.kb_delete_doc(req.thread_id, req.doc_id)
@@ -344,6 +345,7 @@ async def feedback_list(thread_id: Optional[str] = None, limit: int = Query(100)
 
 
 @router.post("/chunk_delete")
+@router.delete("/chunk_delete")
 async def chunk_delete(req: ChunkDeleteReq) -> dict:
     return L.kb_delete_chunk(req.thread_id, req.chunk_key)
 

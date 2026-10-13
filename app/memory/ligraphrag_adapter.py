@@ -2225,6 +2225,8 @@ def kb_delete_chunk(thread_id: str, chunk_key: str) -> dict:
                 _run_on_worker(rag.doc_status.upsert({doc_id: rec}), timeout=60)
         _run_on_worker(rag.text_chunks.delete([key]), timeout=60)
         _run_on_worker(rag.chunks_vdb.delete([key]), timeout=60)
+        for _store in (rag.text_chunks, rag.chunks_vdb, rag.doc_status):
+            _run_on_worker(_store.index_done_callback(), timeout=300)
         return {"ok": True, "doc_id": doc_id, "chunk_key": key}
     except Exception as e:
         return {"ok": False, "chunk_key": key, "error": f"删除切片失败: {e}"}

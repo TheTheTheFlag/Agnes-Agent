@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>创作工作台 · Agnes</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%237c5cff'/%3E%3Cstop offset='1' stop-color='%235a9cff'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='8' fill='url(%23g)'/%3E%3Cpath d='M10 21l6-10 6 10' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="/static/style.css?v=20260929_slim1">
+<link rel="stylesheet" href="/static/style.css?v=20260929_split1">
 </head>
 <body>
 <div id="app" class="theme-auto">
@@ -20,10 +20,16 @@
         </span>
         <span class="brand-name">Agnes Agent</span>
       </div>
-      <button id="btnStudio" class="btn-studio" title="创作工作台（短剧 / 小说 / 图片 / 视频）">
-        <span class="btn-studio-ic">🎬</span>
-        <span class="btn-studio-txt"><b>创作工作台</b><small>短剧 · 小说 · 图片 · 视频</small></span>
-      </button>
+      <div class="studio-entry-row">
+        <button id="btnStudio" class="btn-studio" title="创意（短剧 / 小说 / 图片 / 视频）">
+          <span class="btn-studio-ic">✨</span>
+          <span class="btn-studio-txt"><b>创意</b><small>短剧 · 小说 · 图片 · 视频</small></span>
+        </button>
+        <button id="btnStudioReview" class="btn-studio" title="审核（短剧审核台）">
+          <span class="btn-studio-ic">🎬</span>
+          <span class="btn-studio-txt"><b>审核</b><small>短剧审核台</small></span>
+        </button>
+      </div>
       <button id="btnNewChat" class="btn-new" title="新建会话 (Ctrl+N)">
         <svg viewBox="0 0 16 16" width="14" height="14"><path d="M8 2v12M2 8h12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
         <span>新建会话</span>
@@ -161,7 +167,7 @@
         <div class="studio-name">创作工作台</div>
         <div class="studio-meta">Agnes 创作工作台 · Agnes Image · Agnes Video</div>
       </div>
-      <div class="studio-seg" id="studioSeg" style="display:none">
+      <div class="studio-seg" id="studioSeg">
         <button data-tab="drama" class="active" style="display:none" title="已隐藏">🎭 短剧创作</button>
         <button data-tab="image">🖼 图片创作</button>
         <button data-tab="video">🎬 视频创作</button>
@@ -226,11 +232,11 @@
 <script src="/static/marked.min.js"></script>
 <script src="/static/vis-network.min.js"></script>
 <script src="/static/rag-admin.js"></script>
-<script src="/static/studio-shell.js?v=20260929_slim1"></script>
-<script src="/static/video-studio.js?v=20260929_slim2"></script>
+<script src="/static/studio-shell.js?v=20260929_split2"></script>
+<script src="/static/video-studio.js?v=20260929_split1"></script>
 <script src="/static/image-studio.js?v=20260929_slim2"></script>
 <script src="/static/drama-studio.js?v=20260925_copyfix"></script>
-<script src="/static/drama-review.js?v=20260929_slim2"></script>
-<script src="/static/app.js?v=20260929_supplement2"></script>
+<script src="/static/drama-review.js?v=20261010_progress"></script>
+<script src="/static/app.js?v=20261002_reviewbtn1"></script>
 </body>
 </html>

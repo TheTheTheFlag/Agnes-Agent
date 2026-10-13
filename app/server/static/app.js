@@ -846,7 +846,14 @@ function respondApproval(allow, data) {
 function respondAsk(answer, data) {
   _lockApprovalCard();
   State.approvalCard = null;
-  sendMessage("", { resume: true, allow: true, answer: answer, mode: "ask" });
+  // 卡片换成「已提交」态，避免用户重复点击同一张卡发两次答案
+  const card = State.currentAssistantEl && $(".approval-card", State.currentAssistantEl);
+  if (card) {
+    const box = $(".ask-options", card);
+    if (box) box.innerHTML = `<div class="ask-hint">已提交你的选择，等待任务继续…</div>`;
+  }
+  sendMessage("", { resume: true, allow: true, answer: answer, mode: "ask",
+                     ask_id: (data && data.ask_id) || "" });
 }
 
 /* ==================== 任务待办面板 ==================== */
@@ -1741,6 +1748,9 @@ async function sendMessage(text, opts) {
         allow: !!opts.allow,
         mode: opts.mode || "per_ask",
         answer: opts.answer || "",
+        // ask 选项卡：把 ask_id 回传，后端据此把答案交回进程内注册表唤醒挂起的
+        // executor 节点（线程池 worker 不能用 langgraph interrupt，故不走 resume 图）
+        ask_id: opts.ask_id || "",
         thread_id: State.threadId,
       }
     : { message: text, thread_id: State.threadId, selected_kbs: kbSelectionForSend() };
@@ -1911,6 +1921,27 @@ async function loadHistory(tid) {
     renderWelcome();
   }
   scrollToBottom();
+  // 刷新后若该 thread 仍有待答复的 ask_user 问题（进程没重启、executor 还挂着），
+  // 历史回放只会把它画成只读气泡——这里补一张可交互卡片，否则用户永远答不了。
+  try { await restorePendingAskCard(); } catch (e) { /* 忽略 */ }
+}
+
+// 拉取当前 thread 待答复的 ask 问题并渲染成可交互选项卡（刷新/切会话后恢复）
+async function restorePendingAskCard() {
+  const tid = State.threadId;
+  if (!tid) return;
+  const r = await apiGet(`/api/chat/pending-ask?thread_id=${encodeURIComponent(tid)}`);
+  const p = r && r.pending;
+  if (!p || !p.question) return;
+  State.currentAssistantEl = addAssistantBubble("");
+  renderApprovalCard({
+    kind: "ask",
+    ask_id: p.ask_id || "",
+    question: p.question,
+    options: p.options || [],
+    allow_custom: p.allow_custom !== false,
+    mode: "ask",
+  });
 }
 
 function renderHistory(msgs) {
@@ -2586,6 +2617,7 @@ function openStudioView(tab) {
   $("#app").classList.add("studio-open");
   $("#studio").classList.remove("hidden");
   $("#btnStudio").classList.add("active");
+  $("#btnStudioReview").classList.toggle("active", (tab || _studioTab) === "review");
   switchStudioTab(tab || _studioTab);
 }
 
@@ -2595,6 +2627,7 @@ function closeStudioView() {
   $("#app").classList.remove("studio-open");
   $("#studio").classList.add("hidden");
   $("#btnStudio").classList.remove("active");
+  if ($("#btnStudioReview")) $("#btnStudioReview").classList.remove("active");
   chatInput.focus();
 }
 
@@ -2669,7 +2702,8 @@ async function switchStudioTab(tab) {
     if (tab === "drama") _studioDramaReady = false;
     else if (tab === "image") _studioImageReady = false;
     else _studioVideoReady = false;
-    (tab === "drama" ? drmP : tab === "image" ? imgP : vidP).innerHTML = drawerErr(e);
+    // review 必须落到 revP：原先落到 vidP，审核台自身空白 => 用户视角「点了没反应」
+    (tab === "drama" ? drmP : tab === "image" ? imgP : tab === "review" ? revP : vidP).innerHTML = drawerErr(e);
   }
 }
 
@@ -3545,6 +3579,13 @@ function handleLiveEvent(evt) {
     if (State.drawerTab === "logs") renderLogsTab(drawerBody);
   } else if (eType === "event") {
     if (State.drawerTab === "events") renderEventsTab(drawerBody);
+  } else if (eType === "approval") {
+    // 人工确认/ask 选项卡走全局 SSE（/api/sse）而不是本次 /api/chat 的 SSE：
+    // ask_user 抛出后 executor 节点就阻塞在进程内注册表里等答复，本次 run 的 SSE
+    // 此时没有任何新事件可推，走它会死锁（卡片永远弹不出来）。
+    // chat.py 的 _drain_listener 刻意不转发 approval，避免同一张卡渲染两次。
+    if (evt.thread_id && State.threadId && evt.thread_id !== State.threadId) return;
+    renderApprovalCard(eData);
   } else if (eType === "planner" || eType === "executor") {
     // 任务计划/子任务状态变化 → 刷新待办面板。
     // 后端事件负载有两种形态：executor 全量快照用 `nodes`（[{id,status,description,replaces}]），
@@ -3608,6 +3649,12 @@ function bindEvents() {
   // 创作工作台：侧边栏品牌下方入口 → 独立全屏视图（短剧 / 图片 / 视频）
   $("#btnStudio").addEventListener("click", () => {
     if (isStudioOpen()) closeStudioView(); else openStudioView();
+  });
+  // 侧边栏「审核」直达短剧审核台。此前 #btnStudioReview 在所有 js 里零引用，
+  // 按钮存在但没绑事件，点击毫无反应。
+  $("#btnStudioReview").addEventListener("click", () => {
+    if (isStudioOpen() && _studioTab === "review") closeStudioView();
+    else openStudioView("review");
   });
   $("#btnStudioBack").addEventListener("click", closeStudioView);
   $("#btnStudioSettings").addEventListener("click", () => openDrawer());

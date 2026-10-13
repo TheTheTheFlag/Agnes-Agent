@@ -2468,6 +2468,20 @@ input, textarea { font-family: inherit; }
 .btn-studio-txt b { font-size: 13px; font-weight: 700; }
 .btn-studio-txt small { font-size: 10.5px; color: var(--text-faint); }
 
+/* 创意 / 审核 双入口并排（2026-09-29 拆分创作工作台按钮） */
+.studio-entry-row { display: flex; gap: 6px; }
+.studio-entry-row .btn-studio {
+  width: auto;
+  flex: 1 1 0;
+  min-width: 0;
+  gap: 7px;
+  padding: 9px 8px;
+  margin-bottom: 8px;
+}
+.studio-entry-row .btn-studio-ic { font-size: 15px; }
+.studio-entry-row .btn-studio-txt b { font-size: 12.5px; }
+.studio-entry-row .btn-studio-txt small { font-size: 9.5px; }
+
 .studio { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--bg); }
 .studio.hidden, .studio-panel.hidden { display: none; }
 #app.studio-open:not(.chat-embedded) #chat { display: none; }

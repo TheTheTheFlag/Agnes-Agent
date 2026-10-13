@@ -2,7 +2,7 @@
 # split_validate.sh <md路径> — 按 ## E01- 段头拆分投喂稿，逐段 validate_prompt.py --model agnes；汇总 FAIL 段
 set -u
 MD="$1"
-BASE="/home/mirror/Agnes-Agent/app/skills/short-drama-director"
+BASE="/home/mirror/Agnes-Agent/data/users/Mirror/skills/short-drama-agnes-sop"
 DIR=$(dirname "$MD")
 TMP="$DIR/.validate"
 rm -rf "$TMP"; mkdir -p "$TMP"

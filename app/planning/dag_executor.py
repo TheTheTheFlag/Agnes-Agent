@@ -19,6 +19,7 @@
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextvars import copy_context
 from threading import BoundedSemaphore
 from typing import Any, Dict, List, Optional
 
@@ -272,16 +273,29 @@ def _run_node(thread_id: str, task_plan_id: int, node: Dict, goal: str,
     def _interrupt_handler(name, params):
         if name in _ASK_TOOLS:
             # 用户决策选项卡：无论审批模式如何，都要挂起等用户答复。
-            # interrupt() 会抛出 GraphInterrupt 上抛给 langgraph 状态机挂起；
-            # 必须原样冒泡（不能吞成异常返回），否则挂起失效、工具拿不到答案。
-            resp = interrupt({
+            # 不能用 langgraph interrupt()——executor 节点跑在线程池 worker 里，
+            # interrupt() 依赖主线程的 runnable config，worker 内调用会抛
+            # RuntimeError: Called get_config outside of a runnable context（已实测）。
+            # 改走进程内注册表：登记 → 推 SSE 选项卡 → 阻塞等答复 → 返回答案。
+            from app.graph import ask_registry
+            ask_id = ask_registry.register_ask(
+                thread_id,
+                question=params.get("question") or "请用户决定",
+                options=params.get("options") or [],
+                allow_custom=bool(params.get("allow_custom", True)),
+            )
+            add_event("approval", {
                 "kind": "ask",
+                "ask_id": ask_id,
                 "question": params.get("question") or "请用户决定",
-                "options": params.get("options") or [],
+                "options": [str(o) for o in (params.get("options") or []) if str(o or "").strip()],
                 "allow_custom": bool(params.get("allow_custom", True)),
                 "mode": "ask",
-            })
-            _ask_ans["answer"] = str(resp.get("answer") or "")[:4000] if isinstance(resp, dict) else ""
+            }, thread_id)
+            add_log_entry("info", f"[DAG] ask_user 挂起等待用户答复 ask_id={ask_id} node={node_id}")
+            ans = ask_registry.wait_answer(ask_id)
+            _ask_ans["answer"] = ans
+            add_log_entry("info", f"[DAG] ask_user 收到答复 ask_id={ask_id}: {ans[:80]}")
             return True, None
         if name in _APPROVAL_TOOLS:
             try:
@@ -475,7 +489,12 @@ def create_executor(llm_builder, tools_list):
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = {}
             for nid in ready:
-                futures[pool.submit(_run_node, thread_id, plan["id"],
+                # 必须显式传播 ContextVar：新线程默认拿到空 Context，current_user()
+                # 会退回 DEFAULT_USER(Mirror)。而 DB_PATH/DELIVERABLES_DIR 都是
+                # _UserPath，每次访问按 current_user() 动态解析——不传播就会把
+                # Test 用户的节点产物、日志、ask 事件全写到 Mirror 名下（已实测）。
+                _ctx = copy_context()
+                futures[pool.submit(_ctx.run, _run_node, thread_id, plan["id"],
                                     dict(node_map[nid]), goal,
                                     _parent_artifacts(node_map, edges, nid),
                                     _missing_soft(node_map, edges, nid),

@@ -1,6 +1,6 @@
 /* ============================================================================
  * studio-shell.js — 创作工作台 v2 共享组件
- *   欢迎区 / 创作类型切换（图片生成 · 视频生成 · 短剧审核）/ 生成设置弹窗
+ *   欢迎区 / 创作类型切换（图片生成 · 视频生成；审核页额外含 短剧审核）/ 生成设置弹窗
  *   （比例 · 分辨率 · 生成数量 · 自定义像素预览）
  *   供 image-studio.js / video-studio.js 复用；短剧审核页复用 woo-* 样式。
  * ============================================================================ */
@@ -14,6 +14,12 @@
     { tab: "video", icon: "🎬", label: "视频生成" },
     { tab: "review", icon: "🎬", label: "短剧审核" },
   ];
+
+  // 「短剧审核」只出现在审核页自身的下拉里；图片页 / 视频页都不再提供该入口
+  // （2026-09-29：审核入口已提到侧边栏首页「审核」按钮，创作页下拉只留图片/视频互切）
+  function typeOptsFor(curTab) {
+    return curTab === "review" ? TYPE_OPTS : TYPE_OPTS.filter((o) => o.tab !== "review");
+  }
 
   const SIZE_FACTOR = { "1K": 1, "2K": 2, "3K": 3, "4K": 4 };
   const SIZE_LABEL = { "1K": "标清 1K", "2K": "高清 2K", "3K": "超清 3K", "4K": "超清 4K" };
@@ -30,14 +36,15 @@
 
   /* ---------- 创作类型切换 ---------- */
   function typeButton(id, curTab) {
-    const cur = TYPE_OPTS.find((o) => o.tab === curTab) || TYPE_OPTS[0];
+    const opts = typeOptsFor(curTab);
+    const cur = opts.find((o) => o.tab === curTab) || opts[0];
     return (
       '<div class="woo-type-wrap" id="' + id + 'Wrap">' +
       '<button type="button" class="woo-type-btn" id="' + id + '">' +
       cur.icon + " <b>" + cur.label + '</b><span class="woo-caret">▾</span>' +
       "</button>" +
       '<div class="woo-type-menu hidden" id="' + id + 'Menu">' +
-      TYPE_OPTS.map(function (o) {
+      opts.map(function (o) {
         return (
           '<button type="button" data-tab="' + o.tab + '" class="' + (o.tab === curTab ? "active" : "") + '">' +
           o.icon + " " + o.label +

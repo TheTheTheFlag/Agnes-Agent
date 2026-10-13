@@ -29,7 +29,9 @@ from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, JSONResponse
 
 from app.config import BASE_DIR, user_subdir
-from app.server.api.image import _agnes_keys, _mask_key
+from app.server.api.image import (_agnes_keys, _atomic_write_manifest, _mask_key,
+                                  _read_manifest_with_backup)
+from app.server.store import add_log_entry
 from app.userctx import current_user, set_current_user
 
 router = APIRouter(prefix="/api/video", tags=["video"])
@@ -169,13 +171,10 @@ def _load_user_manifest(username: str):
     old_user = current_user()
     try:
         set_current_user(username)
-        items = []
-        try:
-            with open(_MANIFEST, "r", encoding="utf-8") as f:
-                raw = json.load(f)
-            items = raw.get("items", []) if isinstance(raw, dict) else []
-        except Exception as e:
-            pass
+        items, note = _read_manifest_with_backup(_MANIFEST)
+        if note:
+            add_log_entry("warning", f"[作品库] manifest 读取异常：{note}"
+                                     f"（items={len(items)}）")
         with _user_items_lock(username):
             _user_items[username] = items
     finally:
@@ -183,15 +182,14 @@ def _load_user_manifest(username: str):
 
 
 def _save_user_manifest(username: str):
-    """保存当前用户的作品列表到磁盘"""
+    """保存当前用户的作品列表到磁盘（原子写 + .bak 备份）"""
     old_user = current_user()
     try:
         set_current_user(username)
         os.makedirs(_LIB, exist_ok=True)
         with _user_items_lock(username):
             items = _user_items.get(username, [])
-        with open(_MANIFEST, "w", encoding="utf-8") as f:
-            json.dump({"items": items[:_MAX_GALLERY]}, f, ensure_ascii=False, indent=1)
+        _atomic_write_manifest(_MANIFEST, {"items": items[:_MAX_GALLERY]})
     finally:
         set_current_user(old_user)
 

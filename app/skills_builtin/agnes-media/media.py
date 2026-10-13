@@ -44,7 +44,9 @@ except Exception:
 import requests
 
 SKILL_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = SKILL_DIR.resolve().parents[3]          # .../Agnes-Agent
+_AG = SKILL_DIR.resolve().parents[2]                  # .../Agnes-Agent
+assert (_AG / "app").is_dir(), "media.py 定位错 PROJECT_ROOT: %s" % _AG
+PROJECT_ROOT = _AG
 OUTPUT_ROOT = SKILL_DIR / "output"
 
 # 模型/默认参数（与 SKILL.md front-matter 保持一致）

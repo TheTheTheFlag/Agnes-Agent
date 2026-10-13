@@ -101,6 +101,60 @@ def _supplement_sse_response(thread_id: str, message: str, answer: str = None, n
         "Cache-Control": "no-cache", "Connection": "keep-alive", "Access-Control-Allow-Origin": "*",
     })
 
+
+def _ask_ack_sse_response(thread_id: str, answer: str):
+    """ask 选项卡答复已被受理的轻量确认 SSE。
+
+    答复本身不是「插话」也不是「新任务」：executor 正挂起在进程内注册表里等这个
+    答案，submit_answer 已经唤醒它。这里只回一句确认让前端解锁发送器并结束本轮，
+    后续 executor 的进展由它自己已建立的 SSE 继续推。
+
+    注意前端 respondAsk() 发的是空 message（答案在 answer 字段），所以这里不往
+    messages 表写空的用户消息，只落一条 assistant 确认。
+    """
+    _text = f"已收到你的选择，执行继续：\n\n> {str(answer or '')[:500]}"
+    try:
+        add_log_entry("info", f"[ask] 用户答复已提交: {str(answer or '')[:80]}")
+    except Exception:
+        pass
+    try:
+        from app.memory import MemoryManager as _MM
+        _mm = _MM(db_path=DB_PATH, thread_id=thread_id)
+        _mm.add_message(thread_id, "assistant", _text)
+    except Exception:
+        pass
+
+    async def _gen():
+        yield "data: " + json.dumps({"step": "final", "node": "chatbot", "text": _text},
+                                    ensure_ascii=False) + "\n\n"
+        yield "data: " + json.dumps({"step": "done"}, ensure_ascii=False) + "\n\n"
+
+    return StreamingResponse(_gen(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache", "Connection": "keep-alive", "Access-Control-Allow-Origin": "*",
+    })
+
+
+@router.get("/api/chat/pending-ask")
+async def pending_ask_endpoint(request: Request = None, thread_id: str = None):
+    """查询该 thread 当前是否有待答复的 ask_user 问题。
+
+    刷新页面后 ask 卡片会随历史回放成只读气泡，但进程内的注册表还挂着问题、
+    executor 仍在阻塞等答案——这里把待答问题原样吐给前端，让它重新渲染成可交互卡片。
+    """
+    try:
+        _u = getattr(getattr(request, "state", None), "username", None) or current_user()
+    except Exception:
+        _u = None
+    try:
+        from app.userctx import current_tid as _user_tid
+        _tid = _user_tid(_u)
+    except Exception:
+        _tid = "default"
+    _tid = thread_id or _tid
+    from app.graph import ask_registry
+    return {"pending": ask_registry.get_pending(_tid)}
+
+
 @router.post("/api/chat")
 async def chat_endpoint(payload: dict, request: Request = None):
     """主对话窗口的发送端点（流式 SSE 推送 token）。
@@ -181,25 +235,44 @@ async def chat_endpoint(payload: dict, request: Request = None):
     # run 真正启动时才占用锁（try_lock_run 拿不到 = 已有 run），
     # 释放放在 run_graph() 的 finally 里（只有真正跑起来的 run 才需要释放）。
     from app.graph.run_registry import try_lock_run, push_supplement as _push_supplement
+    from app.graph.builder import _dag_has_unfinished_work, _looks_like_query, _dag_progress_summary
+
+    # ask 选项卡的答复：必须先于 run 锁判断。executor 正挂起在进程内注册表里等这个
+    # 答案（线程池 worker 不能用 langgraph interrupt），submit_answer 直接唤醒它。
+    # 答复既不是插话也不是新任务，绝不能落到「启动新 run」路径上。
+    if is_resume and str((payload or {}).get("mode") or "") == "ask":
+        from app.graph import ask_registry
+        _ans = str((payload or {}).get("answer") or "")
+        _hit = ask_registry.submit_answer(thread_id, _ans,
+                                          str((payload or {}).get("ask_id") or ""))
+        if _hit:
+            return _ask_ack_sse_response(thread_id, _ans)
+        # 注册表里没有待答问题（超时/进程重启已作废）：明确告知，不静默当插话处理
+        return JSONResponse({"error": "该问题已超时或已失效，请让任务重新提问"},
+                             status_code=409)
+
+    # 执行期插话分流：必须先于 try_lock_run 判断。
+    # 若放在锁之后，当 run 锁恰好空闲（上一 run 已退出但 DAG 仍是 executing 的
+    # 陈旧状态）时，进度问句会走正常路径启动一个新的 graph run——2026-10-01
+    # Test 线程「进度如何了」触发 executor 就是这个坑。
+    if not is_resume and _dag_has_unfinished_work(thread_id):
+        if _looks_like_query(message):
+            _progress = _dag_progress_summary(thread_id)
+            if _progress:
+                # 进度查询：只读回答当前进度，不建 run、不入队、不改执行状态。
+                return _supplement_sse_response(thread_id, message, answer=_progress,
+                                                note="（执行期间插话：只读回答，不回写任务）")
+        _push_supplement(thread_id, message)
+        return _supplement_sse_response(thread_id, message)
+
     _run_owned = try_lock_run(thread_id)
     if not _run_owned:
         if is_resume:
             # resume（审批续跑）无法入队补充——上一 run 已中断且锁被 finally 释放，
             # 正常不会出现在锁占用中；出现则说明有并发 run，提示稍后再试。
             return JSONResponse({"error": "同一会话已有任务在执行，请稍后再试"}, status_code=409)
-        # 仅当线程确有"未收敛的进行中计划"时才把新消息当作执行期插话处理；
-        # 若只是普通对话轮次在跑（几秒即结束），消息入队没人消费会被丢弃——
-        # 明确拒绝，让前端提示稍后再试（避免用户消息静默丢失）。
-        from app.graph.builder import _dag_has_unfinished_work, _looks_like_query, _dag_progress_summary
-        if _dag_has_unfinished_work(thread_id):
-            if _looks_like_query(message):
-                _progress = _dag_progress_summary(thread_id)
-                if _progress:
-                    # 进度查询的插话：不建 run、不入队，直接只读回答当前进度。
-                    return _supplement_sse_response(thread_id, message, answer=_progress,
-                                                    note="（执行期间插话：只读回答，不回写任务）")
-            _push_supplement(thread_id, message)
-            return _supplement_sse_response(thread_id, message)
+        # 锁被占但没有未收敛 DAG：只是普通对话轮次在跑（几秒即结束），
+        # 消息入队没人消费会被丢弃——明确拒绝，避免用户消息静默丢失。
         return JSONResponse({"error": "回复仍在进行中，请先等本轮结束或点「⏹ 停止」"}, status_code=409)
 
     # resume 即审批决策：把 allow/mode 回填到最近一条审批提问记录（重启后可完整回放审批卡）
