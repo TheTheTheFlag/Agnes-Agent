@@ -1456,8 +1456,12 @@ def kb_documents(thread_id: str, page: int = 1, page_size: int = 50) -> dict:
     return {"thread_id": thread_id, "total": total, "page": page, "page_size": page_size, "docs": docs}
 
 
-def kb_chunks(thread_id: str, doc_id: str = "") -> dict:
-    """某文档的分块列表（内容 + token 数）；doc_id 为空时返回该知识库全部切片。"""
+def kb_chunks(thread_id: str, doc_id: str = "", page: int = 1, page_size: int = 0) -> dict:
+    """某文档的分块列表（内容 + token 数）；doc_id 为空时返回该知识库全部切片。
+
+    page_size>0 时按页返回（前端逐页加载，避免一次传输/渲染上千条切片）；
+    page_size<=0（默认）返回全部，兼容切片预览等需要完整列表的调用。
+    """
     nid = ""
     if doc_id:
         nid = doc_id if str(doc_id).startswith("doc-") else "doc-" + str(doc_id)
@@ -1480,7 +1484,24 @@ def kb_chunks(thread_id: str, doc_id: str = "") -> dict:
         out.sort(key=lambda c: c["order"])
     else:
         out.sort(key=lambda c: (c["doc_id"], c["order"]))
-    return {"doc_id": nid or "", "total": len(out), "chunks": out}
+    total = len(out)
+    psize = int(page_size or 0)
+    if psize > 0:
+        psize = min(500, max(1, psize))
+        pno = max(1, int(page or 1))
+        start = (pno - 1) * psize
+        page_items = out[start:start + psize]
+    else:
+        pno = 1
+        psize = total
+        page_items = out
+    return {
+        "doc_id": nid or "",
+        "total": total,
+        "page": pno,
+        "page_size": psize,
+        "chunks": page_items,
+    }
 
 
 def kb_search(thread_id: str, query: str, top_k: int = 8) -> dict:

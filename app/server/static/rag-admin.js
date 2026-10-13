@@ -99,6 +99,52 @@ function ragModal(title, bodyHtml, { wide = false } = {}) {
   return { wrap, close, bd: wrap.querySelector(".rag-modal-bd") };
 }
 
+/* 通用分页控件（上一页 / 页码 / 下一页 / 跳页，页码从 1 开始） */
+function ragBuildPager(page, pages, total, onGo) {
+  const pg = document.createElement("div");
+  pg.className = "d-row";
+  pg.style.cssText = "gap:8px;margin-top:8px;flex-wrap:wrap";
+  const win = 5;
+  const lo = Math.max(1, page - Math.floor(win / 2));
+  const hi = Math.min(pages, lo + win - 1);
+  let h = `<span class="d-empty" style="margin:0">共 ${total} 条 · 第 ${page}/${pages} 页</span>`;
+  h += `<button class="d-btn d-btn-sm" data-nav="prev" ${page > 1 ? "" : "disabled"}>‹ 上一页</button>`;
+  h += `<span class="d-row" style="gap:4px;flex-wrap:wrap">`;
+  if (lo > 1) h += `<button class="d-btn d-btn-sm" data-pg="1">1</button>`;
+  if (lo > 2) h += `<span class="d-empty" style="margin:0">…</span>`;
+  for (let p = lo; p <= hi; p++) h += `<button class="d-btn d-btn-sm${p === page ? " primary" : ""}" data-pg="${p}">${p}</button>`;
+  if (hi < pages - 1) h += `<span class="d-empty" style="margin:0">…</span>`;
+  if (hi < pages) h += `<button class="d-btn d-btn-sm" data-pg="${pages}">${pages}</button>`;
+  h += `</span>`;
+  h += `<button class="d-btn d-btn-sm" data-nav="next" ${page < pages ? "" : "disabled"}>下一页 ›</button>`;
+  h += `<span class="d-row" style="gap:4px"><input type="number" class="d-input" data-jump min="1" max="${pages}" style="width:64px;flex:none" placeholder="页码">&nbsp;<button class="d-btn d-btn-sm" data-jumpgo>跳转</button></span>`;
+  pg.innerHTML = h;
+  const go = (p) => { p = Math.min(pages, Math.max(1, parseInt(p, 10) || page)); if (p !== page) onGo(p); };
+  const prev = pg.querySelector("button[data-nav='prev']");
+  const next = pg.querySelector("button[data-nav='next']");
+  if (prev) prev.addEventListener("click", () => go(page - 1));
+  if (next) next.addEventListener("click", () => go(page + 1));
+  pg.querySelectorAll("button[data-pg]").forEach((b) => b.addEventListener("click", () => go(parseInt(b.dataset.pg, 10))));
+  const jgo = pg.querySelector("button[data-jumpgo]");
+  const jin = pg.querySelector("input[data-jump]");
+  if (jgo) jgo.addEventListener("click", () => go(jin.value));
+  if (jin) jin.addEventListener("keydown", (e) => { if (e.key === "Enter") go(jin.value); });
+  return pg;
+}
+
+/* 逐项串行删除（避免单个长请求超时），onProgress(i,n) 回报进度 */
+async function ragBatchDelete(items, doOne, onProgress) {
+  let ok = 0, fail = 0;
+  const errs = [];
+  for (let i = 0; i < items.length; i++) {
+    if (onProgress) onProgress(i + 1, items.length);
+    try { await doOne(items[i], i); ok++; }
+    catch (e) { fail++; if (errs.length < 3) errs.push(String((e && e.message) || e)); }
+    if (i < items.length - 1) await new Promise((res) => setTimeout(res, 60));
+  }
+  return { ok, fail, errs };
+}
+
 /* ---------- 页面：知识库列表 ---------- */
 
 async function ragKbList(content) {
@@ -203,12 +249,16 @@ async function ragKbDetail(content, route) {
 /* ---------- 子页：文档 ---------- */
 
 async function ragDocs(content, tid, body) {
+  const PAGE = 15;
   let page = 1;
   let running = false;
+  const selected = new Set();
   const render = async () => {
     running = true;
     body.innerHTML = `<div class="d-empty">加载中…</div>`;
-    const r = await apiGet(`/api/kb/documents?${new URLSearchParams({ thread_id: tid, page, page_size: 15 })}`);
+    let r = await apiGet(`/api/kb/documents?${new URLSearchParams({ thread_id: tid, page, page_size: PAGE })}`);
+    const pages = Math.max(1, Math.ceil(r.total / PAGE));
+    if (page > pages) { page = pages; r = await apiGet(`/api/kb/documents?${new URLSearchParams({ thread_id: tid, page, page_size: PAGE })}`); }
     const docs = r.docs || [];
     const anyBusy = docs.some((d) => ["processing", "pending"].includes(d.status.toLowerCase()));
     body.innerHTML = drawerSection("文档列表", `
@@ -230,6 +280,8 @@ async function ragDocs(content, tid, body) {
           <option value="graph">仅导入图库</option>
         </select>
         <button class="d-btn danger" id="rgRetryFail" ${docs.some((d) => d.status.toLowerCase() === "failed") ? "" : "disabled"}>⟳ 重试失败</button>
+        <button class="d-btn danger" id="rgDocBatchDel" disabled>🗑 批量删除</button>
+        <span class="d-empty" id="rgDocSelCount" style="margin:0"></span>
         <input type="file" id="rgFile1" style="display:none" accept=".txt,.md,.json,.csv,.html,.pdf,.docx,.pptx,.xlsx,.xls,.epub,.ipynb">
         <input type="file" id="rgFileN" style="display:none" multiple accept=".txt,.md,.json,.csv,.html,.pdf,.docx,.pptx,.xlsx,.xls,.epub,.ipynb">
       </div>
@@ -238,9 +290,11 @@ async function ragDocs(content, tid, body) {
         <div class="d-empty" id="rgBusy" style="display:none">⏳ 正在解析/嵌入/建图（可能 10-60 秒）…</div></div>
       ${docs.length ? `
       <table class="d-table"><thead><tr>
+        <th style="width:30px"><input type="checkbox" id="rgDocAll" title="全选本页"></th>
         <th>文件名</th><th>大小</th><th>状态</th><th>切片</th><th>上传时间</th><th>操作</th>
       </tr></thead><tbody>` + docs.map((d) => `
         <tr>
+          <td><input type="checkbox" class="rg-doc-check" data-id="${escapeHtml(d.id)}"></td>
           <td><b>${escapeHtml(truncate(d.file_path || d.title, 40))}</b>${d.error_msg ? `<div class="d-empty" style="color:#e5534b;padding:0;word-break:break-all">${escapeHtml(truncate(d.error_msg, 90))}</div>` : ""}</td>
           <td>${fmtBytes(d.content_length)}</td>
           <td>${ragStatusChip(d.status)}</td>
@@ -255,41 +309,33 @@ async function ragDocs(content, tid, body) {
       <div class="d-empty">暂无文档。上传文件 / 导入 URL / 粘贴文本即可建立第一条知识。</div>`}`);
 
     // 分页：上一页 / 页码 / 下一页 / 跳页（页码从 1 开始）
-    const pages = Math.max(1, Math.ceil(r.total / 15));
-    const pg = document.createElement("div");
-    pg.className = "d-row";
-    pg.style.cssText = "gap:8px;margin-top:8px;flex-wrap:wrap";
-    let pgHtml = `<span class="d-empty" style="margin:0">共 ${r.total} 条 · 第 ${escapeHtml(String(page))}/${escapeHtml(String(pages))} 页</span>`;
-    pgHtml += `<button class="d-btn d-btn-sm" id="rgPrev" ${page > 1 ? "" : "disabled"}>‹ 上一页</button>`;
-    const win = 5;
-    const lo = Math.max(1, page - Math.floor(win / 2));
-    const hi = Math.min(pages, lo + win - 1);
-    pgHtml += `<span class="d-row" style="gap:4px;flex-wrap:wrap">`;
-    if (lo > 1) pgHtml += `<button class="d-btn d-btn-sm" data-pg="1">1</button>`;
-    if (lo > 2) pgHtml += `<span class="d-empty" style="margin:0">…</span>`;
-    for (let p = lo; p <= hi; p++) {
-      pgHtml += `<button class="d-btn d-btn-sm${p === page ? " primary" : ""}" data-pg="${escapeHtml(String(p))}">${escapeHtml(String(p))}</button>`;
-    }
-    if (hi < pages - 1) pgHtml += `<span class="d-empty" style="margin:0">…</span>`;
-    if (hi < pages) pgHtml += `<button class="d-btn d-btn-sm" data-pg="${escapeHtml(String(pages))}">${escapeHtml(String(pages))}</button>`;
-    pgHtml += `</span>`;
-    pgHtml += `<button class="d-btn d-btn-sm" id="rgNext" ${page < pages ? "" : "disabled"}>下一页 ›</button>`;
-    pgHtml += `<span class="d-row" style="gap:4px"><input type="number" class="d-input" id="rgJump" min="1" max="${escapeHtml(String(pages))}" style="width:64px" placeholder="页码">&nbsp;<button class="d-btn d-btn-sm" id="rgJumpGo">跳转</button></span>`;
-    pg.innerHTML = pgHtml;
-    body.appendChild(pg);
-    const go = (p) => {
-      p = Math.min(pages, Math.max(1, parseInt(p, 10) || page));
-      if (p !== page) { page = p; render(); }
+    if (r.total > 0) body.appendChild(ragBuildPager(page, pages, r.total, (p) => { page = p; render(); }));
+
+    // 选择与批量删除（跨页保留选择）
+    const syncSel = () => {
+      const ids = docs.map((d) => d.id);
+      $$("input.rg-doc-check", body).forEach((c) => { c.checked = selected.has(c.dataset.id); });
+      const all = $("#rgDocAll", body);
+      if (all) {
+        const onPage = ids.filter((id) => selected.has(id)).length;
+        all.checked = ids.length > 0 && onPage === ids.length;
+        all.indeterminate = onPage > 0 && onPage < ids.length;
+      }
+      const btn = $("#rgDocBatchDel", body);
+      if (btn) btn.disabled = selected.size === 0;
+      const sc = $("#rgDocSelCount", body);
+      if (sc) sc.textContent = selected.size ? `已选 ${selected.size} 项` : "";
     };
-    const prev = $("#rgPrev", pg);
-    const next = $("#rgNext", pg);
-    if (prev) prev.addEventListener("click", () => go(page - 1));
-    if (next) next.addEventListener("click", () => go(page + 1));
-    $$("button[data-pg]", pg).forEach((b) => b.addEventListener("click", () => go(parseInt(b.dataset.pg, 10) || 1)));
-    const jgo = $("#rgJumpGo", pg);
-    if (jgo) jgo.addEventListener("click", () => go($("#rgJump", pg).value));
-    const jin = $("#rgJump", pg);
-    if (jin) jin.addEventListener("keydown", (e) => { if (e.key === "Enter") go(jin.value); });
+    $$("input.rg-doc-check", body).forEach((c) => c.addEventListener("change", () => {
+      if (c.checked) selected.add(c.dataset.id); else selected.delete(c.dataset.id);
+      syncSel();
+    }));
+    const allChk = $("#rgDocAll", body);
+    if (allChk) allChk.addEventListener("change", () => {
+      docs.forEach((d) => { if (allChk.checked) selected.add(d.id); else selected.delete(d.id); });
+      syncSel();
+    });
+    syncSel();
 
     // 行操作
     $$("button[data-act]", body).forEach((b) => b.addEventListener("click", async () => {
@@ -413,6 +459,22 @@ async function ragDocs(content, tid, body) {
       } catch (e) { toast("重试失败: " + e.message, "error"); }
     });
 
+    $("#rgDocBatchDel", body).addEventListener("click", async () => {
+      const ids = Array.from(selected);
+      if (!ids.length) return;
+      if (!confirm(`确认删除选中的 ${ids.length} 个文档及其分块/实体/向量？此操作不可恢复。`)) return;
+      const btn = $("#rgDocBatchDel", body);
+      btn.disabled = true;
+      const res = await ragBatchDelete(ids, async (id) => {
+        const r2 = await apiPost("/api/kb/delete", { thread_id: tid, doc_id: id });
+        if (!r2.ok) throw new Error(r2.error || "删除失败");
+        selected.delete(id);
+      }, (i, n) => { btn.textContent = `删除中 ${i}/${n}…`; });
+      btn.textContent = "🗑 批量删除";
+      toast(`批量删除完成：成功 ${res.ok}，失败 ${res.fail}${res.fail ? "（" + res.errs[0] + "）" : ""}`, res.fail ? "warning" : "success");
+      await render();
+    });
+
     // 后台轮询：解析中任务自动刷新
     if (anyBusy && !RAG.poll) {
       RAG.poll = setInterval(() => { if (State.drawerTab === "rag" && !running) render(); }, 4000);
@@ -447,23 +509,38 @@ async function ragPreviewChunks(tid, docId) {
 async function ragChunks(content, tid, body) {
   const docs = (await apiGet(`/api/kb/documents?${new URLSearchParams({ thread_id: tid, page: 1, page_size: 200 })}`)).docs || [];
   let selDoc = "";
+  let page = 1;
+  let pageSize = 20;
+  const selected = new Set();
   const render = async () => {
     body.innerHTML = `<div class="d-empty">加载中…</div>`;
     const opts = `<option value="">全部文档</option>` + docs.map((d) =>
-      `<option value="${escapeHtml(d.id)}">${escapeHtml(truncate(d.file_path || d.id, 36))}</option>`).join("");
-    const q = await apiGet(`/api/kb/chunks?${new URLSearchParams({ thread_id: tid, doc_id: selDoc })}`);
+      `<option value="${escapeHtml(d.id)}"${d.id === selDoc ? " selected" : ""}>${escapeHtml(truncate(d.file_path || d.id, 36))}</option>`).join("");
+    let q = await apiGet(`/api/kb/chunks?${new URLSearchParams({ thread_id: tid, doc_id: selDoc, page, page_size: pageSize })}`);
+    const pages = Math.max(1, Math.ceil(q.total / pageSize));
+    if (page > pages) { page = pages; q = await apiGet(`/api/kb/chunks?${new URLSearchParams({ thread_id: tid, doc_id: selDoc, page, page_size: pageSize })}`); }
     const chunks = q.chunks || [];
     body.innerHTML = drawerSection("切片管理", `
-      <div class="d-row" style="gap:8px">
-        <select class="d-input" id="rgChunkSel">${opts}</select>
-        <span class="d-empty" style="margin:0">共 ${chunks.length} 个切片</span>
+      <div class="rg-toolbar">
+        <select class="d-input" id="rgChunkSel" style="width:auto;flex:none;max-width:340px">${opts}</select>
+        <select class="d-input" id="rgChunkPageSize" style="width:auto;flex:none" title="每页条数">
+          <option value="20">每页 20</option>
+          <option value="50">每页 50</option>
+          <option value="100">每页 100</option>
+        </select>
+        <span class="d-empty" style="margin:0">共 ${q.total} 个切片</span>
+        <div style="flex:1"></div>
+        <button class="d-btn danger" id="rgChunkBatchDel" disabled>🗑 批量删除</button>
+        <span class="d-empty" id="rgChunkSelCount" style="margin:0"></span>
         <button class="d-btn d-btn-sm" id="rgChunkReload">刷新</button>
       </div>
       ${chunks.length ? `
       <table class="d-table"><thead><tr>
+        <th style="width:30px"><input type="checkbox" id="rgChunkAll" title="全选本页"></th>
         <th>#</th><th>切片预览</th><th>Tokens</th><th>向量ID</th><th>标签</th><th>操作</th>
       </tr></thead><tbody>` + chunks.map((c) => `
         <tr>
+          <td><input type="checkbox" class="rg-chunk-check" data-id="${escapeHtml(c.id)}"></td>
           <td>${c.order}</td>
           <td class="cell-long">${escapeHtml(truncate(c.content, 140))}</td>
           <td>${c.tokens}</td>
@@ -475,13 +552,41 @@ async function ragChunks(content, tid, body) {
           </td>
         </tr>`).join("") + `</tbody></table>` : `
       <div class="d-empty">该范围没有切片。</div>`}`);
-    $("#rgChunkSel", body).addEventListener("change", (e) => { selDoc = e.target.value; loadAll(); });
-    $("#rgChunkReload", body).addEventListener("click", render);
 
-    const loadAll = async () => {
-      selDoc = $("#rgChunkSel", body).value;
-      await render();
+    $("#rgChunkSel", body).addEventListener("change", (e) => { selDoc = e.target.value; page = 1; selected.clear(); render(); });
+    const psSel = $("#rgChunkPageSize", body);
+    if (psSel) {
+      psSel.value = String(pageSize);
+      psSel.addEventListener("change", () => { pageSize = parseInt(psSel.value, 10) || 20; page = 1; render(); });
+    }
+    $("#rgChunkReload", body).addEventListener("click", () => render());
+    if (q.total > 0) body.appendChild(ragBuildPager(page, pages, q.total, (p) => { page = p; render(); }));
+
+    // 选择与批量删除（跨页保留选择）
+    const syncSel = () => {
+      const ids = chunks.map((c) => c.id);
+      $$("input.rg-chunk-check", body).forEach((c) => { c.checked = selected.has(c.dataset.id); });
+      const all = $("#rgChunkAll", body);
+      if (all) {
+        const onPage = ids.filter((id) => selected.has(id)).length;
+        all.checked = ids.length > 0 && onPage === ids.length;
+        all.indeterminate = onPage > 0 && onPage < ids.length;
+      }
+      const btn = $("#rgChunkBatchDel", body);
+      if (btn) btn.disabled = selected.size === 0;
+      const sc = $("#rgChunkSelCount", body);
+      if (sc) sc.textContent = selected.size ? `已选 ${selected.size} 项` : "";
     };
+    $$("input.rg-chunk-check", body).forEach((c) => c.addEventListener("change", () => {
+      if (c.checked) selected.add(c.dataset.id); else selected.delete(c.dataset.id);
+      syncSel();
+    }));
+    const allChk = $("#rgChunkAll", body);
+    if (allChk) allChk.addEventListener("change", () => {
+      chunks.forEach((c) => { if (allChk.checked) selected.add(c.id); else selected.delete(c.id); });
+      syncSel();
+    });
+    syncSel();
 
     $$("button[data-edit]", body).forEach((b) => b.addEventListener("click", () => {
       const c = chunks.find((x) => x.id === b.dataset.edit);
@@ -512,9 +617,25 @@ async function ragChunks(content, tid, body) {
       try {
         const r = await apiPost("/api/kb/chunk_delete", { thread_id: tid, chunk_key: b.dataset.del });
         if (!r.ok) throw new Error(r.error || "删除失败");
+        selected.delete(b.dataset.del);
         toast("已删除切片", "success"); await render();
       } catch (e) { toast("删除失败: " + e.message, "error"); }
     }));
+    $("#rgChunkBatchDel", body).addEventListener("click", async () => {
+      const ids = Array.from(selected);
+      if (!ids.length) return;
+      if (!confirm(`确认删除选中的 ${ids.length} 个切片？其内容将从知识库移除，不可恢复。`)) return;
+      const btn = $("#rgChunkBatchDel", body);
+      btn.disabled = true;
+      const res = await ragBatchDelete(ids, async (key) => {
+        const r = await apiPost("/api/kb/chunk_delete", { thread_id: tid, chunk_key: key });
+        if (!r.ok) throw new Error(r.error || "删除失败");
+        selected.delete(key);
+      }, (i, n) => { btn.textContent = `删除中 ${i}/${n}…`; });
+      btn.textContent = "🗑 批量删除";
+      toast(`批量删除完成：成功 ${res.ok}，失败 ${res.fail}${res.fail ? "（" + res.errs[0] + "）" : ""}`, res.fail ? "warning" : "success");
+      await render();
+    });
   };
   await render();
 }

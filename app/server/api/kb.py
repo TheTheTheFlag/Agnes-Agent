@@ -124,9 +124,9 @@ async def documents(thread_id: str = Query(...), page: int = Query(1), page_size
 
 
 @router.get("/chunks")
-async def chunks(thread_id: str = Query(...), doc_id: str = Query("")) -> dict:
+async def chunks(thread_id: str = Query(...), doc_id: str = Query(""), page: int = Query(1), page_size: int = Query(0)) -> dict:
     try:
-        return L.kb_chunks(thread_id, doc_id)
+        return L.kb_chunks(thread_id, doc_id, page=page, page_size=page_size)
     except Exception as e:
         return JSONResponse({"error": f"读取分块失败: {e}"}, status_code=500)
 
