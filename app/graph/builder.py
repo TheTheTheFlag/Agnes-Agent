@@ -362,14 +362,9 @@ def chatbot(state: State, config: RunnableConfig):
                         if v is not None:
                             mm.set_profile(k, v)
             elif name == "tavily_search":
-                # L6 被动注入：搜索结果自动进 LightRAG，触发实体/关系抽取
-                # （原 L5 语义缓存已移除，搜索知识由 LightRAG 图谱承担）
-                query = params.get("query") or params.get("q") or json.dumps(params, ensure_ascii=False)[:200]
-                try:
-                    from app.memory.graph_rag_tool import _try_ingest_lightrag
-                    _try_ingest_lightrag(thread_id, f"搜索：{query}\n结果：{str(result)[:2000]}")
-                except Exception:
-                    pass
+                # L6 被动注入：改为手动触发，不再随搜索结果自动录入
+                # 需要录入时由 LLM 调 ingest_graph_manual / ingest_kb_manual 工具显式触发
+                pass
         except Exception as e:
             logger.error(f"写入失败: {e}")
         # 审计：所有工具调用由下方 L1 事件（messages 表 kind='tool_call'）统一承载（取代原 L4 command_history 表）
