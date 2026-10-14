@@ -72,3 +72,32 @@ def record_graph(triplets_json: str, source: str = "user") -> str:
         return "[GraphRAG] 未定位到当前会话，请先开始一段对话再记录."
     from app.memory.graph_rag_tool import record_graph as _record
     return _record(thread_id, triplets_json, source=source)
+
+
+@tool
+def ingest_graph_manual(text: str, thread_id: str | None = None, max_chars: int = 12000) -> str:
+    """手动录入图数据库（需要手动触发，每次对话不自动录入）。
+
+    参数:
+        text: 要录入的文本（会做实体/关系抽取后写入图谱）
+        thread_id: 目标命名空间/会话；缺省为当前会话（归一化到 __global__）
+        max_chars: 文本截断上限，默认 12000
+    """
+    tid = thread_id or _resolve_thread()
+    if not tid:
+        return "[GraphRAG] 未定位到当前会话，请先开始一段对话再录入."
+    from app.memory.graph_rag_tool import ingest_graph_manual as _ingest
+    return _ingest(tid, text, max_chars=max_chars)
+
+
+@tool
+def ingest_kb_manual(text: str, thread_id: str = "__global__", max_chars: int = 12000) -> str:
+    """手动录入知识库（KB）到指定 thread_id/命名空间；默认写入 __global__ 知识库。
+
+    参数:
+        text: 要录入的文本
+        thread_id: 目标知识库/命名空间，默认 __global__
+        max_chars: 文本截断上限，默认 12000
+    """
+    from app.memory.graph_rag_tool import ingest_kb_manual as _ingest
+    return _ingest(thread_id or "__global__", text, max_chars=max_chars)
